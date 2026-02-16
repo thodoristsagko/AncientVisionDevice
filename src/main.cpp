@@ -859,7 +859,7 @@ void sendBLEData() {
     const int numPackets = (totalBytes + packetSize - 1) / packetSize;
 
     for (int pkt = 0; pkt < numPackets; pkt++) {
-      uint8_t header[2] = { (uint8_t)pkt, (uint8_t)FFT_SAMPLES };
+      uint8_t header[2] = { (uint8_t)pkt, (uint8_t)(FFT_SAMPLES >> 1) }; // 256->128, decoded on phone as *2
       int offset = pkt * packetSize;
       int remaining = totalBytes - offset;
       int sendLen = (remaining < packetSize) ? remaining : packetSize;
