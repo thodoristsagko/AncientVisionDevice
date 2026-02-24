@@ -1,0 +1,13 @@
+{
+  "model_version": "5.0",
+  "model_type": "autoencoder",
+  "input_dim": 11,
+  "thresholds": {
+    "low": 1.195327,
+    "high": 1.788009
+  },
+  "reconstruction_error_stats": {
+    "mean": 0.602644,
+    "std": 0.296341
+  }
+}
