@@ -1,0 +1,31 @@
+{
+  "model_version": "1.0.0",
+  "model_file": "precursor_classifier.tflite",
+  "feature_names": [
+    "rms",
+    "ppv",
+    "freq",
+    "crest",
+    "centroid",
+    "kurtosis",
+    "stalta",
+    "arias",
+    "cav",
+    "temp",
+    "psdSlope",
+    "ppv_trend",
+    "freq_trend",
+    "kurtosis_trend",
+    "stalta_trend",
+    "cusum_max",
+    "autoencoder_score"
+  ],
+  "class_names": [
+    "normal",
+    "soil_creep",
+    "crack_propagation",
+    "imminent_failure"
+  ],
+  "input_dim": 17,
+  "output_dim": 4
+}
