@@ -35,6 +35,7 @@
 #include <BLE2902.h>
 #include <MadgwickAHRS.h>
 #include <Wire.h>
+#include "esp_task_wdt.h"
 
 // Uncomment to enable debug serial output (costs ~2-3KB flash)
 // #define DEBUG
@@ -124,10 +125,7 @@ BiquadFilter lpFilterX = { 0.29289f, 0.58579f, 0.29289f, 0.0f, 0.17157f, 0,0,0,0
 BiquadFilter lpFilterY = { 0.29289f, 0.58579f, 0.29289f, 0.0f, 0.17157f, 0,0,0,0 };
 BiquadFilter lpFilterZ = { 0.29289f, 0.58579f, 0.29289f, 0.0f, 0.17157f, 0,0,0,0 };
 
-// Velocity drift HPF at 0.3 Hz, 200 Hz sample rate (per-axis)
-BiquadFilter velHpfX = { 0.99335f, -1.98671f, 0.99335f, -1.98667f, 0.98675f, 0,0,0,0 };
-BiquadFilter velHpfY = { 0.99335f, -1.98671f, 0.99335f, -1.98667f, 0.98675f, 0,0,0,0 };
-BiquadFilter velHpfZ = { 0.99335f, -1.98671f, 0.99335f, -1.98667f, 0.98675f, 0,0,0,0 };
+
 
 // ===================== GLOBALS =====================
 BLEServer* pServer = NULL;
@@ -150,6 +148,11 @@ float linAccX = 0, linAccY = 0, linAccZ = 0;
 float vibrationRMS = 0;              // RMS acceleration (g)
 float vibrationPeak = 0;             // Peak acceleration (g)
 float vibrationPPV = 0;              // Peak Component Particle Velocity (mm/s)
+float ppvNoiseFloor = 0;             // Calibrated noise baseline (mm/s)
+bool ppvCalibrated = false;          // True after noise calibration completes
+int calibrationWindows = 0;          // Number of windows used for calibration
+float calibrationSum = 0;            // Running sum for calibration average
+const int CALIBRATION_WINDOWS = 5;   // Windows to average for noise floor
 float crestFactor = 0;               // Peak / RMS ratio
 float vibrationMagnitude = 0;        // Legacy: raw magnitude for backward compat
 
@@ -157,7 +160,6 @@ float vibrationMagnitude = 0;        // Legacy: raw magnitude for backward compa
 float staValue = 0;
 float ltaValue = 0.001f;             // Initialize to small value to avoid div-by-zero
 float staLtaRatio = 0;
-bool staLtaTriggered = false;
 
 // IMU Temperature
 float imuTemp = 25.0f;               // Default to reference temperature
@@ -190,19 +192,23 @@ AlertState candidateAlert = SAFE;
 String candidateMessage = "";
 String candidateType = "none";
 
-// Sample collection - tri-axial buffers
+// Sample collection - double-buffered tri-axial buffers
+// One buffer collects samples while the other is processed/sent via BLE
 int sampleIndex = 0;
-float accelSamplesX[FFT_SAMPLES];
-float accelSamplesY[FFT_SAMPLES];
-float accelSamplesZ[FFT_SAMPLES];
-float velocitySamplesX[FFT_SAMPLES];
-float velocitySamplesY[FFT_SAMPLES];
-float velocitySamplesZ[FFT_SAMPLES];
+int activeBuffer = 0;       // Buffer currently being filled by collectSample()
+int processingBuffer = 0;   // Buffer being read by processVibrationWindow()/sendBLEData()
+float accelSamplesX[2][FFT_SAMPLES];
+float accelSamplesY[2][FFT_SAMPLES];
+float accelSamplesZ[2][FFT_SAMPLES];
+float velocitySamplesX[2][FFT_SAMPLES];
+float velocitySamplesY[2][FFT_SAMPLES];
+float velocitySamplesZ[2][FFT_SAMPLES];
 unsigned long lastSampleTime = 0;
 bool windowReady = false;
 
 // Filter warm-up
 int windowCount = 0;
+bool newWindowAvailable = false;  // True when a new window was processed since last BLE send
 
 // Timing
 unsigned long lastBLESend = 0;
@@ -305,15 +311,16 @@ void setup() {
   // Reset all filters
   hpFilterX.reset(); hpFilterY.reset(); hpFilterZ.reset();
   lpFilterX.reset(); lpFilterY.reset(); lpFilterZ.reset();
-  velHpfX.reset(); velHpfY.reset(); velHpfZ.reset();
 
-  // Initialize sample buffers
+  // Initialize sample buffers (both banks)
   memset(accelSamplesX, 0, sizeof(accelSamplesX));
   memset(accelSamplesY, 0, sizeof(accelSamplesY));
   memset(accelSamplesZ, 0, sizeof(accelSamplesZ));
   memset(velocitySamplesX, 0, sizeof(velocitySamplesX));
   memset(velocitySamplesY, 0, sizeof(velocitySamplesY));
   memset(velocitySamplesZ, 0, sizeof(velocitySamplesZ));
+  activeBuffer = 0;
+  processingBuffer = 0;
   sampleIndex = 0;
   windowCount = 0;
 
@@ -326,6 +333,10 @@ void setup() {
 
   // Initialize BLE
   setupBLE();
+
+  // Initialize watchdog timer (5 second timeout, panic on expiry)
+  esp_task_wdt_init(5, true);
+  esp_task_wdt_add(NULL); // Add current task (loopTask)
 
   delay(1000);
   M5.Lcd.fillScreen(BLACK);
@@ -342,7 +353,8 @@ void setupBLE() {
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
 
-  BLEService *pService = pServer->createService(SERVICE_UUID);
+  // 5 characteristics × 3 handles each (decl+value+CCCD) + 1 service = 16 minimum
+  BLEService *pService = pServer->createService(BLEUUID(SERVICE_UUID), 20);
 
   pIMUChar = pService->createCharacteristic(
     CHAR_IMU_UUID,
@@ -393,6 +405,7 @@ void setupBLE() {
 
 // ===================== MAIN LOOP =====================
 void loop() {
+  esp_task_wdt_reset();
   M5.update();
 
   unsigned long currentMicros = micros();
@@ -407,6 +420,7 @@ void loop() {
   // ---- Process window when ready ----
   if (windowReady) {
     windowReady = false;
+    newWindowAvailable = true;
     processVibrationWindow();
     classifyHazard();
   }
@@ -443,15 +457,20 @@ void loop() {
     updateDisplay();
   }
 
-  // ---- Handle BLE connection changes ----
+  // ---- Handle BLE connection changes (non-blocking) ----
+  static unsigned long disconnectTime = 0;
   if (!deviceConnected && oldDeviceConnected) {
-    delay(500);
+    disconnectTime = currentMillis;
+    oldDeviceConnected = deviceConnected;
+  }
+  if (!deviceConnected && disconnectTime > 0 && (currentMillis - disconnectTime >= 500)) {
+    disconnectTime = 0;
     pServer->startAdvertising();
     DBG_PRINTLN("Restart advertising");
-    oldDeviceConnected = deviceConnected;
   }
   if (deviceConnected && !oldDeviceConnected) {
     oldDeviceConnected = deviceConnected;
+    disconnectTime = 0;
   }
 
   // Button A: Hold 3s = toggle low power, short press = test alert
@@ -507,31 +526,29 @@ void collectSample() {
   float filtY = lpFilterY.process(hpFilterY.process(linAccY));
   float filtZ = lpFilterZ.process(hpFilterZ.process(linAccZ));
 
-  // Store filtered samples per axis
-  accelSamplesX[sampleIndex] = filtX;
-  accelSamplesY[sampleIndex] = filtY;
-  accelSamplesZ[sampleIndex] = filtZ;
+  // Store filtered samples per axis (into active buffer)
+  accelSamplesX[activeBuffer][sampleIndex] = filtX;
+  accelSamplesY[activeBuffer][sampleIndex] = filtY;
+  accelSamplesZ[activeBuffer][sampleIndex] = filtZ;
 
   // Integrate acceleration to velocity per axis (trapezoidal rule)
   // Convert g to mm/s^2: 1g = 9810 mm/s^2
   float dt = 1.0f / SAMPLE_RATE;
   if (sampleIndex > 0) {
     int prev = sampleIndex - 1;
-    velocitySamplesX[sampleIndex] = velocitySamplesX[prev] +
-      0.5f * (accelSamplesX[prev] * 9810.0f + filtX * 9810.0f) * dt;
-    velocitySamplesY[sampleIndex] = velocitySamplesY[prev] +
-      0.5f * (accelSamplesY[prev] * 9810.0f + filtY * 9810.0f) * dt;
-    velocitySamplesZ[sampleIndex] = velocitySamplesZ[prev] +
-      0.5f * (accelSamplesZ[prev] * 9810.0f + filtZ * 9810.0f) * dt;
+    velocitySamplesX[activeBuffer][sampleIndex] = velocitySamplesX[activeBuffer][prev] +
+      0.5f * (accelSamplesX[activeBuffer][prev] * 9810.0f + filtX * 9810.0f) * dt;
+    velocitySamplesY[activeBuffer][sampleIndex] = velocitySamplesY[activeBuffer][prev] +
+      0.5f * (accelSamplesY[activeBuffer][prev] * 9810.0f + filtY * 9810.0f) * dt;
+    velocitySamplesZ[activeBuffer][sampleIndex] = velocitySamplesZ[activeBuffer][prev] +
+      0.5f * (accelSamplesZ[activeBuffer][prev] * 9810.0f + filtZ * 9810.0f) * dt;
 
-    // Apply proper HPF to remove velocity drift (0.3 Hz Butterworth)
-    velocitySamplesX[sampleIndex] = velHpfX.process(velocitySamplesX[sampleIndex]);
-    velocitySamplesY[sampleIndex] = velHpfY.process(velocitySamplesY[sampleIndex]);
-    velocitySamplesZ[sampleIndex] = velHpfZ.process(velocitySamplesZ[sampleIndex]);
+    // No velocity HPF needed: velocity integrates from 0 each window,
+    // and noise floor subtraction handles MEMS baseline in processVibrationWindow()
   } else {
-    velocitySamplesX[0] = 0;
-    velocitySamplesY[0] = 0;
-    velocitySamplesZ[0] = 0;
+    velocitySamplesX[activeBuffer][0] = 0;
+    velocitySamplesY[activeBuffer][0] = 0;
+    velocitySamplesZ[activeBuffer][0] = 0;
   }
 
   // Recursive STA/LTA computation (no arrays, saves memory)
@@ -546,19 +563,21 @@ void collectSample() {
 
   sampleIndex++;
 
-  // When buffer is full, trigger processing
+  // When buffer is full, swap buffers and trigger processing
   if (sampleIndex >= FFT_SAMPLES) {
     sampleIndex = 0;
+    processingBuffer = activeBuffer;
+    activeBuffer = 1 - activeBuffer; // Swap to other buffer
     windowReady = true;
   }
 }
 
 // ===================== VIBRATION ANALYSIS =====================
 void processVibrationWindow() {
-  // Filter warm-up: discard first 2 windows
+  // Filter warm-up: discard first window (1.28s)
   windowCount++;
-  if (windowCount <= 2) {
-    DBG_PRINTF("DSP: Discarding warm-up window %d/2\n", windowCount);
+  if (windowCount <= 1) {
+    DBG_PRINTF("DSP: Discarding warm-up window %d/1\n", windowCount);
     return;
   }
 
@@ -568,18 +587,18 @@ void processVibrationWindow() {
   float peakVelX = 0, peakVelY = 0, peakVelZ = 0;
 
   for (int i = 0; i < FFT_SAMPLES; i++) {
-    // Combined magnitude for RMS
-    float magSq = accelSamplesX[i] * accelSamplesX[i] +
-                  accelSamplesY[i] * accelSamplesY[i] +
-                  accelSamplesZ[i] * accelSamplesZ[i];
+    // Combined magnitude for RMS (read from processing buffer)
+    float magSq = accelSamplesX[processingBuffer][i] * accelSamplesX[processingBuffer][i] +
+                  accelSamplesY[processingBuffer][i] * accelSamplesY[processingBuffer][i] +
+                  accelSamplesZ[processingBuffer][i] * accelSamplesZ[processingBuffer][i];
     sumSq += magSq;
     float magVal = sqrt(magSq);
     if (magVal > peak) peak = magVal;
 
     // Per-axis peak velocity for PCPV
-    float absVelX = fabs(velocitySamplesX[i]);
-    float absVelY = fabs(velocitySamplesY[i]);
-    float absVelZ = fabs(velocitySamplesZ[i]);
+    float absVelX = fabs(velocitySamplesX[processingBuffer][i]);
+    float absVelY = fabs(velocitySamplesY[processingBuffer][i]);
+    float absVelZ = fabs(velocitySamplesZ[processingBuffer][i]);
     if (absVelX > peakVelX) peakVelX = absVelX;
     if (absVelY > peakVelY) peakVelY = absVelY;
     if (absVelZ > peakVelZ) peakVelZ = absVelZ;
@@ -588,16 +607,45 @@ void processVibrationWindow() {
   vibrationRMS = sqrt(sumSq / FFT_SAMPLES);
   vibrationPeak = peak;
 
-  // PCPV: max of per-axis peak velocities (DIN 4150-3 method)
-  vibrationPPV = max(peakVelX, max(peakVelY, peakVelZ));
+  // DIN 4150-3 PCPV: max of per-axis peak velocity (mm/s)
+  // Velocity integrates from 0 each window, so no cross-window drift
+  float rawPPV = max(peakVelX, max(peakVelY, peakVelZ));
+
+  // ---- Noise floor calibration (first N windows after warm-up) ----
+  if (!ppvCalibrated) {
+    calibrationSum += rawPPV;
+    calibrationWindows++;
+    if (calibrationWindows >= CALIBRATION_WINDOWS) {
+      ppvNoiseFloor = (calibrationSum / calibrationWindows) * 1.2f; // 20% margin
+      ppvCalibrated = true;
+      DBG_PRINTF("PPV CALIBRATED: noise floor = %.1f mm/s\n", ppvNoiseFloor);
+    } else {
+      DBG_PRINTF("PPV CALIBRATING: window %d/%d raw=%.1f\n", calibrationWindows, CALIBRATION_WINDOWS, rawPPV);
+      vibrationPPV = 0;
+      return;  // Don't classify during calibration
+    }
+  }
+
+  // Hourly noise floor recalibration: EMA update when vibration is safely low
+  static unsigned long lastNoiseRecal = 0;
+  unsigned long nowMs = millis();
+  if (ppvCalibrated && rawPPV < PPV_SAFE_MAX && (nowMs - lastNoiseRecal > 3600000UL)) {
+    // Exponential moving average: slowly adapt noise floor
+    ppvNoiseFloor = ppvNoiseFloor * 0.9f + rawPPV * 1.2f * 0.1f;
+    lastNoiseRecal = nowMs;
+    DBG_PRINTF("PPV noise floor recalibrated: %.2f mm/s\n", ppvNoiseFloor);
+  }
+
+  // Subtract noise floor, clamp to zero
+  vibrationPPV = max(0.0f, rawPPV - ppvNoiseFloor);
 
   // ---- Crest Factor ----
   crestFactor = (vibrationRMS > 0.0001f) ? vibrationPeak / vibrationRMS : 1.0f;
 
-  // In low power mode: skip if vibration is safely low
+  // In low power mode: skip heavy logging if vibration is safely low
+  // but do NOT return — let execution continue to classifyHazard() for moisture checks
   if (lowPowerMode && vibrationPPV <= PPV_SAFE_MAX) {
     DBG_PRINTF("LP: PPV=%.1fmm/s (safe) STA/LTA=%.2f\n", vibrationPPV, staLtaRatio);
-    return;
   }
 
   DBG_PRINTF("DSP v5.0: RMS=%.4fg PPV=%.1fmm/s Crest=%.1f STA/LTA=%.2f\n",
@@ -607,7 +655,7 @@ void processVibrationWindow() {
 // ===================== HAZARD CLASSIFICATION (Simplified + Hysteresis) =====================
 void classifyHazard() {
   // Skip classification during warm-up
-  if (windowCount <= 2) return;
+  if (windowCount <= 1) return;
 
   // ---- Evaluate rules to get candidate alert ----
   AlertState newAlert = SAFE;
@@ -696,15 +744,24 @@ void readBattery() {
   // Read battery voltage from M5StickC Plus 2 power management
   batteryVoltage = M5.Power.getBatteryVoltage() / 1000.0;  // Convert mV to V
 
-  // Calculate percentage based on LiPo discharge curve
-  if (batteryVoltage >= 4.1) {
-    batteryPercent = 100;
-  } else if (batteryVoltage >= 3.7) {
-    batteryPercent = (int)((batteryVoltage - 3.7) / 0.4 * 50.0 + 50.0);
-  } else if (batteryVoltage >= 3.0) {
-    batteryPercent = (int)((batteryVoltage - 3.0) / 0.7 * 50.0);
-  } else {
+  // LiPo discharge curve lookup table (voltage -> percent)
+  // Based on typical single-cell LiPo discharge at ~0.2C
+  static const float voltTable[] = { 3.00, 3.30, 3.50, 3.60, 3.70, 3.75, 3.80, 3.90, 4.00, 4.10, 4.20 };
+  static const int   pctTable[]  = {    0,    5,   10,   20,   30,   45,   55,   70,   85,   95,  100 };
+  static const int tableLen = sizeof(voltTable) / sizeof(voltTable[0]);
+
+  if (batteryVoltage <= voltTable[0]) {
     batteryPercent = 0;
+  } else if (batteryVoltage >= voltTable[tableLen - 1]) {
+    batteryPercent = 100;
+  } else {
+    for (int i = 1; i < tableLen; i++) {
+      if (batteryVoltage <= voltTable[i]) {
+        float t = (batteryVoltage - voltTable[i-1]) / (voltTable[i] - voltTable[i-1]);
+        batteryPercent = pctTable[i-1] + (int)(t * (pctTable[i] - pctTable[i-1]));
+        break;
+      }
+    }
   }
 
   batteryPercent = constrain(batteryPercent, 0, 100);
@@ -739,7 +796,11 @@ void updateDisplay() {
   // Row 2: Large safety status word
   M5.Lcd.setTextSize(3);
   M5.Lcd.setCursor(5, 24);
-  if (currentAlert == CRITICAL) {
+  if (!ppvCalibrated) {
+    M5.Lcd.setTextColor(YELLOW, bgColor);
+    M5.Lcd.print("CALIBRATING");
+    M5.Lcd.setTextColor(WHITE, bgColor);
+  } else if (currentAlert == CRITICAL) {
     M5.Lcd.setTextColor(YELLOW, bgColor);
     M5.Lcd.print("DANGER!");
   } else if (currentAlert == WARNING) {
@@ -807,55 +868,72 @@ void sendBLEData() {
   int imuLen = snprintf(imuData, sizeof(imuData),
     "{\"ppv\":%.1f,\"stalta\":%.2f,\"rms\":%.4f,\"peak\":%.4f,\"crest\":%.1f,\"temp\":%.1f,\"mag\":%.4f}",
     vibrationPPV, staLtaRatio, vibrationRMS, vibrationPeak, crestFactor, imuTemp, vibrationMagnitude);
+  // Use imuLen for setValue length (not strlen) to avoid re-scanning
   if (imuLen >= (int)sizeof(imuData)) {
-    DBG_PRINTF("BLE WARNING: IMU JSON truncated (%d >= %d)\n", imuLen, (int)sizeof(imuData));
+    // Truncated — skip sending corrupt data
+    DBG_PRINTF("BLE: IMU JSON truncated, skipping send\n");
+  } else {
+    pIMUChar->setValue((uint8_t*)imuData, imuLen);
+    pIMUChar->notify();
   }
-  pIMUChar->setValue((uint8_t*)imuData, strlen(imuData));
-  pIMUChar->notify();
-  delay(20);
+  esp_task_wdt_reset();
+  delay(5);
 
   // Send moisture data
   char moistureData[50];
-  snprintf(moistureData, sizeof(moistureData),
+  int moistLen = snprintf(moistureData, sizeof(moistureData),
     "{\"percent\":%d,\"raw\":%d}",
     moisturePercent, rawMoisture);
-  pMoistureChar->setValue((uint8_t*)moistureData, strlen(moistureData));
-  pMoistureChar->notify();
-  delay(20);
+  if (moistLen < (int)sizeof(moistureData)) {
+    pMoistureChar->setValue((uint8_t*)moistureData, moistLen);
+    pMoistureChar->notify();
+  }
+  esp_task_wdt_reset();
+  delay(5);
 
   // Send alert data with hazard type
   char alertData[150];
   const char* alertLevel = currentAlert == CRITICAL ? "critical" :
                           (currentAlert == WARNING ? "warning" : "safe");
-  snprintf(alertData, sizeof(alertData),
+  int alertLen = snprintf(alertData, sizeof(alertData),
     "{\"level\":\"%s\",\"message\":\"%s\",\"type\":\"%s\"}",
     alertLevel, alertMessage.c_str(), hazardType.c_str());
-  pAlertChar->setValue((uint8_t*)alertData, strlen(alertData));
-  pAlertChar->notify();
-  delay(20);
+  if (alertLen < (int)sizeof(alertData)) {
+    pAlertChar->setValue((uint8_t*)alertData, alertLen);
+    pAlertChar->notify();
+  }
+  esp_task_wdt_reset();
+  delay(5);
 
   // Send battery data
   char batteryData[80];
-  snprintf(batteryData, sizeof(batteryData),
+  int batLen = snprintf(batteryData, sizeof(batteryData),
     "{\"voltage\":%.2f,\"percent\":%d,\"charging\":%s}",
     batteryVoltage, batteryPercent, batteryCharging ? "true" : "false");
-  pBatteryChar->setValue((uint8_t*)batteryData, strlen(batteryData));
-  pBatteryChar->notify();
-  delay(20);
+  if (batLen < (int)sizeof(batteryData)) {
+    pBatteryChar->setValue((uint8_t*)batteryData, batLen);
+    pBatteryChar->notify();
+  }
+  esp_task_wdt_reset();
+  delay(5);
 
-  // Send raw acceleration buffer as binary (for phone-side DSP)
-  // Format: [seqNum(u8), sampleCount(u8), data...]
-  // Data: 256 * 3 axes * int16 = 1536 bytes, split into 3 packets of 512 bytes
+  // Send raw acceleration buffer as binary ONLY when a new window was processed
+  // This avoids blocking delay() calls (8×40ms=320ms) that starve the 200Hz sampling loop
+  if (!newWindowAvailable) return;
+  newWindowAvailable = false;
+
+  esp_task_wdt_reset();
+  delay(20); // Gap after JSON notifications
   {
     static int16_t rawAccelBuf[FFT_SAMPLES * 3]; // pre-pack buffer
     for (int i = 0; i < FFT_SAMPLES; i++) {
-      rawAccelBuf[i * 3 + 0] = (int16_t)(accelSamplesX[i] * 1000.0f);
-      rawAccelBuf[i * 3 + 1] = (int16_t)(accelSamplesY[i] * 1000.0f);
-      rawAccelBuf[i * 3 + 2] = (int16_t)(accelSamplesZ[i] * 1000.0f);
+      rawAccelBuf[i * 3 + 0] = (int16_t)(accelSamplesX[processingBuffer][i] * 1000.0f);
+      rawAccelBuf[i * 3 + 1] = (int16_t)(accelSamplesY[processingBuffer][i] * 1000.0f);
+      rawAccelBuf[i * 3 + 2] = (int16_t)(accelSamplesZ[processingBuffer][i] * 1000.0f);
     }
 
     const int totalBytes = FFT_SAMPLES * 3 * 2; // 1536
-    const int packetSize = 512;
+    const int packetSize = 200;
     const int numPackets = (totalBytes + packetSize - 1) / packetSize;
 
     for (int pkt = 0; pkt < numPackets; pkt++) {
@@ -864,14 +942,15 @@ void sendBLEData() {
       int remaining = totalBytes - offset;
       int sendLen = (remaining < packetSize) ? remaining : packetSize;
 
-      uint8_t packet[514]; // 2 header + up to 512 data
+      uint8_t packet[202]; // 2 header + up to 200 data
       packet[0] = header[0];
       packet[1] = header[1];
       memcpy(&packet[2], ((uint8_t*)rawAccelBuf) + offset, sendLen);
 
       pFFTChar->setValue(packet, sendLen + 2);
       pFFTChar->notify();
-      delay(20);
+      esp_task_wdt_reset();
+      delay(10);
     }
   }
 }

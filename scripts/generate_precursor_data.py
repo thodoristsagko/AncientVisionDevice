@@ -219,6 +219,22 @@ prob = interpreter.get_tensor(out[0]["index"])[0]
 print(f"TFLite verification — sample 0 probs: {prob}, predicted: {CLASS_NAMES[np.argmax(prob)]}")
 
 # Config JSON
+# Export scaler (mean/std from training data) for runtime normalization
+scaler_mean = X_train.mean(axis=0).tolist()
+scaler_std = X_train.std(axis=0).tolist()
+# Avoid division by zero
+scaler_std = [s if s > 1e-10 else 1.0 for s in scaler_std]
+
+scaler = {
+    "mean": scaler_mean,
+    "scale": scaler_std,
+    "feature_names": FEATURE_NAMES,
+}
+scaler_path = os.path.join(ASSETS_DIR, "precursor_classifier_scaler.json")
+with open(scaler_path, "w") as f:
+    json.dump(scaler, f, indent=2)
+print(f"Scaler: {scaler_path}")
+
 config = {
     "model_version": "1.0.0",
     "model_file": "precursor_classifier.tflite",
@@ -238,7 +254,7 @@ print(f"Config: {config_path}")
 
 FLUTTER_ML = r"C:\Users\thodo\Desktop\FLL_Thodoris\AncientVisionFLL\AncientVision\assets\ml"
 if os.path.isdir(FLUTTER_ML):
-    for fname in ["precursor_classifier.tflite", "precursor_classifier_config.json"]:
+    for fname in ["precursor_classifier.tflite", "precursor_classifier_config.json", "precursor_classifier_scaler.json"]:
         src = os.path.join(ASSETS_DIR, fname)
         dst = os.path.join(FLUTTER_ML, fname)
         shutil.copy2(src, dst)
