@@ -231,6 +231,58 @@ def create_app():
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    @app.route("/quality")
+    def quality():
+        """Return data quality stats: missing fields, out-of-range values, duplicate rate."""
+        try:
+            csvs = sorted(field_dir.glob("*.csv"))
+            total = 0
+            missing_fields = 0
+            out_of_range = 0
+            duplicates = 0
+            seen = set()
+
+            QUALITY_REQUIRED_FIELDS = ["device_id", "timestamp", "ppv", "rms", "freq", "kurtosis"]
+
+            for csv_path in csvs:
+                try:
+                    with open(csv_path, newline="") as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            total += 1
+                            # Check required fields
+                            for field in QUALITY_REQUIRED_FIELDS:
+                                if not row.get(field):
+                                    missing_fields += 1
+                                    break
+                            # Check ranges
+                            try:
+                                ppv = float(row.get("ppv", 0) or 0)
+                                if ppv < 0 or ppv > 100:
+                                    out_of_range += 1
+                            except (ValueError, TypeError):
+                                out_of_range += 1
+                            # Check duplicates by timestamp+device
+                            key = (row.get("timestamp", ""), row.get("device_id", ""))
+                            if key in seen:
+                                duplicates += 1
+                            seen.add(key)
+                except Exception:
+                    pass
+
+            quality_score = 1.0 if total == 0 else max(0.0, 1.0 - (missing_fields + out_of_range + duplicates) / (total * 3))
+
+            return jsonify({
+                "total_samples": total,
+                "missing_required_fields": missing_fields,
+                "out_of_range_values": out_of_range,
+                "duplicate_records": duplicates,
+                "quality_score": round(quality_score, 3),
+                "status": "good" if quality_score > 0.9 else "degraded" if quality_score > 0.7 else "poor"
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
     @app.route("/devices")
     def devices():
         """Return sorted list of unique device_ids that have sent data."""

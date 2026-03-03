@@ -222,6 +222,22 @@ def test_rate_limiting(client):
 
 
 # ---------------------------------------------------------------------------
+# P106: /quality endpoint
+# ---------------------------------------------------------------------------
+
+def test_quality_returns_json(client):
+    c, _ = client
+    _post_sample(c)
+    resp = c.get("/quality")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "total_samples" in data
+    assert "quality_score" in data
+    assert 0.0 <= data["quality_score"] <= 1.0
+    assert data["status"] in ("good", "degraded", "poor")
+
+
+# ---------------------------------------------------------------------------
 # P88: Concurrent CSV write stress test
 # ---------------------------------------------------------------------------
 
