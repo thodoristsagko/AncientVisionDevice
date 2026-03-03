@@ -54,6 +54,12 @@ class VibrationAnomalyService {
   String _modelType = 'autoencoder'; // 'autoencoder' or 'vae'
   double _beta = 1.0; // KL divergence weight for VAE scoring
 
+  // P70: Model fingerprint (sum of first 64 bytes of .tflite file)
+  int _modelFingerprint = 0;
+
+  /// P70: Hex fingerprint of the loaded .tflite model bytes.
+  String get modelFingerprint => _modelFingerprint.toRadixString(16);
+
   // Adaptive statistical anomaly detection (Tier 1.5 — between rule-based and ML)
   final AdaptiveAnomalyService _adaptiveService = AdaptiveAnomalyService();
 
@@ -110,6 +116,21 @@ class VibrationAnomalyService {
           await Interpreter.fromAsset('ml/vibration_anomaly.tflite');
       debugPrint('VibrationAnomalyService: TFLite model loaded');
 
+      // P70: Compute model fingerprint from first 64 bytes of file
+      try {
+        final modelBytes = await rootBundle.load('assets/ml/vibration_anomaly.tflite');
+        int fingerprint = 0;
+        final bytes = modelBytes.buffer.asUint8List();
+        final len = bytes.length < 64 ? bytes.length : 64;
+        for (int i = 0; i < len; i++) {
+          fingerprint += bytes[i];
+        }
+        _modelFingerprint = fingerprint;
+        debugPrint('VibrationAnomalyService: Model fingerprint = ${modelFingerprint}');
+      } catch (e) {
+        debugPrint('VibrationAnomalyService: Fingerprint computation failed (non-fatal): $e');
+      }
+
       // Load scaler parameters
       final scalerJson =
           await rootBundle.loadString('assets/ml/vibration_scaler.json');
@@ -151,6 +172,17 @@ class VibrationAnomalyService {
       await _precursorService.initialize();
 
       _isInitialized = true;
+
+      // P49: Model warm-up — run one dummy inference to pre-warm the TFLite interpreter
+      try {
+        final dummyInput = [List<double>.filled(_inputDim, 0.0)];
+        final dummyOutput = [List<double>.filled(_inputDim, 0.0)];
+        _interpreter!.run(dummyInput, dummyOutput);
+        debugPrint('VibrationAnomalyService: Model warm-up complete');
+      } catch (e) {
+        debugPrint('VibrationAnomalyService: Warm-up failed (non-fatal): $e');
+      }
+
       return true;
     } catch (e) {
       debugPrint('VibrationAnomalyService: ML model not available — using rule-based detection');
