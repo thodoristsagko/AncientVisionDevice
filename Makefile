@@ -89,7 +89,18 @@ dev-firmware:
 
 test:
 	@echo "==> Running all pytest suites..."
-	python -m pytest docker/collect/test_app.py docker/watcher/test_watch.py scripts/test_run_pipeline.py scripts/test_simulate.py -v
+	python -m pytest \
+		docker/collect/test_app.py \
+		docker/watcher/test_watch.py \
+		scripts/test_run_pipeline.py \
+		scripts/test_simulate.py \
+		scripts/test_integration.py \
+		scripts/test_field_report.py \
+		scripts/test_reset_pipeline.py \
+		scripts/test_evaluate_models.py \
+		scripts/test_visualize.py \
+		scripts/test_training_quality.py \
+		-v
 
 # ---------------------------------------------------------------------------
 # Simulation

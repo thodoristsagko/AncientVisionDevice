@@ -100,8 +100,8 @@
 - [x] P88 Add concurrent write stress test
 - [ ] P89 Add test for /stats, /export, /devices endpoints
 - [ ] P90 Add test that model probabilities sum to ~1.0
-- [ ] P91 Add scripts/field_report.py — summary from collected CSVs
-- [ ] P92 Add scripts/reset_pipeline.py — safely reset trigger + baseline
+- [x] P91 Add scripts/field_report.py — summary from collected CSVs
+- [x] P92 Add scripts/reset_pipeline.py — safely reset trigger + baseline
 
 ## Documentation
 - [ ] P96 Add ASCII architecture diagram to README
