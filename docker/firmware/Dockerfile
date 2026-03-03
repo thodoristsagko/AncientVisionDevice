@@ -1,14 +1,17 @@
-FROM ghcr.io/platformio/platformio-core:latest
+FROM ghcr.io/platformio/platformio-core:6.1.16
 
 WORKDIR /workspace
 
-# Copy firmware project files only (not app/ or docs/)
-# lib/ and include/ contain only PlatformIO README placeholders — no source files to copy
 COPY platformio.ini ./
-COPY src/ ./src/
 
-# Pre-install platform + board packages so builds are fast
+# Pre-install platform + board packages so pio build layer is fast.
+# Must run before COPY src/ so that source changes do not invalidate this cache layer.
 RUN pio pkg install
 
-# Default command: build firmware
+# Copy source after dependency installation to preserve Docker layer cache.
+# lib/ and include/ contain only PlatformIO README placeholders — no source files to copy.
+COPY src/ ./src/
+
+VOLUME ["/workspace/.pio"]
+
 CMD ["pio", "run"]
