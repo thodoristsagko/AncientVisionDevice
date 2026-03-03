@@ -1,0 +1,40 @@
+name: Docker Security Scan
+
+on:
+  schedule:
+    - cron: '0 2 * * 1'  # Every Monday 2am UTC
+  workflow_dispatch:
+  push:
+    paths:
+      - 'docker/**/Dockerfile'
+      - 'docker/**/requirements.txt'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan collector Dockerfile
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: 'docker/collect'
+          exit-code: '0'  # warn only, don't fail
+          severity: 'CRITICAL,HIGH'
+          format: 'table'
+      - name: Scan watcher Dockerfile
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: 'docker/watcher'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+          format: 'table'
+      - name: Scan ML Dockerfile
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: 'docker/ml'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+          format: 'table'
