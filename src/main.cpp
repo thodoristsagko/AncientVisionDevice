@@ -127,6 +127,20 @@ BiquadFilter lpFilterZ = { 0.29289f, 0.58579f, 0.29289f, 0.0f, 0.17157f, 0,0,0,0
 
 
 
+// ===================== FIRMWARE VERSION =====================
+#define FW_VERSION "5.1.0"
+
+// ===================== RTC PERSISTENT STATE =====================
+RTC_DATA_ATTR uint32_t g_bootCount = 0;  // Survives deep sleep, incremented in setup()
+
+// ===================== SESSION COUNTERS =====================
+uint32_t g_seq = 0;            // BLE packet sequence number, incremented each send
+uint32_t g_sessionEvts = 0;    // STA/LTA event count for this session (resets on power cycle)
+
+// ===================== EVENT TIMING =====================
+uint32_t g_evtStartMs = 0;     // millis() when current STA/LTA event began; 0 if no event active
+bool g_evtActive = false;      // True while an STA/LTA event is ongoing
+
 // ===================== GLOBALS =====================
 BLEServer* pServer = NULL;
 BLECharacteristic* pIMUChar = NULL;
@@ -273,6 +287,8 @@ class MyServerCallbacks: public BLEServerCallbacks {
 
 // ===================== SETUP =====================
 void setup() {
+  g_bootCount++;  // P75: persist across deep-sleep reboots via RTC_DATA_ATTR
+
   auto cfg = M5.config();
   M5.begin(cfg);
 
@@ -556,7 +572,7 @@ void collectSample() {
   float sampleEnergy = mag;  // Already squared magnitude
   staValue = STA_ALPHA * sampleEnergy + (1.0f - STA_ALPHA) * staValue;
   ltaValue = LTA_ALPHA * sampleEnergy + (1.0f - LTA_ALPHA) * ltaValue;
-  staLtaRatio = (ltaValue > 1e-10f) ? staValue / ltaValue : 1.0f;
+  staLtaRatio = (ltaValue > 1e-10f) ? staValue / ltaValue : 1.0f;  // P83: guard prevents zero-division
 
   // Legacy backward compat: magnitude
   vibrationMagnitude = sqrt(mag);
@@ -696,15 +712,22 @@ void classifyHazard() {
       alertPersistence = 0;
       alertCooldown = 0;
 
+      // P74 + P76: track event start and count
+      if (!g_evtActive) {
+        g_evtActive = true;
+        g_evtStartMs = millis();
+        g_sessionEvts++;  // Count distinct events
+      }
+
       if (currentAlert == CRITICAL) {
         M5.Speaker.tone(1000, 500);
       } else if (currentAlert == WARNING) {
         M5.Speaker.tone(500, 200);
       }
 
-      DBG_PRINTF("ALERT CONFIRMED: %s [%s] type=%s\n",
+      DBG_PRINTF("ALERT CONFIRMED: %s [%s] type=%s evts=%u\n",
         currentAlert == CRITICAL ? "CRITICAL" : "WARNING",
-        alertMessage.c_str(), hazardType.c_str());
+        alertMessage.c_str(), hazardType.c_str(), g_sessionEvts);
     }
   } else if (newAlert < currentAlert) {
     // De-escalation candidate
@@ -716,6 +739,11 @@ void classifyHazard() {
       hazardType = newType;
       alertCooldown = 0;
       alertPersistence = 0;
+
+      // P74: close the event timer when returning to SAFE
+      if (newAlert == SAFE) {
+        g_evtActive = false;
+      }
 
       DBG_PRINTF("ALERT CLEARED -> %s\n",
         currentAlert == SAFE ? "SAFE" : "WARNING");
@@ -863,11 +891,18 @@ void updateDisplay() {
 void sendBLEData() {
   if (!deviceConnected) return;
 
+  // P73: increment sequence counter on every BLE send
+  g_seq++;
+
   // Send simplified IMU JSON (only firmware-computed features)
-  char imuData[192];
+  // Buffer sized for: existing fields + fw(5) + seq(10) + evtMs(10) + boots(10) + evts(10) + overhead
+  char imuData[256];
+  uint32_t evtMs = g_evtActive ? (uint32_t)(millis() - g_evtStartMs) : 0u;
   int imuLen = snprintf(imuData, sizeof(imuData),
-    "{\"ppv\":%.1f,\"stalta\":%.2f,\"rms\":%.4f,\"peak\":%.4f,\"crest\":%.1f,\"temp\":%.1f,\"mag\":%.4f}",
-    vibrationPPV, staLtaRatio, vibrationRMS, vibrationPeak, crestFactor, imuTemp, vibrationMagnitude);
+    "{\"ppv\":%.1f,\"stalta\":%.2f,\"rms\":%.4f,\"peak\":%.4f,\"crest\":%.1f,\"temp\":%.1f,\"mag\":%.4f"
+    ",\"fw\":\"" FW_VERSION "\",\"seq\":%lu,\"evtMs\":%lu,\"boots\":%lu,\"evts\":%lu}",
+    vibrationPPV, staLtaRatio, vibrationRMS, vibrationPeak, crestFactor, imuTemp, vibrationMagnitude,
+    (unsigned long)g_seq, (unsigned long)evtMs, (unsigned long)g_bootCount, (unsigned long)g_sessionEvts);
   // Use imuLen for setValue length (not strlen) to avoid re-scanning
   if (imuLen >= (int)sizeof(imuData)) {
     // Truncated — skip sending corrupt data
