@@ -3,7 +3,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build firmware flutter ml collect train dev-ml dev-flutter dev-firmware \
+.PHONY: help build firmware flutter ml collect train monitor dev-ml dev-flutter dev-firmware \
         test simulate backup logs clean
 
 # ---------------------------------------------------------------------------
@@ -21,6 +21,7 @@ help:
 	@echo ""
 	@echo "  collect        Start data-collector service (docker-compose.collect.yml)"
 	@echo "  train          Start file-watcher + trainer (docker-compose.train.yml)"
+	@echo "  monitor        Start Prometheus + Grafana monitoring stack"
 	@echo ""
 	@echo "  dev-ml         Interactive bash shell in ml container"
 	@echo "  dev-flutter    Interactive bash shell in flutter container"
@@ -66,6 +67,12 @@ collect:
 train:
 	@echo "==> Starting file-watcher and trainer..."
 	docker compose -f docker-compose.train.yml up
+
+monitor:
+	@echo "==> Starting monitoring stack (Prometheus + Grafana)..."
+	docker compose -f docker-compose.monitoring.yml up -d
+	@echo "Prometheus: http://localhost:9090"
+	@echo "Grafana:    http://localhost:3000 (admin/ancientvision)"
 
 # ---------------------------------------------------------------------------
 # Interactive dev shells

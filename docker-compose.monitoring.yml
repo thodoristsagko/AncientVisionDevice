@@ -1,0 +1,57 @@
+# docker-compose.monitoring.yml
+# Prometheus + Grafana monitoring stack for AncientVision services.
+#
+# Prerequisites:
+#   - Collect stack must be running (docker-compose.collect.yml) so that
+#     data-collector:8765 is reachable on the shared monitoring network.
+#
+# Usage:
+#   make monitor
+#   # or directly:
+#   docker compose -f docker-compose.monitoring.yml up -d
+#
+# Access:
+#   Prometheus:  http://localhost:9090
+#   Grafana:     http://localhost:3000  (admin / ancientvision)
+
+services:
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./docker/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - monitoring
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=ancientvision
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/ancientvision.json
+    networks:
+      - monitoring
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+volumes:
+  grafana_data:
+
+networks:
+  monitoring:
+    driver: bridge
