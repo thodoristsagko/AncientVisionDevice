@@ -3,3 +3,11 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Local env file — may contain secrets
+.env
+
+# Field data — never commit real sensor data or archives
+data/field/*.csv
+data/processed/
+*.tar.gz
