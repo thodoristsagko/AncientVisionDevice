@@ -36,6 +36,7 @@
 #include <MadgwickAHRS.h>
 #include <Wire.h>
 #include "esp_task_wdt.h"
+#include "esp_system.h"  // P101: esp_reset_reason()
 
 // Uncomment to enable debug serial output (costs ~2-3KB flash)
 // #define DEBUG
@@ -93,6 +94,7 @@ const float TEMP_REF = 25.0f;           // Reference temperature
 #define CHAR_ALERT_UUID     "beb5483e-36e1-4688-b7f5-ea07361b26aa"
 #define CHAR_BATTERY_UUID   "beb5483e-36e1-4688-b7f5-ea07361b26ab"
 #define CHAR_FFT_UUID       "beb5483e-36e1-4688-b7f5-ea07361b26ac"  // Now used for raw accel binary
+#define CHAR_CMD_UUID       "beb5483e-36e1-4688-b7f5-ea07361b26ad"  // P79: writable command characteristic
 
 // ===================== MADGWICK FILTER =====================
 Madgwick madgwickFilter;
@@ -148,6 +150,13 @@ float g_lastPpv = 0.0f;        // Previous PPV reading for trend arrow calculati
 uint32_t g_safeSinceMs = 0;    // millis() timestamp of last non-safe event (or boot)
 bool g_powerSaveActive = false; // True when BLE advertising interval has been extended
 
+// ===================== P79: BLE CALIBRATE COMMAND =====================
+bool g_calibrating = false;      // True during active calibration period
+uint32_t g_calibStartMs = 0;     // millis() when calibration started
+
+// ===================== P80: AUTOMATIC GAIN CONTROL =====================
+static bool g_highGainMode = false;  // True when IMU is in ±16g range
+
 // ===================== GLOBALS =====================
 BLEServer* pServer = NULL;
 BLECharacteristic* pIMUChar = NULL;
@@ -155,6 +164,7 @@ BLECharacteristic* pMoistureChar = NULL;
 BLECharacteristic* pAlertChar = NULL;
 BLECharacteristic* pBatteryChar = NULL;
 BLECharacteristic* pFFTChar = NULL;  // Now used for raw accel binary
+BLECharacteristic* pCmdChar = NULL;  // P79: writable command characteristic
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
 
@@ -241,6 +251,24 @@ const int DISPLAY_INTERVAL = 250;    // Update display 4x/sec
 const int MOISTURE_INTERVAL = 1000;  // Read moisture every 1s
 const int BATTERY_INTERVAL = 2000;   // Read battery every 2s
 
+// ===================== P80: MPU6886 ACCEL RANGE CONFIGURATION =====================
+// ACCEL_CONFIG register 0x1C: bits [4:3] set AFS_SEL
+// AFS_SEL=0 -> ±2g, AFS_SEL=1 -> ±4g, AFS_SEL=2 -> ±8g, AFS_SEL=3 -> ±16g
+void setAccelRange(int gRange) {
+  uint8_t afs;
+  switch (gRange) {
+    case 16: afs = 0x03; break;
+    case 8:  afs = 0x02; break;
+    case 4:  afs = 0x01; break;
+    default: afs = 0x00; break; // ±2g
+  }
+  Wire1.beginTransmission(0x68);
+  Wire1.write(0x1C);           // ACCEL_CONFIG register
+  Wire1.write(afs << 3);       // AFS_SEL field at bits [4:3]
+  Wire1.endTransmission();
+  DBG_PRINTF("AGC: accel range set to ±%dg (reg=0x%02X)\n", gRange, afs << 3);
+}
+
 // ===================== MPU6886 DLPF CONFIGURATION =====================
 void configureDLPF() {
   Wire1.beginTransmission(0x68);
@@ -292,6 +320,19 @@ class MyServerCallbacks: public BLEServerCallbacks {
     }
 };
 
+// ===================== P79: BLE COMMAND CHARACTERISTIC CALLBACKS =====================
+class CmdCharCallbacks: public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) {
+    String value = pCharacteristic->getValue().c_str();
+    DBG_PRINTF("BLE CMD received: %s\n", value.c_str());
+    if (value == "CALIBRATE") {
+      g_calibrating = true;
+      g_calibStartMs = millis();
+      Serial.println("BLE CMD: CALIBRATE started (30s)");
+    }
+  }
+};
+
 // ===================== SETUP =====================
 void setup() {
   g_bootCount++;  // P75: persist across deep-sleep reboots via RTC_DATA_ATTR
@@ -300,6 +341,21 @@ void setup() {
   M5.begin(cfg);
 
   Serial.begin(115200);
+
+  // P101: Log watchdog / reset reason on boot for field diagnostics
+  {
+    esp_reset_reason_t reason = esp_reset_reason();
+    switch (reason) {
+      case ESP_RST_POWERON:  Serial.println("Reset: power-on"); break;
+      case ESP_RST_SW:       Serial.println("Reset: software"); break;
+      case ESP_RST_PANIC:    Serial.println("Reset: panic/crash"); break;
+      case ESP_RST_INT_WDT:  Serial.println("Reset: interrupt watchdog"); break;
+      case ESP_RST_TASK_WDT: Serial.println("Reset: task watchdog"); break;
+      case ESP_RST_WDT:      Serial.println("Reset: other watchdog"); break;
+      default:               Serial.printf("Reset: reason=%d\n", (int)reason); break;
+    }
+  }
+
   DBG_PRINTLN("AncientVision Trench Safety Monitor v5.0");
   DBG_PRINTLN("DSP: Madgwick + Tri-axial PPV + Recursive STA/LTA + Raw BLE");
 
@@ -404,8 +460,8 @@ void setupBLE() {
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
 
-  // 5 characteristics × 3 handles each (decl+value+CCCD) + 1 service = 16 minimum
-  BLEService *pService = pServer->createService(BLEUUID(SERVICE_UUID), 20);
+  // 6 characteristics × 3 handles each (decl+value+CCCD) + 1 service = 19 minimum; 24 for margin
+  BLEService *pService = pServer->createService(BLEUUID(SERVICE_UUID), 24);
 
   pIMUChar = pService->createCharacteristic(
     CHAR_IMU_UUID,
@@ -441,6 +497,14 @@ void setupBLE() {
     BLECharacteristic::PROPERTY_NOTIFY
   );
   pFFTChar->addDescriptor(new BLE2902());
+
+  // P79: Writable command characteristic — phone writes "CALIBRATE" etc.
+  pCmdChar = pService->createCharacteristic(
+    CHAR_CMD_UUID,
+    BLECharacteristic::PROPERTY_WRITE |
+    BLECharacteristic::PROPERTY_WRITE_NR
+  );
+  pCmdChar->setCallbacks(new CmdCharCallbacks());
 
   pService->start();
 
@@ -522,6 +586,13 @@ void loop() {
   if (deviceConnected && !oldDeviceConnected) {
     oldDeviceConnected = deviceConnected;
     disconnectTime = 0;
+  }
+
+  // P79: Auto-expire calibration after 30 seconds
+  if (g_calibrating && (currentMillis - g_calibStartMs >= 30000UL)) {
+    g_calibrating = false;
+    Serial.println("BLE CMD: CALIBRATE period ended");
+    DBG_PRINTLN("Calibration period expired");
   }
 
   // Button A: Hold 3s = toggle low power, short press = test alert
@@ -693,6 +764,19 @@ void processVibrationWindow() {
   // ---- Crest Factor ----
   crestFactor = (vibrationRMS > 0.0001f) ? vibrationPeak / vibrationRMS : 1.0f;
 
+  // ---- P80: Automatic Gain Control — switch IMU range based on PPV ----
+  if (vibrationPPV > 2.0f && !g_highGainMode) {
+    setAccelRange(16);   // Switch to ±16g to avoid clipping
+    g_highGainMode = true;
+    DBG_PRINTLN("AGC: switched to ±16g range");
+    Serial.println("AGC: high range enabled");
+  } else if (vibrationPPV < 0.5f && g_highGainMode) {
+    setAccelRange(4);    // Restore ±4g for better resolution
+    g_highGainMode = false;
+    DBG_PRINTLN("AGC: switched to ±4g range");
+    Serial.println("AGC: normal range restored");
+  }
+
   // In low power mode: skip heavy logging if vibration is safely low
   // but do NOT return — let execution continue to classifyHazard() for moisture checks
   if (lowPowerMode && vibrationPPV <= PPV_SAFE_MAX) {
@@ -828,7 +912,11 @@ void readBattery() {
   }
 
   batteryPercent = constrain(batteryPercent, 0, 100);
-  batteryCharging = (batteryVoltage > 4.2);
+
+  // P102: Use power management chip API for reliable charging detection.
+  // M5.Power.isCharging() queries the AXP192/AXP2101 PMIC charging status bit.
+  // Fall back to voltage heuristic (>4.2V) if the API returns indeterminate.
+  batteryCharging = M5.Power.isCharging();
 }
 
 // ===================== DISPLAY (Archaeologist-friendly) =====================
@@ -977,14 +1065,17 @@ void sendBLEData() {
   }
 
   // Send simplified IMU JSON (only firmware-computed features)
-  // Buffer sized for: existing fields + fw(5) + seq(10) + evtMs(10) + boots(10) + evts(10) + overhead
-  char imuData[256];
+  // Buffer sized for: existing fields + fw(5) + seq(10) + evtMs(10) + boots(10) + evts(10)
+  //                 + cal(1) + gain(2) + chg(1) + overhead
+  char imuData[300];
   uint32_t evtMs = g_evtActive ? (uint32_t)(millis() - g_evtStartMs) : 0u;
   int imuLen = snprintf(imuData, sizeof(imuData),
     "{\"ppv\":%.1f,\"stalta\":%.2f,\"rms\":%.4f,\"peak\":%.4f,\"crest\":%.1f,\"temp\":%.1f,\"mag\":%.4f"
-    ",\"fw\":\"" FW_VERSION "\",\"seq\":%lu,\"evtMs\":%lu,\"boots\":%lu,\"evts\":%lu}",
+    ",\"fw\":\"" FW_VERSION "\",\"seq\":%lu,\"evtMs\":%lu,\"boots\":%lu,\"evts\":%lu"
+    ",\"cal\":%d,\"gain\":%d,\"chg\":%d}",
     vibrationPPV, staLtaRatio, vibrationRMS, vibrationPeak, crestFactor, imuTemp, vibrationMagnitude,
-    (unsigned long)g_seq, (unsigned long)evtMs, (unsigned long)g_bootCount, (unsigned long)g_sessionEvts);
+    (unsigned long)g_seq, (unsigned long)evtMs, (unsigned long)g_bootCount, (unsigned long)g_sessionEvts,
+    g_calibrating ? 1 : 0, g_highGainMode ? 16 : 4, batteryCharging ? 1 : 0);
   // Use imuLen for setValue length (not strlen) to avoid re-scanning
   if (imuLen >= (int)sizeof(imuData)) {
     // Truncated — skip sending corrupt data
