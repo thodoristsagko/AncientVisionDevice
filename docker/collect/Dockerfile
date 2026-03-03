@@ -1,4 +1,7 @@
 FROM python:3.11-slim
+# Build context must be the repo root (not this directory).
+# Correct: docker build -f docker/collect/Dockerfile .
+# Wrong:   docker build docker/collect/
 
 WORKDIR /workspace
 

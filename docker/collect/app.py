@@ -5,6 +5,7 @@ Firestore sync is added in Task 3.
 """
 import csv
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +26,7 @@ def create_app():
     field_dir.mkdir(parents=True, exist_ok=True)
 
     count_file = field_dir / ".sample_count"
+    _count_lock = threading.Lock()
 
     def _read_count():
         try:
@@ -56,7 +58,8 @@ def create_app():
                 writer.writeheader()
             writer.writerow({k: data[k] for k in CSV_HEADER})
 
-        _write_count(_read_count() + 1)
+        with _count_lock:
+            _write_count(_read_count() + 1)
         return jsonify({"status": "ok"})
 
     return app

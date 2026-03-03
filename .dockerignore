@@ -40,3 +40,8 @@ app/.claude/
 **/*.log
 *.bak
 *.backup
+
+# Python bytecode
+**/__pycache__
+**/*.pyc
+**/*.pyo
