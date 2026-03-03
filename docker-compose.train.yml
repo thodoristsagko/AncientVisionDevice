@@ -1,0 +1,35 @@
+# docker-compose.train.yml
+# Run alongside docker-compose.collect.yml to enable data-triggered retraining.
+# Usage: docker compose -f docker-compose.train.yml up
+#
+# The trainer mounts /var/run/docker.sock to trigger a flutter APK build
+# after each retraining run (Docker-in-Docker).  Remove that volume if
+# you do not want automatic APK builds.
+
+services:
+
+  file-watcher:
+    build:
+      context: .
+      dockerfile: docker/watcher/Dockerfile
+    volumes:
+      - ./data:/workspace/data
+    environment:
+      - DATA_DIR=/workspace/data
+      - TRIGGER_THRESHOLD=100
+      - POLL_INTERVAL=60
+    restart: unless-stopped
+
+  trainer:
+    build:
+      context: .
+      dockerfile: docker/ml/Dockerfile
+    volumes:
+      - ./data:/workspace/data
+      - ./app/assets/ml:/workspace/app/assets/ml
+      - ./app/build:/workspace/app/build
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - DATA_DIR=/workspace/data
+    entrypoint: ["python", "scripts/run_pipeline.py"]
+    restart: "no"
