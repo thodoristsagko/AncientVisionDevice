@@ -51,6 +51,9 @@
 
 // ===================== CONFIGURATION =====================
 
+// P149: OTA update readiness — set to 1 when update server is configured
+#define OTA_ENABLED 0
+
 // Sampling Configuration
 const int SAMPLE_RATE = 200;             // 200 Hz IMU sampling
 const int SAMPLE_INTERVAL_US = 5000;     // 5ms = 200 Hz (in microseconds)
@@ -251,6 +254,13 @@ const int DISPLAY_INTERVAL = 250;    // Update display 4x/sec
 const int MOISTURE_INTERVAL = 1000;  // Read moisture every 1s
 const int BATTERY_INTERVAL = 2000;   // Read battery every 2s
 
+// ===================== P147: BLE MOTION THRESHOLD FILTER =====================
+unsigned long g_lastBleNotifyMs = 0;   // millis() of last BLE notification sent
+float g_lastBleNotifyPpv = -1.0f;      // PPV at time of last BLE notification (-1 = never sent)
+
+// ===================== P148: DEBUG MODE =====================
+bool g_debugMode = false;              // Toggled via BLE CMD "DEBUG ON" / "DEBUG OFF"
+
 // ===================== P80: MPU6886 ACCEL RANGE CONFIGURATION =====================
 // ACCEL_CONFIG register 0x1C: bits [4:3] set AFS_SEL
 // AFS_SEL=0 -> ±2g, AFS_SEL=1 -> ±4g, AFS_SEL=2 -> ±8g, AFS_SEL=3 -> ±16g
@@ -306,6 +316,15 @@ void readBattery();
 void sendBLEData();
 void updateDisplay();
 void testAlert();
+void checkForOtaUpdate();
+
+// ===================== P149: OTA UPDATE READINESS STUB =====================
+// Future: replace body with ArduinoOTA or custom HTTP OTA check when a
+// firmware update server is available.  The #define OTA_ENABLED gate at the
+// top of the file controls whether the call in setup() is compiled in.
+void checkForOtaUpdate() {
+  Serial.println("OTA check: disabled (no update server configured)");
+}
 
 // ===================== BLE CALLBACKS =====================
 class MyServerCallbacks: public BLEServerCallbacks {
@@ -329,6 +348,12 @@ class CmdCharCallbacks: public BLECharacteristicCallbacks {
       g_calibrating = true;
       g_calibStartMs = millis();
       Serial.println("BLE CMD: CALIBRATE started (30s)");
+    } else if (value == "DEBUG ON") {
+      g_debugMode = true;
+      Serial.println("BLE CMD: DEBUG mode ON");
+    } else if (value == "DEBUG OFF") {
+      g_debugMode = false;
+      Serial.println("BLE CMD: DEBUG mode OFF");
     }
   }
 };
@@ -431,6 +456,11 @@ void setup() {
   // Initialize BLE
   setupBLE();
 
+  // P149: OTA update readiness check (stub — no server configured yet)
+#if OTA_ENABLED
+  checkForOtaUpdate();
+#endif
+
   // Initialize watchdog timer (5 second timeout, panic on expiry)
   esp_task_wdt_init(5, true);
   esp_task_wdt_add(NULL); // Add current task (loopTask)
@@ -520,6 +550,9 @@ void setupBLE() {
 
 // ===================== MAIN LOOP =====================
 void loop() {
+  // P150: Reset watchdog at top of every loop iteration to prevent spurious reboots
+  // during long BLE send operations.  esp_task_wdt_reset() is also called inside
+  // sendBLEData() after each BLE notification for additional safety.
   esp_task_wdt_reset();
   M5.update();
 
@@ -612,6 +645,10 @@ void loop() {
     if (!longPressHandled) testAlert();
     longPressHandled = false;
   }
+
+  // P150: Yield to FreeRTOS scheduler — prevents WiFi/BLE stack starvation
+  // when the main loop runs faster than the 200 Hz sample interval.
+  vTaskDelay(1);
 }
 
 // ===================== HIGH-SPEED SAMPLING =====================
@@ -1066,23 +1103,38 @@ void sendBLEData() {
 
   // Send simplified IMU JSON (only firmware-computed features)
   // Buffer sized for: existing fields + fw(5) + seq(10) + evtMs(10) + boots(10) + evts(10)
-  //                 + cal(1) + gain(2) + chg(1) + overhead
-  char imuData[300];
+  //                 + cal(1) + gain(2) + chg(1) + tmp(6) + up(10) + dbg(1) + overhead
+  char imuData[340];
   uint32_t evtMs = g_evtActive ? (uint32_t)(millis() - g_evtStartMs) : 0u;
+  uint32_t uptimeSec = millis() / 1000u;  // P146: device uptime in seconds
   int imuLen = snprintf(imuData, sizeof(imuData),
     "{\"ppv\":%.1f,\"stalta\":%.2f,\"rms\":%.4f,\"peak\":%.4f,\"crest\":%.1f,\"temp\":%.1f,\"mag\":%.4f"
     ",\"fw\":\"" FW_VERSION "\",\"seq\":%lu,\"evtMs\":%lu,\"boots\":%lu,\"evts\":%lu"
-    ",\"cal\":%d,\"gain\":%d,\"chg\":%d}",
+    ",\"cal\":%d,\"gain\":%d,\"chg\":%d"
+    ",\"tmp\":%.1f,\"up\":%lu,\"dbg\":%d}",
     vibrationPPV, staLtaRatio, vibrationRMS, vibrationPeak, crestFactor, imuTemp, vibrationMagnitude,
     (unsigned long)g_seq, (unsigned long)evtMs, (unsigned long)g_bootCount, (unsigned long)g_sessionEvts,
-    g_calibrating ? 1 : 0, g_highGainMode ? 16 : 4, batteryCharging ? 1 : 0);
+    g_calibrating ? 1 : 0, g_highGainMode ? 16 : 4, batteryCharging ? 1 : 0,
+    imuTemp, (unsigned long)uptimeSec, g_debugMode ? 1 : 0);
+  // P147: Motion threshold filter — only notify if PPV changed > 0.02 mm/s
+  //       or more than 5 seconds have elapsed since last notification.
+  //       The characteristic value is always updated so a phone read() gets
+  //       current data; only the notify() (push) is gated.
+  bool ppvChangedSig = (g_lastBleNotifyPpv < 0.0f) ||
+                       (fabsf(vibrationPPV - g_lastBleNotifyPpv) > 0.02f);
+  bool timeoutElapsed = (millis() - g_lastBleNotifyMs >= 5000UL);
+  bool shouldNotify   = ppvChangedSig || timeoutElapsed;
   // Use imuLen for setValue length (not strlen) to avoid re-scanning
   if (imuLen >= (int)sizeof(imuData)) {
     // Truncated — skip sending corrupt data
     DBG_PRINTF("BLE: IMU JSON truncated, skipping send\n");
   } else {
     pIMUChar->setValue((uint8_t*)imuData, imuLen);
-    pIMUChar->notify();
+    if (shouldNotify) {
+      pIMUChar->notify();
+      g_lastBleNotifyMs  = millis();
+      g_lastBleNotifyPpv = vibrationPPV;
+    }
   }
   esp_task_wdt_reset();
   delay(5);
