@@ -35,6 +35,8 @@ import '../diagnostics_screen.dart';
 import '../about_screen.dart';
 import '../../widgets/ppv_trend_chart.dart';
 import '../../widgets/anomaly_level_badge.dart';
+import '../../services/local_notification_service.dart';
+import '../../services/network_status_service.dart';
 
 const String _bleSensorServiceUUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 
@@ -251,6 +253,10 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
     _startFirebaseLogging();
     _loadSensorHistory();
     _initAnomalyModel();
+    // P191: Initialize local (OS-level) notifications for critical alerts
+    LocalNotificationService.instance.initialize();
+    // P192: Initialize network status monitoring for offline banner
+    NetworkStatusService.instance.initialize();
     // P7: Load last connected device name for UI hint
     DeviceMemoryService.instance.getLastDeviceName().then((name) {
       if (mounted && name != null) {
@@ -1188,6 +1194,14 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
             HapticFeedback.mediumImpact(); // moderate escalation
           }
         }
+
+        // P191: OS-level notification on anomaly escalation / clear
+        if (result.level == AnomalyLevel.anomaly && _lastLevel != AnomalyLevel.anomaly) {
+          LocalNotificationService.instance.showCriticalAlert(ppv: _ppv);
+        } else if (result.level == AnomalyLevel.normal && _lastLevel == AnomalyLevel.anomaly) {
+          LocalNotificationService.instance.cancelAll();
+        }
+
         _lastLevel = result.level;
 
         // Alarm + haptic for red-level ML anomaly
@@ -1803,6 +1817,40 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
 
     return Stack(
       children: [
+        // P192: Offline banner — shown at top when no network
+        ListenableBuilder(
+          listenable: NetworkStatusService.instance,
+          builder: (context, _) {
+            if (NetworkStatusService.instance.status != NetworkStatus.disconnected) {
+              return const SizedBox.shrink();
+            }
+            return Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                bottom: false,
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  color: Colors.orange.withAlpha(220),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.cloud_off_rounded, color: Colors.white, size: 16),
+                      const SizedBox(width: 8),
+                      const Text(
+                        'Offline — data not syncing',
+                        style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+
         // Main content
         Container(
           decoration: const BoxDecoration(
