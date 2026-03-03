@@ -6,6 +6,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 // import 'package:firebase_auth/firebase_auth.dart'; // TEST BUILD
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:audioplayers/audioplayers.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 // import 'services/auth_service.dart'; // TEST BUILD
 import 'services/notification_service.dart';
 import 'services/background_service.dart';
@@ -20,6 +21,7 @@ import 'screens/dashboard_home_view.dart';
 import 'screens/findings_view.dart';
 import 'screens/tools_view.dart';
 import 'screens/safety/index.dart';
+import 'screens/onboarding_screen.dart';
 
 
 /// Sensor metrics passed to the alert overlay for context.
@@ -120,8 +122,26 @@ class _MyAppState extends State<MyApp> {
         }
         return child ?? const SizedBox.shrink();
       },
-      // TEST BUILD: Skip auth — go straight to dashboard
-      home: const DashboardScreen(),
+      // Show onboarding on first launch; skip if already seen.
+      home: FutureBuilder<bool>(
+        future: SharedPreferences.getInstance()
+            .then((prefs) => prefs.getBool('onboarding_seen') ?? false),
+        builder: (context, snapshot) {
+          if (!snapshot.hasData) {
+            // Still loading — show the same splash indicator.
+            return const Scaffold(
+              backgroundColor: Color(0xFF0D3A39),
+              body: Center(
+                child: CircularProgressIndicator(color: Color(0xFFFFC107)),
+              ),
+            );
+          }
+          if (snapshot.data == true) {
+            return const DashboardScreen();
+          }
+          return const OnboardingScreen();
+        },
+      ),
       // home: StreamBuilder<User?>(
       //   stream: AuthService.authStateChanges,
       //   builder: (context, snapshot) {
