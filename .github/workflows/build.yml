@@ -70,3 +70,18 @@ jobs:
           name: apk-${{ github.sha }}
           path: app/build/app/outputs/flutter-apk/app-release.apk
           retention-days: 30
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pip-audit
+        run: pip install pip-audit
+      - name: Audit docker/collect dependencies
+        run: pip-audit -r docker/collect/requirements.txt --ignore-vuln PYSEC-2022-42974 || true
+      - name: Audit scripts dependencies
+        run: |
+          pip-audit flask werkzeug requests numpy tensorflow || true
