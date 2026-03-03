@@ -1,0 +1,34 @@
+name: Dependency Audit
+
+on:
+  schedule:
+    - cron: '0 6 * * 3'  # Every Wednesday 6am UTC
+  workflow_dispatch:
+
+jobs:
+  python-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pip-audit
+        run: pip install pip-audit
+      - name: Audit collect requirements
+        run: pip-audit -r docker/collect/requirements.txt || true
+      - name: Audit watcher requirements
+        run: pip-audit -r docker/watcher/requirements.txt || true
+      - name: Audit ML requirements
+        run: pip-audit -r docker/ml/requirements.txt || true
+
+  flutter-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.3'
+      - name: Check for outdated packages
+        working-directory: app
+        run: flutter pub outdated || true
