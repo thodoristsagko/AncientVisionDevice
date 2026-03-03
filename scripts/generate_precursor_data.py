@@ -19,8 +19,9 @@ import sys as _sys
 
 import numpy as np
 import tensorflow as tf
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
 from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
+from sklearn.preprocessing import label_binarize
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.utils.class_weight import compute_class_weight
 
@@ -177,6 +178,76 @@ y = np.concatenate(y_parts)
 print(f"Dataset: {X.shape[0]} samples, {X.shape[1]} features, {len(CLASS_NAMES)} classes")
 
 # ---------------------------------------------------------------------------
+# P24: Data augmentation — Gaussian noise for minority classes
+# ---------------------------------------------------------------------------
+
+_AUGMENTATION_CLAMPS = {
+    # feature_index: (min_val, max_val or None)
+    0:  (0.0, None),   # rms >= 0
+    1:  (0.0, None),   # ppv >= 0
+    5:  (1.0, None),   # kurtosis >= 1.0
+}
+
+_NOISE_SIGMA = 0.05  # fraction of per-feature std
+
+total_augmented = 0
+_augmented_per_class = {}
+
+_class_counts = {i: int(np.sum(y == i)) for i in range(len(CLASS_NAMES))}
+_majority_count = max(_class_counts.values())
+_target_count = int(_majority_count * 0.8)
+
+print(f"\n[P24] Augmentation: majority={_majority_count}, target={_target_count}")
+
+_X_aug_parts = [X]
+_y_aug_parts = [y]
+
+_feature_std = X.std(axis=0)
+_feature_std = np.where(_feature_std > 1e-10, _feature_std, 1e-10)
+
+for _cls_idx in range(len(CLASS_NAMES)):
+    _current_count = _class_counts[_cls_idx]
+    if _current_count >= _target_count:
+        _augmented_per_class[CLASS_NAMES[_cls_idx]] = 0
+        continue
+
+    _needed = _target_count - _current_count
+    _cls_mask = (y == _cls_idx)
+    _cls_X = X[_cls_mask]
+
+    # Sample with replacement from existing class samples
+    _rng_indices = np.random.randint(0, len(_cls_X), size=_needed)
+    _base_samples = _cls_X[_rng_indices]
+
+    # Add Gaussian noise scaled per feature
+    _noise = np.random.normal(
+        0.0,
+        _NOISE_SIGMA * _feature_std,
+        size=(_needed, X.shape[1]),
+    ).astype(np.float32)
+    _aug_X = _base_samples + _noise
+
+    # Clamp physically implausible values
+    for _feat_idx, (_lo, _hi) in _AUGMENTATION_CLAMPS.items():
+        if _lo is not None:
+            _aug_X[:, _feat_idx] = np.maximum(_aug_X[:, _feat_idx], _lo)
+        if _hi is not None:
+            _aug_X[:, _feat_idx] = np.minimum(_aug_X[:, _feat_idx], _hi)
+
+    _X_aug_parts.append(_aug_X)
+    _y_aug_parts.append(np.full(_needed, _cls_idx, dtype=np.int32))
+    _augmented_per_class[CLASS_NAMES[_cls_idx]] = _needed
+    total_augmented += _needed
+    print(f"  [{CLASS_NAMES[_cls_idx]}] added {_needed} augmented samples "
+          f"({_current_count} -> {_current_count + _needed})")
+
+X = np.vstack(_X_aug_parts).astype(np.float32)
+y = np.concatenate(_y_aug_parts)
+
+print(f"[P24] Total augmented samples added: {total_augmented}")
+print(f"[P24] Final dataset: {X.shape[0]} samples")
+
+# ---------------------------------------------------------------------------
 # 2. Scale full dataset (needed for CV and holdout splits)
 # ---------------------------------------------------------------------------
 
@@ -286,6 +357,22 @@ holdout_acc = float(nn_acc)
 print(f"[HOLDOUT] Accuracy on unseen data: {holdout_acc:.3f} ({len(X_holdout)} samples)")
 
 # ---------------------------------------------------------------------------
+# P129: ROC/AUC computation
+# ---------------------------------------------------------------------------
+
+# Binary case: normal (class 0) vs non-normal (classes 1-3)
+_prob_non_normal = 1.0 - test_pred_probs[:, 0]
+_binary_true = (test_true != 0).astype(int)
+_roc_auc_binary = float(roc_auc_score(_binary_true, _prob_non_normal))
+print(f"[P129] ROC AUC (binary, normal vs non-normal): {_roc_auc_binary:.4f}")
+
+# Multi-class macro-average AUC using one-vs-rest
+_y_true_binarized = label_binarize(test_true, classes=list(range(len(CLASS_NAMES))))
+_roc_auc_macro = float(roc_auc_score(_y_true_binarized, test_pred_probs, average='macro',
+                                      multi_class='ovr'))
+print(f"[P129] ROC AUC (macro OvR, {len(CLASS_NAMES)} classes): {_roc_auc_macro:.4f}")
+
+# ---------------------------------------------------------------------------
 # 5. Export to TFLite
 # ---------------------------------------------------------------------------
 
@@ -362,8 +449,10 @@ config = {
     "trained_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "git_sha": git_sha,
     "total_samples": int(len(X)),
+    "augmented_samples": total_augmented,
     "holdout_accuracy": holdout_acc,
     "cv_mean_accuracy": float(cv_scores.mean()),
+    "roc_auc": _roc_auc_macro,
 }
 config_path = os.path.join(ASSETS_DIR, "precursor_classifier_config.json")
 with open(config_path, "w") as f:
@@ -378,10 +467,12 @@ metrics_path = os.path.join(ASSETS_DIR, "precursor_training_metrics.json")
 metrics = {
     "trained_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "total_samples": int(len(X)),
+    "augmented_samples": total_augmented,
     "class_distribution": {name: int(np.sum(y == i)) for i, name in enumerate(CLASS_NAMES)},
     "cv_accuracy_mean": float(cv_scores.mean()),
     "cv_accuracy_std": float(cv_scores.std()),
     "holdout_accuracy": holdout_acc,
+    "roc_auc": _roc_auc_macro,
     "model_size_bytes": int(os.path.getsize(tflite_path)),
 }
 with open(metrics_path, "w") as f:
