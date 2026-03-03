@@ -15,6 +15,7 @@ app/android/.kotlin
 app/.dart_tool
 app/.flutter-plugins
 app/.flutter-plugins-dependencies
+app/android/local.properties
 
 # Windows platform artifacts (useless in Linux Docker)
 app/windows/
