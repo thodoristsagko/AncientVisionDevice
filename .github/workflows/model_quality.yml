@@ -1,0 +1,70 @@
+name: Model Quality Gate
+
+on:
+  push:
+    paths:
+      - 'scripts/generate_precursor_data.py'
+      - 'scripts/train_autoencoder.py'
+      - 'app/assets/ml/*.json'
+
+jobs:
+  quality-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install numpy
+      - name: Check training metrics exist
+        run: |
+          if [ -f app/assets/ml/precursor_training_metrics.json ]; then
+            echo "Training metrics found:"
+            cat app/assets/ml/precursor_training_metrics.json
+          else
+            echo "WARNING: No training metrics found (first-time setup)"
+          fi
+      - name: Check model config versions
+        run: |
+          python3 - <<'EOF'
+          import json, sys, os
+
+          required_configs = [
+              "app/assets/ml/precursor_classifier_config.json",
+              "app/assets/ml/vibration_model_config.json",
+          ]
+          all_ok = True
+          for path in required_configs:
+              if os.path.isfile(path):
+                  with open(path) as f:
+                      config = json.load(f)
+                  print(f"✓ {path}: feature_names={len(config.get('feature_names', []))}")
+              else:
+                  print(f"WARNING: {path} not found (model not yet trained)")
+          EOF
+      - name: Check scaler dimensions match config
+        run: |
+          python3 - <<'EOF'
+          import json, sys, os
+
+          pairs = [
+              ("app/assets/ml/precursor_classifier_config.json",
+               "app/assets/ml/precursor_classifier_scaler.json"),
+              ("app/assets/ml/vibration_model_config.json",
+               "app/assets/ml/vibration_scaler.json"),
+          ]
+          for cfg_path, scaler_path in pairs:
+              if not os.path.isfile(cfg_path) or not os.path.isfile(scaler_path):
+                  print(f"SKIP: {cfg_path} or {scaler_path} not found")
+                  continue
+              with open(cfg_path) as f: cfg = json.load(f)
+              with open(scaler_path) as f: scaler = json.load(f)
+              cfg_dim = len(cfg.get("feature_names", []))
+              scaler_dim = len(scaler.get("mean", []))
+              if cfg_dim == scaler_dim:
+                  print(f"✓ {cfg_path}: dims match ({cfg_dim})")
+              else:
+                  print(f"ERROR: {cfg_path} dim {cfg_dim} != scaler dim {scaler_dim}")
+                  sys.exit(1)
+          EOF
