@@ -1,12 +1,18 @@
 // ignore_for_file: use_build_context_synchronously
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/settings_service.dart';
 import '../services/backup_service.dart';
 import '../services/biometric_service.dart';
 import '../services/coin/index.dart';
 import '../services/gemini_coin_service.dart';
 import '../utils/app_styles.dart';
+
+// Vibration monitor prefs keys
+const String _kBlePrefixKey = 'vibmon_ble_prefix';
+const String _kPpvThresholdKey = 'vibmon_ppv_threshold';
+const String _kInferenceFreqKey = 'vibmon_inference_freq';
 
 /// Settings Screen - Simplified for essential features
 class SettingsScreen extends StatefulWidget {
@@ -30,10 +36,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _hasNumistaKey = false;
   bool _hasGeminiKey = false;
 
+  // Vibration monitor settings (Task 8)
+  final _blePrefixController = TextEditingController(text: 'ancientvision');
+  double _ppvAlertThreshold = 0.3;
+  String _inferenceFreq = '2Hz';
+
   @override
   void initState() {
     super.initState();
     _loadSettings();
+  }
+
+  @override
+  void dispose() {
+    _blePrefixController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadSettings() async {
@@ -42,9 +59,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _hasNumistaKey = _coinService.hasApiKey;
     await _geminiService.initialize();
     _hasGeminiKey = _geminiService.hasApiKey;
+    await _loadVibmonSettings();
     if (mounted) {
       setState(() => _isLoading = false);
     }
+  }
+
+  Future<void> _loadVibmonSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    _blePrefixController.text = prefs.getString(_kBlePrefixKey) ?? 'ancientvision';
+    _ppvAlertThreshold = prefs.getDouble(_kPpvThresholdKey) ?? 0.3;
+    _inferenceFreq = prefs.getString(_kInferenceFreqKey) ?? '2Hz';
+  }
+
+  Future<void> _saveVibmonSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kBlePrefixKey, _blePrefixController.text.trim());
+    await prefs.setDouble(_kPpvThresholdKey, _ppvAlertThreshold);
+    await prefs.setString(_kInferenceFreqKey, _inferenceFreq);
   }
 
   Future<void> _loadBiometricState() async {
@@ -145,6 +177,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ]),
                     const SizedBox(height: AppSpacing.xxl),
 
+                    // === VIBRATION MONITOR ===
+                    _buildSection('Vibration Monitor', Icons.sensors, [
+                      _buildVibmonBlePrefixTile(),
+                      const Divider(height: 1, color: Colors.white12),
+                      _buildVibmonPpvThresholdTile(),
+                      const Divider(height: 1, color: Colors.white12),
+                      _buildVibmonInferenceFreqTile(),
+                    ]),
+                    const SizedBox(height: AppSpacing.xxl),
+
                     // === SENSOR ===
                     _buildSection('Sensor Connection', Icons.bluetooth, [
                       _buildSensorLockTile(),
@@ -234,6 +276,109 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildVibmonBlePrefixTile() {
+    return ListTile(
+      leading: const Icon(Icons.bluetooth_searching, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('BLE Device Name Prefix', style: AppTextStyles.body),
+      subtitle: Text(
+        'Filter: "${_blePrefixController.text}"',
+        style: AppTextStyles.subtitleSmall,
+      ),
+      trailing: const Icon(Icons.edit, color: AppColors.textSecondary, size: 18),
+      onTap: () {
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: AppColors.primaryDark,
+            title: const Text('BLE Device Name Prefix', style: AppTextStyles.h3),
+            content: TextField(
+              controller: _blePrefixController,
+              style: AppTextStyles.body,
+              decoration: InputDecoration(
+                labelText: 'Prefix filter',
+                labelStyle: AppTextStyles.subtitleSmall,
+                hintText: 'e.g. ancientvision',
+                hintStyle: AppTextStyles.caption,
+                enabledBorder: OutlineInputBorder(
+                  borderSide: const BorderSide(color: AppColors.cardBorder),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderSide: const BorderSide(color: AppColors.accent),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: Text('Cancel', style: AppTextStyles.button.copyWith(color: AppColors.textSecondary)),
+              ),
+              TextButton(
+                onPressed: () async {
+                  await _saveVibmonSettings();
+                  if (mounted) setState(() {});
+                  Navigator.pop(ctx);
+                },
+                child: Text('Save', style: AppTextStyles.button.copyWith(color: AppColors.accent)),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildVibmonPpvThresholdTile() {
+    return ListTile(
+      leading: const Icon(Icons.speed, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('PPV Alert Threshold', style: AppTextStyles.body),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '${_ppvAlertThreshold.toStringAsFixed(2)} mm/s',
+            style: AppTextStyles.subtitleSmall,
+          ),
+          Slider(
+            value: _ppvAlertThreshold,
+            min: 0.1,
+            max: 2.0,
+            divisions: 19,
+            activeColor: AppColors.accent,
+            inactiveColor: AppColors.cardBorder,
+            onChanged: (value) async {
+              setState(() => _ppvAlertThreshold = value);
+              await _saveVibmonSettings();
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildVibmonInferenceFreqTile() {
+    const freqOptions = ['1Hz', '2Hz', '5Hz'];
+    return ListTile(
+      leading: const Icon(Icons.psychology, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('Inference Frequency Limit', style: AppTextStyles.body),
+      subtitle: Text('Max ML inference rate: $_inferenceFreq', style: AppTextStyles.subtitleSmall),
+      trailing: DropdownButton<String>(
+        value: _inferenceFreq,
+        dropdownColor: AppColors.primaryDark,
+        underline: const SizedBox.shrink(),
+        style: AppTextStyles.body,
+        items: freqOptions.map((f) => DropdownMenuItem(value: f, child: Text(f))).toList(),
+        onChanged: (value) async {
+          if (value != null) {
+            setState(() => _inferenceFreq = value);
+            await _saveVibmonSettings();
+          }
+        },
       ),
     );
   }

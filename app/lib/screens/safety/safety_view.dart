@@ -25,6 +25,12 @@ import '../../main.dart' show AlertMetrics;
 import '../../services/translation_service.dart';
 import '../../services/alert_history_service.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import '../../services/session_export_service.dart';
+import '../../services/calibration_progress_service.dart';
+import '../../services/inference_timing_service.dart';
+import '../../services/device_memory_service.dart';
+import '../../utils/ble_packet_tracker.dart';
+import '../settings_screen.dart';
 
 const String _bleSensorServiceUUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 
@@ -216,6 +222,18 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
   // FFT BLE data from firmware (real spectral bins)
   FftBleData? _lastFftData;
 
+  // P51: Session export
+  final _sessionExportService = SessionExportService.instance;
+
+  // P52: Calibration progress service
+  final _calibrationProgress = CalibrationProgressService(requiredSamples: 100);
+
+  // P55: BLE packet tracker for missed packet detection
+  final _packetTracker = BlePacketTracker();
+
+  // P7: Last connected device hint (from DeviceMemoryService)
+  String? _lastDeviceHint;
+
   // BLE characteristic references for bidirectional communication
   BluetoothCharacteristic? _alertCharacteristic;
 
@@ -226,6 +244,12 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
     _startFirebaseLogging();
     _loadSensorHistory();
     _initAnomalyModel();
+    // P7: Load last connected device name for UI hint
+    DeviceMemoryService.instance.getLastDeviceName().then((name) {
+      if (mounted && name != null) {
+        setState(() => _lastDeviceHint = name);
+      }
+    });
     // Throttled UI refresh: max 2 repaints/sec to prevent flickering
     _uiRefreshTimer = Timer.periodic(const Duration(milliseconds: 1000), (_) {
       if (_uiDirty && mounted) {
@@ -467,6 +491,12 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
         _reconnectAttempts = 0;
       });
       WakelockPlus.enable();
+
+      // P7: Save connected device to memory for auto-reconnect hint
+      final deviceId = device.remoteId.str;
+      final deviceName = device.platformName.isNotEmpty ? device.platformName : deviceId;
+      DeviceMemoryService.instance.saveDevice(id: deviceId, name: deviceName);
+      if (mounted) setState(() => _lastDeviceHint = deviceName);
 
       _dspService.reset();
       _rawAccelReassembler.reset();
@@ -805,6 +835,8 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
       if (data.containsKey('seq')) {
         _lastSeq = (data['seq'] as num).toInt();
         _lastPacketTime = DateTime.now();
+        // P55: Track missed packets via BlePacketTracker
+        _packetTracker.track(_lastSeq);
       }
 
       // Debug: log received data with full UUID
@@ -829,6 +861,8 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
           // Parse v2.0+ fields (backward compatible - defaults to 0 if missing)
           _ppv = (data['ppv'] as num?)?.toDouble() ?? 0.0;
           if (_isPpvCalibrating) _calibrationSamples.add(_ppv);
+          // P52: Feed calibration progress service on every sample
+          _calibrationProgress.addSample();
           if (_ppv > 0 || _rms > 0) _hasReceivedVibData = true;
           _rms = (data['rms'] as num?)?.toDouble() ?? 0.0;
           _crestFactor = (data['crest'] as num?)?.toDouble() ?? 0.0;
@@ -1106,7 +1140,11 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
           'psdSlope': _psdSlope ?? 0.0,
         };
 
+        final inferSw = Stopwatch()..start();
         final result = _anomalyService.detect(features);
+        inferSw.stop();
+        // P48: Record inference timing
+        InferenceTimingService.instance.record(inferSw.elapsedMilliseconds.toDouble());
         _anomalyScoreHistory.add(result.score);
         _lastAnomalyResult = result;
         _lastMLFeatures = features;
@@ -1791,13 +1829,31 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
                         ],
                       ),
                       const SizedBox(height: 6),
-                      // P61: Session timer display
+                      // P61: Session timer + P51: Export button
                       Row(
                         children: [
                           Icon(Icons.timer_outlined, color: Colors.white.withAlpha(80), size: 13),
                           const SizedBox(width: 4),
                           Text('Session: $_sessionElapsed',
                               style: TextStyle(color: Colors.white.withAlpha(80), fontSize: 11)),
+                          const SizedBox(width: 8),
+                          GestureDetector(
+                            onTap: () async {
+                              final records = _vibrationFeatureLog.toList();
+                              if (records.isEmpty) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('No session data to export yet')),
+                                );
+                                return;
+                              }
+                              try {
+                                await _sessionExportService.exportSession(records);
+                              } catch (e) {
+                                debugPrint('Session export error: $e');
+                              }
+                            },
+                            child: Icon(Icons.upload_rounded, color: Colors.white.withAlpha(120), size: 16),
+                          ),
                         ],
                       ),
                       const SizedBox(height: 4),
@@ -1828,6 +1884,16 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
                             padding: EdgeInsets.zero,
                             constraints: const BoxConstraints(),
                             onPressed: () => _showAlertHistory(context),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.settings_rounded, color: Colors.white70, size: 22),
+                            tooltip: 'Settings',
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                            onPressed: () => Navigator.push(
+                              context,
+                              MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                            ),
                           ),
                           TextButton.icon(
                             onPressed: _isPpvCalibrating ? null : _startPpvCalibration,
@@ -2150,6 +2216,28 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
             const SizedBox(height: 12),
           ],
 
+          // P52: Calibration progress bar (shown while not yet calibrated)
+          if (!_calibrationProgress.isCalibrated) ...[
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Calibrating baseline… (${_calibrationProgress.samplesCollected}/100 samples)',
+                    style: TextStyle(color: Colors.white.withAlpha(140), fontSize: 11),
+                  ),
+                  const SizedBox(height: 4),
+                  LinearProgressIndicator(
+                    value: _calibrationProgress.progress,
+                    backgroundColor: Colors.white12,
+                    color: Colors.tealAccent,
+                  ),
+                ],
+              ),
+            ),
+          ],
+
           // ML / Adaptive Anomaly Detection Indicator (Tier 2)
           if (_mlModelLoaded && _hasReceivedVibData)
             MLAnomalyIndicator(
@@ -2347,6 +2435,14 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
                 _buildMetricRow('DWT Level 1 (50-100Hz)', _dwt1.toStringAsFixed(3)),
                 _buildMetricRow('DWT Level 2 (25-50Hz)', _dwt2.toStringAsFixed(3)),
                 _buildMetricRow('DWT Level 3 (12-25Hz)', _dwt3.toStringAsFixed(3)),
+                // P48: Inference timing summary
+                if (InferenceTimingService.instance.count > 0) ...[
+                  const Divider(color: Colors.white12, height: 16),
+                  Text(
+                    'Inference: ${InferenceTimingService.instance.summary}',
+                    style: const TextStyle(color: Colors.grey, fontSize: 11),
+                  ),
+                ],
               ],
             ),
           ),
@@ -2596,6 +2692,22 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
             Text(
               'Pkt #$_lastSeq • ${_lastPacketTime.toString().split('.').first}',
               style: TextStyle(color: Colors.white.withAlpha(60), fontSize: 10),
+            ),
+          ],
+          // P55: Missed packet counter (shown only when > 0)
+          if (isConnected && _packetTracker.missedPackets > 0) ...[
+            const SizedBox(height: 2),
+            Text(
+              'Missed: ${_packetTracker.missedPackets}',
+              style: const TextStyle(color: Colors.orangeAccent, fontSize: 10),
+            ),
+          ],
+          // P7: Last device hint when disconnected
+          if (!isConnected && _lastDeviceHint != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              'Last: $_lastDeviceHint',
+              style: TextStyle(color: Colors.white.withAlpha(70), fontSize: 10),
             ),
           ],
         ],
