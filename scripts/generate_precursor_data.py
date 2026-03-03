@@ -13,7 +13,6 @@ Model: 17 -> 16 -> 8 -> 4 (softmax), exported to TFLite.
 
 import json
 import os
-import shutil
 
 import numpy as np
 from sklearn.tree import DecisionTreeClassifier
@@ -195,7 +194,9 @@ print(classification_report(y_test, y_pred_nn, target_names=CLASS_NAMES))
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
-ASSETS_DIR = os.path.join(PROJECT_DIR, "assets", "ml")
+# In Docker: /workspace/app/assets/ml  (mounted from ./app/assets/ml)
+# On Windows host: <repo>/app/assets/ml
+ASSETS_DIR = os.path.join(PROJECT_DIR, "app", "assets", "ml")
 os.makedirs(ASSETS_DIR, exist_ok=True)
 
 converter = tf.lite.TFLiteConverter.from_keras_model(model)
@@ -247,19 +248,5 @@ config_path = os.path.join(ASSETS_DIR, "precursor_classifier_config.json")
 with open(config_path, "w") as f:
     json.dump(config, f, indent=2)
 print(f"Config: {config_path}")
-
-# ---------------------------------------------------------------------------
-# 5. Copy to Flutter app
-# ---------------------------------------------------------------------------
-
-FLUTTER_ML = r"C:\Users\thodo\Desktop\FLL_Thodoris\AncientVisionFLL\AncientVision\assets\ml"
-if os.path.isdir(FLUTTER_ML):
-    for fname in ["precursor_classifier.tflite", "precursor_classifier_config.json", "precursor_classifier_scaler.json"]:
-        src = os.path.join(ASSETS_DIR, fname)
-        dst = os.path.join(FLUTTER_ML, fname)
-        shutil.copy2(src, dst)
-        print(f"Copied -> {dst}")
-else:
-    print(f"WARNING: Flutter assets dir not found: {FLUTTER_ML}")
 
 print("\nDone.")

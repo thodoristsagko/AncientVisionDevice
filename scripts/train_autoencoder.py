@@ -6,7 +6,6 @@ exports TFLite model + scaler/config JSON to both firmware and Flutter asset dir
 
 import json
 import os
-import shutil
 
 import numpy as np
 import tensorflow as tf
@@ -82,12 +81,11 @@ print(f"TFLite model size: {len(tflite_model)} bytes")
 
 # Output dirs
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LOCAL_ML = os.path.join(REPO, "assets", "ml")
-FLUTTER_ML = r"C:\Users\thodo\Desktop\FLL_Thodoris\AncientVisionFLL\AncientVision\assets\ml"
+# In Docker: /workspace/app/assets/ml  (mounted from ./app/assets/ml)
+# On Windows host: <repo>/app/assets/ml
+LOCAL_ML = os.path.join(REPO, "app", "assets", "ml")
 
 os.makedirs(LOCAL_ML, exist_ok=True)
-if os.path.isdir(os.path.dirname(FLUTTER_ML)):
-    os.makedirs(FLUTTER_ML, exist_ok=True)
 
 # Save files
 tflite_path = os.path.join(LOCAL_ML, "vibration_anomaly.tflite")
@@ -120,11 +118,5 @@ config_path = os.path.join(LOCAL_ML, "vibration_model_config.json")
 with open(config_path, "w") as f:
     json.dump(config_data, f, indent=2)
 
-# Copy to Flutter (only when running on Windows with the Flutter tree present)
-if os.path.isdir(FLUTTER_ML):
-    for fname in ["vibration_anomaly.tflite", "vibration_scaler.json", "vibration_model_config.json"]:
-        shutil.copy2(os.path.join(LOCAL_ML, fname), os.path.join(FLUTTER_ML, fname))
-    print(f"\nFiles saved to:\n  {LOCAL_ML}\n  {FLUTTER_ML}")
-else:
-    print(f"\nFiles saved to:\n  {LOCAL_ML}")
+print(f"\nFiles saved to:\n  {LOCAL_ML}")
 print("Done.")
