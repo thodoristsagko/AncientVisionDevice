@@ -92,7 +92,13 @@ class AdaptiveAnomalyService {
   int _sampleCount = 0;
   bool _isCalibrated = false;
 
+  // Dynamic thresholds computed after calibration (defaults from model config)
+  double _dynamicThresholdLow = 1.195327;
+  double _dynamicThresholdHigh = 1.788009;
+
   bool get isCalibrated => _isCalibrated;
+  double get dynamicThresholdLow => _dynamicThresholdLow;
+  double get dynamicThresholdHigh => _dynamicThresholdHigh;
   int get sampleCount => _sampleCount;
   int get calibrationTarget => _calibrationSamples;
   double get calibrationProgress => (_sampleCount / _calibrationSamples).clamp(0.0, 1.0);
@@ -161,9 +167,29 @@ class AdaptiveAnomalyService {
         _emaMean[key] = _stats[key]!.mean;
         _emaVariance[key] = _stats[key]!.variance;
       }
+
+      // Compute adaptive thresholds from calibration data.
+      // Use the mean of per-feature RMS z-scores as calibration baseline.
+      // During calibration, z-scores track how spread the data is around zero
+      // (Welford mean); a combined calibration score proxy is the average stdDev.
+      // We compute a composite "calibration norm" = RMS of per-feature stdDevs,
+      // then set 2-sigma and 4-sigma bands above the calibration mean (0).
+      double sumVariance = 0.0;
+      for (final key in _featureKeys) {
+        sumVariance += _stats[key]!.variance;
+      }
+      final _calibStd = sqrt(sumVariance / _featureKeys.length);
+      final _calibMean = 0.0; // z-score baseline is always 0
+      _dynamicThresholdLow = _calibMean + 2.0 * _calibStd;
+      _dynamicThresholdHigh = _calibMean + 4.0 * _calibStd;
+      // Guard: never let dynamic thresholds fall below sensible minimums
+      if (_dynamicThresholdLow < 0.1) _dynamicThresholdLow = 1.195327;
+      if (_dynamicThresholdHigh < 0.2) _dynamicThresholdHigh = 1.788009;
+
       if (kDebugMode) {
         debugPrint('AdaptiveAnomalyService: Calibration complete after $_sampleCount samples');
         debugPrint('  Baseline: ${_featureKeys.map((k) => "$k: μ=${_emaMean[k]!.toStringAsFixed(3)} σ=${sqrt(_emaVariance[k]!).toStringAsFixed(3)}").join(", ")}');
+        debugPrint('  Dynamic thresholds: low=${_dynamicThresholdLow.toStringAsFixed(4)} high=${_dynamicThresholdHigh.toStringAsFixed(4)}');
       }
     }
 
@@ -218,14 +244,18 @@ class AdaptiveAnomalyService {
 
     final rmsZ = sqrt(sumZSq / featureCount);
 
+    // Use adaptive (calibration-derived) thresholds if available, else static defaults
+    final effectiveLow = _isCalibrated ? _dynamicThresholdLow : _thresholdLow;
+    final effectiveHigh = _isCalibrated ? _dynamicThresholdHigh : _thresholdHigh;
+
     // Instantaneous classification
     double instantScore;
-    if (rmsZ < _thresholdLow) {
-      instantScore = rmsZ / _thresholdLow * 0.3; // 0-0.3 range for normal
-    } else if (rmsZ < _thresholdHigh) {
-      instantScore = 0.3 + 0.4 * (rmsZ - _thresholdLow) / (_thresholdHigh - _thresholdLow);
+    if (rmsZ < effectiveLow) {
+      instantScore = rmsZ / effectiveLow * 0.3; // 0-0.3 range for normal
+    } else if (rmsZ < effectiveHigh) {
+      instantScore = 0.3 + 0.4 * (rmsZ - effectiveLow) / (effectiveHigh - effectiveLow);
     } else {
-      instantScore = min(1.0, 0.7 + 0.3 * (rmsZ - _thresholdHigh) / _thresholdHigh);
+      instantScore = min(1.0, 0.7 + 0.3 * (rmsZ - effectiveHigh) / effectiveHigh);
     }
 
     // --- Trend detection (short-term vs long-term) ---
@@ -528,10 +558,15 @@ class AdaptiveAnomalyService {
     );
   }
 
-  /// Reset the baseline (e.g., when moving to a new site)
+  /// Reset the baseline — call on BLE reconnect or site change.
+  ///
+  /// Clears all calibration state so the service re-learns the baseline
+  /// from scratch. Forces rule-based fallback until recalibration completes.
   void reset() {
     _sampleCount = 0;
     _isCalibrated = false;
+    _dynamicThresholdLow = 1.195327;
+    _dynamicThresholdHigh = 1.788009;
     _emaMean.clear();
     _emaVariance.clear();
     for (final key in _featureKeys) {
@@ -547,7 +582,7 @@ class AdaptiveAnomalyService {
     _inverseVelocityTimes.clear();
     _lastPsdSlope = null;
     if (kDebugMode) {
-      debugPrint('AdaptiveAnomalyService: Baseline reset');
+      debugPrint('AdaptiveAnomalyService: Baseline reset (forces recalibration)');
     }
   }
 
