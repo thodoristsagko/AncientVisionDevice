@@ -31,6 +31,10 @@ import '../../services/inference_timing_service.dart';
 import '../../services/device_memory_service.dart';
 import '../../utils/ble_packet_tracker.dart';
 import '../settings_screen.dart';
+import '../diagnostics_screen.dart';
+import '../about_screen.dart';
+import '../../widgets/ppv_trend_chart.dart';
+import '../../widgets/anomaly_level_badge.dart';
 
 const String _bleSensorServiceUUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 
@@ -113,6 +117,9 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
 
   // PPV history for trend graph (DIN 4150-3)
   final CircularBuffer<Map<String, dynamic>> _ppvHistory = CircularBuffer(60);
+
+  // P188: Simple double list for PpvTrendChart widget (capped at 60)
+  final List<double> _ppvChartValues = [];
 
   // Vibration feature log for ML training data
   final CircularBuffer<Map<String, dynamic>> _vibrationFeatureLog = CircularBuffer(500);
@@ -923,6 +930,12 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
             'stalta': _staLtaRatio,
             'timestamp': DateTime.now(),
           });
+
+          // P188: Feed PpvTrendChart with simple double history
+          _ppvChartValues.add(_ppv);
+          if (_ppvChartValues.length > 60) {
+            _ppvChartValues.removeAt(0);
+          }
 
           // Log feature vector for ML training
           _vibrationFeatureLog.add({
@@ -1886,6 +1899,26 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
                             onPressed: () => _showAlertHistory(context),
                           ),
                           IconButton(
+                            icon: const Icon(Icons.info_outline, color: Colors.white70, size: 22),
+                            tooltip: 'About',
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                            onPressed: () => Navigator.push(
+                              context,
+                              MaterialPageRoute(builder: (_) => const AboutScreen()),
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.developer_mode, color: Colors.white70, size: 22),
+                            tooltip: 'Diagnostics',
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                            onPressed: () => Navigator.push(
+                              context,
+                              MaterialPageRoute(builder: (_) => const DiagnosticsScreen()),
+                            ),
+                          ),
+                          IconButton(
                             icon: const Icon(Icons.settings_rounded, color: Colors.white70, size: 22),
                             tooltip: 'Settings',
                             padding: EdgeInsets.zero,
@@ -2129,6 +2162,29 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
           ),
           const SizedBox(height: 12),
 
+          // P188: PPV rolling trend (compact sparkline below main analysis card)
+          if (_ppvChartValues.isNotEmpty) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+              decoration: BoxDecoration(
+                color: Colors.white.withAlpha(10),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('PPV Trend', style: TextStyle(color: Colors.white.withAlpha(160), fontSize: 12, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 6),
+                  RepaintBoundary(
+                    child: PpvTrendChart(values: _ppvChartValues, threshold: 0.3),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
+
           // Precursor pattern warning card (if active)
           if (_isPrecursorDriven && _lastPrecursorPattern != null) ...[
             Container(
@@ -2233,6 +2289,20 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
                     backgroundColor: Colors.white12,
                     color: Colors.tealAccent,
                   ),
+                ],
+              ),
+            ),
+          ],
+
+          // P190: AnomalyLevelBadge — prominent level display above ML indicator
+          if (_mlModelLoaded && _hasReceivedVibData) ...[
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                children: [
+                  Text('ML Status:', style: TextStyle(color: Colors.white.withAlpha(140), fontSize: 12)),
+                  const SizedBox(width: 8),
+                  AnomalyLevelBadge(level: _lastAnomalyResult.level, large: true),
                 ],
               ),
             ),
