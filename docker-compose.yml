@@ -1,0 +1,25 @@
+services:
+
+  firmware:
+    build:
+      context: .
+      dockerfile: docker/firmware/Dockerfile
+    volumes:
+      - ./.pio:/workspace/.pio
+    # Output: .pio/build/m5stick-c-plus2/firmware.bin
+
+  flutter:
+    build:
+      context: .
+      dockerfile: docker/flutter/Dockerfile
+    volumes:
+      - ./app/build:/app/build
+    # Output: app/build/app/outputs/flutter-apk/app-release.apk
+
+  ml:
+    build:
+      context: .
+      dockerfile: docker/ml/Dockerfile
+    volumes:
+      - ./assets/ml:/workspace/assets/ml
+    # Output: assets/ml/*.tflite + *.json
