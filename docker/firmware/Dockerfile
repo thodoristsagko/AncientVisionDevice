@@ -1,4 +1,10 @@
-FROM ghcr.io/platformio/platformio-core:6.1.16
+FROM python:3.11-slim
+
+# Install PlatformIO and build dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git && \
+    pip install --no-cache-dir platformio==6.1.16 && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
