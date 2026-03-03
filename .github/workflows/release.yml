@@ -8,6 +8,8 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -25,18 +27,34 @@ jobs:
             ${{ runner.os }}-buildx-
 
       - name: Build images
-        run: docker compose build
+        run: |
+          docker compose build \
+            --build-arg BUILDKIT_INLINE_CACHE=1
 
       - name: Build firmware
-        run: docker compose run --rm firmware
+        run: |
+          docker compose run --rm firmware
+          ls -lh .pio/build/m5stick-c-plus2/firmware.bin
 
       - name: Decode google-services.json
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
-        run: echo "$GOOGLE_SERVICES_JSON" | base64 -d > app/android/app/google-services.json
+        run: |
+          if [ -z "$GOOGLE_SERVICES_JSON" ]; then
+            echo "::error::GOOGLE_SERVICES_JSON secret is not set"
+            exit 1
+          fi
+          echo "$GOOGLE_SERVICES_JSON" | base64 -d > app/android/app/google-services.json
 
       - name: Build APK
-        run: docker compose run --rm flutter
+        run: |
+          docker compose run --rm flutter
+          ls -lh app/build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Rotate Buildx cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache 2>/dev/null || true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
