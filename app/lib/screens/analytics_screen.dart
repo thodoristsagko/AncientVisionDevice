@@ -1,9 +1,12 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../services/progress_service.dart';
 import '../services/local_storage_service.dart';
 import '../services/export_service.dart';
+import '../services/session_export_service.dart';
 
 /// Analytics and Statistics Dashboard Screen
 /// Professional documentation statistics with beautiful visualizations
@@ -28,6 +31,10 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
 
   // Computed from real data
   Map<String, int> _materialCounts = {};
+
+  // P156: Data quality + model performance extras
+  String? _modelAccuracy;    // loaded from precursor_training_metrics.json
+  bool _metricsLoaded = false;
 
   @override
   void initState() {
@@ -59,6 +66,9 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
 
     // Analyze real finding data
     _analyzeFindingData();
+
+    // P156: Attempt to load model performance metrics
+    await _loadModelMetrics();
 
     if (mounted) {
       setState(() => _isLoading = false);
@@ -108,6 +118,74 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
         return 'All Time';
       default:
         return 'This Week';
+    }
+  }
+
+  /// P156: Load model performance metrics from bundled JSON asset.
+  Future<void> _loadModelMetrics() async {
+    try {
+      final raw = await rootBundle.loadString(
+          'assets/ml/precursor_training_metrics.json');
+      final json = jsonDecode(raw) as Map<String, dynamic>;
+      final acc = json['accuracy'] ?? json['val_accuracy'] ?? json['test_accuracy'];
+      if (acc != null) {
+        setState(() {
+          _modelAccuracy = '${(acc * 100).toStringAsFixed(1)}%';
+          _metricsLoaded = true;
+        });
+        return;
+      }
+    } catch (_) {
+      // Asset may not exist — fall through to show "Model not loaded"
+    }
+    setState(() {
+      _modelAccuracy = null;
+      _metricsLoaded = true;
+    });
+  }
+
+  /// P156: Export all available session data via SessionExportService.
+  Future<void> _exportAllSessions(BuildContext context) async {
+    // Build records from cached findings (best effort — full session data
+    // is only available when the safety view is active and passes records in).
+    final records = _allFindings.map((f) {
+      return {
+        'timestamp': f['timestamp'] ?? '',
+        'ppv': f['ppv'] ?? '',
+        'rms': f['rms'] ?? '',
+        'freq': f['dominantFreq'] ?? '',
+        'kurtosis': f['kurtosis'] ?? '',
+        'stalta': f['stalta'] ?? '',
+        'anomaly_score': f['anomalyScore'] ?? '',
+        'anomaly_level': f['anomalyLevel'] ?? '',
+        'precursor_pattern': f['precursorPattern'] ?? '',
+        'confidence': f['confidence'] ?? '',
+      };
+    }).toList();
+
+    if (records.isEmpty) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No data to export'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      return;
+    }
+
+    try {
+      await SessionExportService.instance.exportSession(records);
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Export failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
@@ -365,6 +443,14 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
                           _buildPeriodFilter(),
                           const SizedBox(height: 20),
 
+                          // P156: Data Quality summary card
+                          _buildDataQualityCard(),
+                          const SizedBox(height: 16),
+
+                          // P156: Model Performance card
+                          _buildModelPerformanceCard(),
+                          const SizedBox(height: 20),
+
                           // Quick Stats Cards
                           _buildQuickStatsRow(),
                           const SizedBox(height: 24),
@@ -397,6 +483,146 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
     );
   }
 
+  // ─── P156 new cards ──────────────────────────────────────────────────────────
+
+  /// Data Quality card: session count, sample count, date range.
+  Widget _buildDataQualityCard() {
+    final sessionCount = _weeklyStats.length;
+    final totalSamples = _allFindings.length;
+
+    // Date range from weekly stats
+    String dateRange = 'N/A';
+    if (_weeklyStats.isNotEmpty) {
+      final first = _weeklyStats.first.date;
+      final last = _weeklyStats.last.date;
+      dateRange = '${_fmtDate(first)} – ${_fmtDate(last)}';
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(20),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withAlpha(30)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.verified_outlined, color: Color(0xFF4CAF50), size: 18),
+              const SizedBox(width: 8),
+              const Text(
+                'Data Quality',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 15,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          _buildKV('Sessions (this week)', '$sessionCount'),
+          const SizedBox(height: 6),
+          _buildKV('Total cached items', '$totalSamples'),
+          const SizedBox(height: 6),
+          _buildKV('Date range', dateRange),
+        ],
+      ),
+    );
+  }
+
+  /// Model Performance card: reads precursor_training_metrics.json.
+  Widget _buildModelPerformanceCard() {
+    final label = !_metricsLoaded
+        ? 'Loading…'
+        : (_modelAccuracy != null ? _modelAccuracy! : 'Model not loaded');
+
+    final color = _modelAccuracy != null
+        ? const Color(0xFF4CAF50)
+        : Colors.white54;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(20),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withAlpha(30)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Row(
+                  children: [
+                    Icon(Icons.model_training, color: Color(0xFF9C27B0), size: 18),
+                    SizedBox(width: 8),
+                    Text(
+                      'Model Performance',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 15,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                _buildKV('Precursor classifier accuracy', label),
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            decoration: BoxDecoration(
+              color: color.withAlpha(30),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: color.withAlpha(80)),
+            ),
+            child: Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildKV(String key, String value) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          key,
+          style: TextStyle(color: Colors.white.withAlpha(160), fontSize: 13),
+        ),
+        Text(
+          value,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 13,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _fmtDate(DateTime dt) =>
+      '${dt.day.toString().padLeft(2, '0')}/'
+      '${dt.month.toString().padLeft(2, '0')}/'
+      '${dt.year}';
+
+  // ─── Original section builders ────────────────────────────────────────────
+
   Widget _buildSliverAppBar() {
     final progress = _progressService.progress;
     final totalItems = progress.totalFindings +
@@ -411,6 +637,11 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
       backgroundColor: const Color(0xFF0D3A39),
       foregroundColor: Colors.white,
       actions: [
+        IconButton(
+          icon: const Icon(Icons.upload_rounded),
+          tooltip: 'Export All Sessions',
+          onPressed: () => _exportAllSessions(context),
+        ),
         IconButton(
           icon: const Icon(Icons.file_download_rounded),
           tooltip: 'Export Analytics',
