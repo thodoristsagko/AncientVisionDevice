@@ -1,5 +1,6 @@
 import csv
 import os
+import threading
 import pytest
 from app import create_app
 
@@ -218,3 +219,54 @@ def test_rate_limiting(client):
             break
     # At least confirm 429 appeared
     assert statuses.count(429) >= 1
+
+
+# ---------------------------------------------------------------------------
+# P88: Concurrent CSV write stress test
+# ---------------------------------------------------------------------------
+
+class TestConcurrentWrites:
+
+    def test_concurrent_ingest_no_data_loss(self, tmp_path, monkeypatch):
+        """
+        20 threads each send 5 unique samples (100 total).
+        All requests use distinct timestamps so none are deduplicated.
+        The final .sample_count must equal exactly 100.
+        """
+        monkeypatch.setenv("DATA_DIR", str(tmp_path))
+        app = create_app()
+        app.config["TESTING"] = True
+
+        errors = []
+
+        def _send_samples(thread_id: int):
+            # Each thread gets its own test client to avoid sharing state
+            with app.test_client() as c:
+                for sample_idx in range(5):
+                    # Unique timestamp per (thread, sample) pair
+                    ts = f"2026-03-03T15:{thread_id:02d}:{sample_idx:02d}Z"
+                    payload = {
+                        **BASE_PAYLOAD,
+                        "device_id": f"stress-dev-{thread_id}",
+                        "timestamp": ts,
+                    }
+                    r = c.post("/ingest", json=payload)
+                    if r.status_code not in (200,):
+                        errors.append(
+                            f"Thread {thread_id} sample {sample_idx}: "
+                            f"status {r.status_code} body {r.data}"
+                        )
+
+        threads = [threading.Thread(target=_send_samples, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"Some requests failed:\n" + "\n".join(errors)
+
+        count_file = tmp_path / "field" / ".sample_count"
+        sample_count = int(count_file.read_text().strip())
+        assert sample_count == 100, (
+            f"Expected 100 samples (20 threads x 5 each), got {sample_count}"
+        )
