@@ -59,8 +59,25 @@ model = tf.keras.Sequential([
 model.compile(optimizer="adam", loss="mse")
 model.summary()
 
+# P23: Early stopping + LR schedule callbacks
+callbacks = [
+    tf.keras.callbacks.EarlyStopping(
+        monitor='val_loss', patience=15, restore_best_weights=True, verbose=1
+    ),
+    tf.keras.callbacks.ReduceLROnPlateau(
+        monitor='val_loss', factor=0.5, patience=5, min_lr=1e-5, verbose=1
+    ),
+]
+
 # Train
-model.fit(data_scaled, data_scaled, epochs=100, batch_size=64, validation_split=0.1, verbose=1)
+model.fit(
+    data_scaled, data_scaled,
+    epochs=100,
+    batch_size=64,
+    validation_split=0.1,
+    verbose=1,
+    callbacks=callbacks,
+)
 
 # Compute reconstruction error thresholds
 preds = model.predict(data_scaled, verbose=0)
