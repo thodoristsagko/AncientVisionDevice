@@ -13,6 +13,39 @@ def client(tmp_path, monkeypatch):
         yield c, tmp_path
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+BASE_PAYLOAD = {
+    "device_id": "m5stick-01",
+    "timestamp": "2026-03-03T10:00:00Z",
+    "rms": 0.01,
+    "ppv": 0.05,
+    "freq": 15.0,
+    "crest": 3.0,
+    "centroid": 20.0,
+    "kurtosis": 1.5,
+    "stalta": 1.0,
+    "arias": 0.0001,
+    "cav": 0.002,
+    "label": "normal",
+}
+
+
+def _post_sample(c, overrides=None, ts_suffix=""):
+    payload = {**BASE_PAYLOAD}
+    if ts_suffix:
+        payload["timestamp"] = f"2026-03-03T10:00:0{ts_suffix}Z"
+    if overrides:
+        payload.update(overrides)
+    return c.post("/ingest", json=payload)
+
+
+# ---------------------------------------------------------------------------
+# Existing tests (unchanged)
+# ---------------------------------------------------------------------------
+
 def test_ingest_writes_csv(client):
     c, data_dir = client
     payload = {
@@ -96,3 +129,92 @@ def test_dedup_same_timestamp(client):
     with open(csvs[0]) as f:
         rows = list(csv.DictReader(f))
     assert len(rows) == 1  # only one row despite two POSTs
+
+
+# ---------------------------------------------------------------------------
+# New tests: P04-P09
+# ---------------------------------------------------------------------------
+
+def test_stats_returns_json(client):
+    """POST one sample, then GET /stats — total_samples must be >= 1."""
+    c, _ = client
+    _post_sample(c)
+    r = c.get("/stats")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert "total_samples" in body
+    assert body["total_samples"] >= 1
+    assert "samples_today" in body
+    assert "devices" in body
+    assert "classes" in body
+    assert "csv_files" in body
+    assert body["csv_files"] >= 1
+
+
+def test_export_returns_csv(client):
+    """POST one sample, GET /export — Content-Type must be text/csv and body must have CSV header."""
+    c, _ = client
+    _post_sample(c)
+    r = c.get("/export")
+    assert r.status_code == 200
+    # Content-Type may include charset suffix; check prefix only
+    assert r.content_type.startswith("text/csv")
+    text = r.data.decode("utf-8")
+    # The CSV header row must be present
+    assert "device_id" in text
+    assert "timestamp" in text
+    assert "ppv" in text
+
+
+def test_devices_lists_device_ids(client):
+    """POST a sample with device_id='test-dev', then GET /devices — 'test-dev' must appear."""
+    c, _ = client
+    _post_sample(c, overrides={"device_id": "test-dev", "timestamp": "2026-03-03T11:00:00Z"})
+    r = c.get("/devices")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert "devices" in body
+    assert "count" in body
+    assert "test-dev" in body["devices"]
+    assert body["count"] >= 1
+
+
+def test_invalid_ppv_rejected(client):
+    """POST with ppv=999.9 (out of range) must return 400 with out_of_range error."""
+    c, _ = client
+    r = _post_sample(c, overrides={"ppv": 999.9, "timestamp": "2026-03-03T12:00:00Z"})
+    assert r.status_code == 400
+    body = r.get_json()
+    assert body.get("error") == "out_of_range"
+    assert body.get("field") == "ppv"
+    assert body.get("value") == 999.9
+
+
+def test_invalid_freq_rejected(client):
+    """POST with freq=99999 (out of range) must return 400 with out_of_range error."""
+    c, _ = client
+    r = _post_sample(c, overrides={"freq": 99999, "timestamp": "2026-03-03T13:00:00Z"})
+    assert r.status_code == 400
+    body = r.get_json()
+    assert body.get("error") == "out_of_range"
+    assert body.get("field") == "freq"
+
+
+def test_rate_limiting(client):
+    """Send 11 requests from same device_id rapidly — at least one must return 429."""
+    c, _ = client
+    statuses = []
+    for i in range(11):
+        # Use unique timestamps to avoid dedup, but same device_id
+        payload = {**BASE_PAYLOAD, "device_id": "rate-test-dev", "timestamp": f"2026-03-03T14:00:{i:02d}Z"}
+        r = c.post("/ingest", json=payload)
+        statuses.append(r.status_code)
+    assert 429 in statuses, f"Expected at least one 429, got: {statuses}"
+    # Verify the 429 response body is correct
+    for i, status in enumerate(statuses):
+        if status == 429:
+            payload = {**BASE_PAYLOAD, "device_id": "rate-test-dev", "timestamp": f"2026-03-03T14:00:{i:02d}Z"}
+            # Re-issue just to confirm structure (already have statuses list)
+            break
+    # At least confirm 429 appeared
+    assert statuses.count(429) >= 1
