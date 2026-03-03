@@ -1,9 +1,41 @@
+# Git history
 .git
+
+# PlatformIO build cache
 .pio
+
+# Flutter build outputs
 app/build
+app/android/app/debug
+app/android/app/profile
+app/android/app/release
+app/android/.kotlin
+
+# Flutter generated files
 app/.dart_tool
 app/.flutter-plugins
 app/.flutter-plugins-dependencies
-*.log
+
+# Windows platform artifacts (useless in Linux Docker)
+app/windows/
+
+# Duplicate firmware copies inside app/ (not used by any Dockerfile)
+app/firmware/
+app/m5stick_firmware/
+
+# Documentation (not needed in any image)
+docs/
+app/docs/
+app/docs_gr/
+
+# Claude Code session state
+.claude/
+app/.claude/
+
+# Editor config
+.vscode/
+
+# Logs and backups (recurse into subdirs)
+**/*.log
 *.bak
 *.backup
