@@ -1,0 +1,49 @@
+# docker-compose.override.yml.example
+#
+# WHAT IS docker-compose.override.yml?
+# ─────────────────────────────────────
+# Docker Compose automatically merges `docker-compose.override.yml` on top of
+# `docker-compose.yml` whenever you run `docker compose up` (or any other
+# compose command).  This lets each developer customise their local environment
+# without touching the shared compose files that are committed to git.
+#
+# HOW TO USE
+# ──────────────────────────────────────
+# 1. Copy this file to `docker-compose.override.yml` in the repo root:
+#
+#      cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# 2. Edit `docker-compose.override.yml` to suit your local setup.
+#
+# 3. docker-compose.override.yml is already listed in .gitignore, so your
+#    local tweaks will never accidentally be committed.
+#
+# 4. Run as normal — the override is applied automatically:
+#
+#      docker compose up             # or: make collect
+#      docker compose build firmware # override applies here too
+#
+# MERGING RULES (quick reference)
+# ──────────────────────────────────────
+# - `environment` lists are merged (items from the override are added/replaced).
+# - `volumes` lists are merged (extra mounts are added).
+# - Scalar values (image, command, etc.) in the override REPLACE the base value.
+# - Use `<<: *anchor` YAML syntax if you need more complex inheritance.
+#
+# See the official docs for the full merge specification:
+#   https://docs.docker.com/compose/multiple-compose-files/merge/
+
+# Copy to docker-compose.override.yml for local customization
+# Docker Compose merges this automatically
+services:
+  firmware:
+    environment:
+      - DEBUG=1
+
+  flutter:
+    volumes:
+      - ./app:/workspace/app  # mount local app for faster iteration
+
+  ml:
+    environment:
+      - EPOCHS=5  # faster training in dev
