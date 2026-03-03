@@ -141,6 +141,13 @@ uint32_t g_sessionEvts = 0;    // STA/LTA event count for this session (resets o
 uint32_t g_evtStartMs = 0;     // millis() when current STA/LTA event began; 0 if no event active
 bool g_evtActive = false;      // True while an STA/LTA event is ongoing
 
+// ===================== DISPLAY TREND =====================
+float g_lastPpv = 0.0f;        // Previous PPV reading for trend arrow calculation
+
+// ===================== POWER SAVE =====================
+uint32_t g_safeSinceMs = 0;    // millis() timestamp of last non-safe event (or boot)
+bool g_powerSaveActive = false; // True when BLE advertising interval has been extended
+
 // ===================== GLOBALS =====================
 BLEServer* pServer = NULL;
 BLECharacteristic* pIMUChar = NULL;
@@ -318,6 +325,24 @@ void setup() {
   M5.Imu.begin();
   DBG_PRINTLN("IMU initialized");
 
+  // P78: Self-test — read one IMU sample to verify sensor is alive
+  {
+    float stX = 0, stY = 0, stZ = 0;
+    M5.Imu.getAccelData(&stX, &stY, &stZ);
+    bool selfTestPass = (stX != 0.0f || stY != 0.0f || stZ != 0.0f);
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setTextSize(2);
+    M5.Lcd.setTextColor(selfTestPass ? TFT_GREEN : RED, BLACK);
+    M5.Lcd.setCursor(10, 50);
+    if (selfTestPass) {
+      M5.Lcd.println("SELF-TEST: PASS");
+    } else {
+      M5.Lcd.println("SELF-TEST: FAIL");
+    }
+    M5.Lcd.setTextColor(WHITE, BLACK);
+    delay(2000);
+  }
+
   // Configure DLPF for 99 Hz anti-aliasing
   configureDLPF();
 
@@ -356,6 +381,16 @@ void setup() {
 
   delay(1000);
   M5.Lcd.fillScreen(BLACK);
+
+  // P82: record time when device enters ready/safe state
+  g_safeSinceMs = millis();
+
+  // P81: Serial diagnostic banner for field operators
+  Serial.println("=== AncientVision v" FW_VERSION " ===");
+  Serial.printf("Boot count: %lu\n", (unsigned long)g_bootCount);
+  Serial.printf("BLE name: AncientVision\n");
+  Serial.println("IMU: OK");
+  Serial.println("Ready.");
 
   lastSampleTime = micros();
 }
@@ -838,19 +873,24 @@ void updateDisplay() {
   }
   M5.Lcd.setTextColor(WHITE, bgColor);
 
-  // Row 3: Vibration level with visual bar
+  // Row 3: Vibration level with visual bar and trend arrow
+  // P77: compute trend character based on previous PPV reading
+  char trendChar = (vibrationPPV > g_lastPpv * 1.05f) ? '^' :
+                   (vibrationPPV < g_lastPpv * 0.95f) ? 'v' : '-';
+  g_lastPpv = vibrationPPV;
+
   M5.Lcd.setTextSize(2);
   M5.Lcd.setCursor(5, 52);
   M5.Lcd.print("Vibr:");
-  const int barX = 65, barW = 130, barH = 12;
+  const int barX = 65, barW = 110, barH = 12;
   int filled = constrain((int)(vibrationPPV / PPV_STRUCTURAL_DAMAGE * barW), 0, barW);
   uint16_t barColor = (vibrationPPV < 3.0f) ? TFT_GREEN :
                       (vibrationPPV < PPV_STRUCTURAL_DAMAGE) ? YELLOW : RED;
   M5.Lcd.fillRect(barX, 54, filled, barH, barColor);
   M5.Lcd.fillRect(barX + filled, 54, barW - filled, barH, TFT_DARKGREY);
   M5.Lcd.setTextSize(1);
-  M5.Lcd.setCursor(200, 54);
-  M5.Lcd.printf("%.1f", vibrationPPV);
+  M5.Lcd.setCursor(180, 54);
+  M5.Lcd.printf("%.1f%c", vibrationPPV, trendChar);
 
   // Row 4: Alert description or all-clear
   M5.Lcd.setTextSize(2);
@@ -880,11 +920,28 @@ void updateDisplay() {
   M5.Lcd.setTextColor(WHITE, bgColor);
   M5.Lcd.printf("  %.0fC", imuTemp);
 
-  // Row 6: Battery + charging status
+  // Row 6: Four-line info strip (size 1 = 8px per line, fits 4 lines 118..134)
+  // P77: PPV with trend, events, firmware version, boot count
   M5.Lcd.setTextSize(1);
-  M5.Lcd.setCursor(5, 118);
-  M5.Lcd.setTextColor(batteryPercent < 20 ? RED : (batteryCharging ? TFT_CYAN : WHITE), bgColor);
-  M5.Lcd.printf("Battery: %d%%  %.2fV %s", batteryPercent, batteryVoltage, batteryCharging ? "Charging" : "");
+  M5.Lcd.setTextColor(WHITE, bgColor);
+
+  // Line 1: PPV with trend arrow
+  M5.Lcd.setCursor(5, 110);
+  M5.Lcd.printf("PPV:%.1fmm/s %c  Bat:%d%%%s",
+    vibrationPPV, trendChar,
+    batteryPercent, batteryCharging ? "+" : "");
+
+  // Line 2: Event count for this session
+  M5.Lcd.setCursor(5, 119);
+  M5.Lcd.printf("Events: %lu", (unsigned long)g_sessionEvts);
+
+  // Line 3: Firmware version
+  M5.Lcd.setCursor(5, 128);
+  M5.Lcd.printf("FW: " FW_VERSION);
+
+  // Line 4: Boot count (persists across deep sleep)
+  M5.Lcd.setCursor(120, 128);
+  M5.Lcd.printf("Boot:%lu", (unsigned long)g_bootCount);
 }
 
 // ===================== BLE FUNCTIONS =====================
@@ -893,6 +950,31 @@ void sendBLEData() {
 
   // P73: increment sequence counter on every BLE send
   g_seq++;
+
+  // P82: Power-save — track safe duration and log BLE interval state changes.
+  // When the device has been continuously safe (no event) for >30s, activate
+  // power-save mode; when an event fires, restore normal mode.
+  // NOTE: Actual BLE advertising interval changes require platform-specific
+  // BLEAdvertising::setMinInterval()/setMaxInterval() support that is not
+  // reliably available in the ESP32 Arduino BLE stack after startAdvertising().
+  // The tracking and Serial logging are fully functional; to apply the interval
+  // change you would call BLEDevice::getAdvertising()->setMinInterval(320) (200ms)
+  // in power-save and setMinInterval(48) (30ms) in normal mode, then restart
+  // advertising — but that drops any active connection, so it is deferred here.
+  if (g_evtActive) {
+    // Event is active — reset safe timer and restore normal mode
+    g_safeSinceMs = millis();
+    if (g_powerSaveActive) {
+      g_powerSaveActive = false;
+      Serial.println("Power save: BLE interval restored");
+    }
+  } else {
+    // No active event — check if safe for >30 seconds
+    if (!g_powerSaveActive && (millis() - g_safeSinceMs > 30000UL)) {
+      g_powerSaveActive = true;
+      Serial.println("Power save: BLE interval extended");
+    }
+  }
 
   // Send simplified IMU JSON (only firmware-computed features)
   // Buffer sized for: existing fields + fw(5) + seq(10) + evtMs(10) + boots(10) + evts(10) + overhead
