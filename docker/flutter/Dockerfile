@@ -9,7 +9,9 @@ RUN yes | sdkmanager --licenses || true
 # This file is excluded from the Docker build context via .dockerignore because
 # the host copy contains Windows-specific paths (C:\Users\...). The container
 # uses the SDK paths baked into the cirruslabs/flutter image instead.
-RUN echo "sdk.dir=${ANDROID_SDK_ROOT}" > android/local.properties && \
+# mkdir -p ensures android/ exists before the first COPY step.
+RUN mkdir -p android && \
+    echo "sdk.dir=${ANDROID_SDK_ROOT}" > android/local.properties && \
     echo "flutter.sdk=${FLUTTER_ROOT}" >> android/local.properties && \
     echo "flutter.buildMode=release" >> android/local.properties && \
     echo "flutter.versionName=1.0.0" >> android/local.properties && \
