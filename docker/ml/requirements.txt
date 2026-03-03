@@ -1,0 +1,4 @@
+numpy==1.26.4
+scikit-learn==1.4.2
+tensorflow-cpu==2.16.1
+flatbuffers==24.3.25
