@@ -14,6 +14,7 @@ Model: 17 -> 16 -> 8 -> 4 (softmax), exported to TFLite.
 import datetime
 import json
 import os
+import random
 import subprocess
 import sys as _sys
 
@@ -25,7 +26,11 @@ from sklearn.preprocessing import label_binarize
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.utils.class_weight import compute_class_weight
 
+# P132: Fix random seeds for reproducibility
+random.seed(42)
 np.random.seed(42)
+tf.random.set_seed(42)
+print("Random seed fixed: 42")
 
 # ---------------------------------------------------------------------------
 # 1. Synthetic data generation
@@ -309,8 +314,6 @@ print(f"[CV] Per-fold: {[round(s, 3) for s in cv_scores]}")
 # 4. Neural net (TFLite-exportable)
 # ---------------------------------------------------------------------------
 
-tf.random.set_seed(42)
-
 # P21: Compute class weights for imbalanced training set
 class_weights_arr = compute_class_weight('balanced', classes=np.unique(y_trainval), y=y_trainval)
 class_weight_dict = dict(enumerate(class_weights_arr))
@@ -390,6 +393,17 @@ _y_true_binarized = label_binarize(test_true, classes=list(range(len(CLASS_NAMES
 _roc_auc_macro = float(roc_auc_score(_y_true_binarized, test_pred_probs, average='macro',
                                       multi_class='ovr'))
 print(f"[P129] ROC AUC (macro OvR, {len(CLASS_NAMES)} classes): {_roc_auc_macro:.4f}")
+
+# ---------------------------------------------------------------------------
+# P133: Per-device accuracy (if device_id available in training data)
+# ---------------------------------------------------------------------------
+
+# The training data is fully synthetic numpy arrays with no device_id column.
+# When real field data (CSV with a device_id column) is used, load it here and
+# evaluate the holdout set per unique device_id to produce per-device accuracy.
+# For synthetic data: skip with a note.
+_per_device_accuracy: dict = {}
+print("[P133] Skipping per-device accuracy: training data is synthetic (no device_id column).")
 
 # ---------------------------------------------------------------------------
 # 5. Export to TFLite
@@ -492,6 +506,7 @@ metrics = {
     "cv_accuracy_std": float(cv_scores.std()),
     "holdout_accuracy": holdout_acc,
     "roc_auc": _roc_auc_macro,
+    "per_device_accuracy": _per_device_accuracy,
     "model_size_bytes": int(os.path.getsize(tflite_path)),
 }
 with open(metrics_path, "w") as f:

@@ -6,14 +6,17 @@ exports TFLite model + scaler/config JSON to both firmware and Flutter asset dir
 
 import json
 import os
+import random
 
 import numpy as np
 import tensorflow as tf
 from sklearn.preprocessing import StandardScaler
 
-# Seeds
+# P132: Fix random seeds for reproducibility
+random.seed(42)
 np.random.seed(42)
 tf.random.set_seed(42)
+print("Random seed fixed: 42")
 
 N_SAMPLES = 10000
 
