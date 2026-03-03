@@ -63,22 +63,47 @@ def generate_class(name: str, n: int) -> np.ndarray:
             _uniform(0.0, 0.5, n),     # cusum_max
             _uniform(0.0, 0.3, n),     # autoencoder_score
         ])
+    elif name == "normal_human_activity":
+        # Footsteps/tools: high freq, very low PPV, short-duration high crest, low kurtosis
+        return np.column_stack([
+            _uniform(0.005, 0.04, n),  # rms very low
+            _uniform(0.001, 0.05, n),  # ppv very low
+            _uniform(30, 80, n),       # freq high (footstep/tool impact)
+            _uniform(6.0, 9.0, n),     # crest HIGH (impulsive but short)
+            _uniform(30, 70, n),       # centroid high-freq
+            _uniform(0.5, 2.5, n),     # kurtosis LOW (not geotechnical impulsive)
+            _uniform(0.5, 1.5, n),     # stalta low (no sustained trigger)
+            _uniform(0.0, 0.01, n),    # arias very low
+            _uniform(0.0, 0.05, n),    # cav very low
+            _uniform(15, 35, n),       # temp
+            _uniform(-2, 0.5, n),      # psdSlope (flatter, high-freq dominated)
+            _uniform(0.9, 1.1, n),     # ppv_trend stable
+            _uniform(0.9, 1.1, n),     # freq_trend stable
+            _uniform(0.9, 1.1, n),     # kurtosis_trend stable
+            _uniform(0.9, 1.1, n),     # stalta_trend stable
+            _uniform(0.0, 0.3, n),     # cusum_max low
+            _uniform(0.0, 0.2, n),     # autoencoder_score low
+        ])
     elif name == "soil_creep":
+        # Trend correlation: ppv_trend and kurtosis_trend both rise together
+        corr_factor = np.random.uniform(0, 0.8, n)
+        ppv_trend = np.random.uniform(0, 1, n) * 0.7 + 0.8 + corr_factor   # 0.8+corr to 1.5+corr
+        kurtosis_trend = np.random.uniform(0, 1, n) * 0.7 + 0.8 + corr_factor
         return np.column_stack([
             _uniform(0.1, 0.8, n),     # rms
-            _uniform(0.3, 2.0, n),     # ppv
-            _uniform(2, 20, n),        # freq  (dropping)
+            _uniform(0.3, 2.0, n),     # ppv (was 0.2-0.8)
+            _uniform(3.0, 20.0, n),    # freq slowly dropping (was 5-30)
             _uniform(2.0, 5.0, n),     # crest
             _uniform(3, 25, n),        # centroid
             _uniform(1.0, 6.0, n),     # kurtosis (rising)
-            _uniform(1.0, 3.0, n),     # stalta
+            _uniform(2.0, 8.0, n),     # stalta (was 1.5-5.0)
             _uniform(0.02, 0.3, n),    # arias
             _uniform(0.1, 1.0, n),     # cav
             _uniform(15, 35, n),       # temp
             _uniform(-4, -1, n),       # psdSlope
-            _uniform(1.1, 1.6, n),     # ppv_trend >1.1
+            ppv_trend,                 # ppv_trend correlated with kurtosis_trend
             _uniform(0.5, 0.9, n),     # freq_trend <0.9
-            _uniform(1.1, 1.5, n),     # kurtosis_trend >1.1
+            kurtosis_trend,            # kurtosis_trend correlated with ppv_trend
             _uniform(0.9, 1.3, n),     # stalta_trend
             _uniform(0.3, 2.0, n),     # cusum_max
             _uniform(0.1, 0.6, n),     # autoencoder_score
@@ -86,12 +111,12 @@ def generate_class(name: str, n: int) -> np.ndarray:
     elif name == "crack_propagation":
         return np.column_stack([
             _uniform(0.2, 1.5, n),     # rms
-            _uniform(0.5, 4.0, n),     # ppv
+            _uniform(0.5, 3.0, n),     # ppv (was 0.3-1.5)
             _uniform(5, 40, n),        # freq
-            _uniform(4.0, 12.0, n),    # crest HIGH
+            _uniform(8.0, 20.0, n),    # crest HIGH impulsive (was 4.0-12.0)
             _uniform(10, 50, n),       # centroid
-            _uniform(3.0, 12.0, n),    # kurtosis HIGH
-            _uniform(2.0, 8.0, n),     # stalta HIGH
+            _uniform(6.0, 15.0, n),    # kurtosis clearly impulsive (was 2.0-8.0)
+            _uniform(5.0, 12.0, n),    # stalta HIGH (was 2.0-8.0)
             _uniform(0.05, 0.8, n),    # arias
             _uniform(0.3, 2.5, n),     # cav
             _uniform(15, 35, n),       # temp
@@ -105,13 +130,13 @@ def generate_class(name: str, n: int) -> np.ndarray:
         ])
     elif name == "imminent_failure":
         return np.column_stack([
-            _uniform(0.5, 5.0, n),     # rms
-            _uniform(1.0, 10.0, n),    # ppv VERY HIGH
-            _uniform(1, 8, n),         # freq LOW
+            _uniform(1.0, 5.0, n),     # rms (was 0.5-3.0)
+            _uniform(2.0, 8.0, n),     # ppv VERY HIGH (was 1.0-5.0)
+            _uniform(0.5, 5.0, n),     # freq deep low-freq collapse (was 1-10)
             _uniform(4.0, 15.0, n),    # crest
             _uniform(2, 15, n),        # centroid
-            _uniform(4.0, 15.0, n),    # kurtosis
-            _uniform(3.0, 12.0, n),    # stalta
+            _uniform(10.0, 20.0, n),   # kurtosis (was 5.0-15.0)
+            _uniform(8.0, 15.0, n),    # stalta (was 5.0-12.0)
             _uniform(0.2, 3.0, n),     # arias
             _uniform(1.0, 8.0, n),     # cav
             _uniform(15, 35, n),       # temp
@@ -128,16 +153,21 @@ def generate_class(name: str, n: int) -> np.ndarray:
 
 
 samples = {
-    "normal": 3000,
-    "soil_creep": 2000,
-    "crack_propagation": 2000,
-    "imminent_failure": 1500,
+    "normal": 3200,          # 3200 baseline + 400 human_activity = 3600 total
+    "soil_creep": 2400,
+    "crack_propagation": 2400,
+    "imminent_failure": 1800,
 }
 
 X_parts, y_parts = [], []
 for i, (cls, n) in enumerate(samples.items()):
     X_parts.append(generate_class(cls, n))
     y_parts.append(np.full(n, i, dtype=np.int32))
+
+# Append 400 "human activity" samples as label=0 (normal)
+_human_n = 400
+X_parts.append(generate_class("normal_human_activity", _human_n))
+y_parts.append(np.full(_human_n, 0, dtype=np.int32))  # label 0 = normal
 
 X = np.vstack(X_parts).astype(np.float32)
 y = np.concatenate(y_parts)
