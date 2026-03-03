@@ -5,26 +5,25 @@ WORKDIR /app
 # Accept Android SDK licenses non-interactively.
 RUN yes | sdkmanager --licenses || true
 
-# Create local.properties with Linux SDK paths.
-# This file is excluded from the Docker build context via .dockerignore because
-# the host copy contains Windows-specific paths (C:\Users\...). The container
-# uses the SDK paths baked into the cirruslabs/flutter image instead.
-# mkdir -p ensures android/ exists before the first COPY step.
-RUN mkdir -p android && \
-    echo "sdk.dir=${ANDROID_SDK_ROOT}" > android/local.properties && \
-    echo "flutter.sdk=${FLUTTER_ROOT}" >> android/local.properties && \
-    echo "flutter.buildMode=release" >> android/local.properties && \
-    echo "flutter.versionName=1.0.0" >> android/local.properties && \
-    echo "flutter.versionCode=1" >> android/local.properties
-
-# Copy pubspec files first so that the dependency-fetch layer is cached
+# Copy pubspec files first so that the flutter pub get layer is cached
 # independently of application source changes.
-COPY app/pubspec.yaml app/pubspec.lock* ./
+COPY app/pubspec.yaml app/pubspec.lock ./
 
 RUN flutter pub get
 
-# Copy the rest of the application source after dependencies are resolved.
+# Copy the rest of the application source.
 COPY app/ .
+
+# Create local.properties with the container's SDK paths.
+# Written AFTER COPY app/ so it cannot be overwritten by the host file
+# (which is excluded from the build context via .dockerignore because
+# it contains Windows-specific absolute paths).
+# Flutter SDK path is derived from the flutter binary on PATH to avoid
+# relying on a specific env var name that may vary across image versions.
+RUN FLUTTER_SDK=$(dirname $(dirname $(which flutter))) && \
+    echo "sdk.dir=${ANDROID_SDK_ROOT}" > android/local.properties && \
+    echo "flutter.sdk=${FLUTTER_SDK}" >> android/local.properties && \
+    echo "flutter.buildMode=release" >> android/local.properties
 
 # Default command: build a release APK.
 CMD ["flutter", "build", "apk", "--release"]
