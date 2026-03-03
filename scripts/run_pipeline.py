@@ -49,10 +49,10 @@ def main() -> None:
         print(f"  {p} ({p.stat().st_size} bytes)", flush=True)
 
     # Trigger APK build via Docker-in-Docker if host socket is available
-    if Path("/var/run/docker.sock").exists():
+    if Path("/var/run/docker.sock").exists() and shutil.which("docker"):
         run(["docker", "compose", "run", "--rm", "flutter"])
     else:
-        print("Docker socket not available — skipping APK build.", flush=True)
+        print("Docker socket or CLI not available — skipping APK build.", flush=True)
 
     # Archive processed field data
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
