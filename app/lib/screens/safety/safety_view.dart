@@ -191,12 +191,22 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
   // P47: All-clear timer (30s continuous normal before showing green confirmed)
   DateTime? _normalSince;
 
+  // P50: Haptic feedback on level escalation
+  AnomalyLevel _lastLevel = AnomalyLevel.unknown;
+
   // P57: Inference debounce — max 2Hz
   DateTime? _lastInferenceTime;
+
+  // P59: Alert escalation — track how long device has been at AnomalyLevel.anomaly
+  DateTime? _anomalySince;
 
   // P60: Stale data detection (5s no data → show dashes)
   bool _isStale = false;
   Timer? _staleTimer;
+
+  // P62: Packet sequence tracking
+  int _lastSeq = 0;
+  DateTime _lastPacketTime = DateTime.now();
 
   // P61: Session timer
   final DateTime _sessionStart = DateTime.now();
@@ -791,6 +801,12 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
         }
       });
 
+      // P62: Track packet sequence number from firmware "seq" field
+      if (data.containsKey('seq')) {
+        _lastSeq = (data['seq'] as num).toInt();
+        _lastPacketTime = DateTime.now();
+      }
+
       // Debug: log received data with full UUID
       debugPrint('>>> PARSED BLE Data UUID=$charUuid data=$data');
 
@@ -1105,6 +1121,23 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
         } else {
           _normalSince ??= DateTime.now();
         }
+
+        // P59: Track how long device stays at AnomalyLevel.anomaly
+        if (result.level == AnomalyLevel.anomaly) {
+          _anomalySince ??= DateTime.now();
+        } else {
+          _anomalySince = null;
+        }
+
+        // P50: Haptic feedback on level UP transitions
+        if (result.level.index > _lastLevel.index) {
+          if (result.level == AnomalyLevel.anomaly) {
+            HapticFeedback.vibrate(); // strong — escalated to anomaly
+          } else {
+            HapticFeedback.mediumImpact(); // moderate escalation
+          }
+        }
+        _lastLevel = result.level;
 
         // Alarm + haptic for red-level ML anomaly
         if (result.level == AnomalyLevel.anomaly && result.score >= 0.8) {
@@ -1940,11 +1973,41 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
 
   /// Build STATUS tab - most important, shown first
   Widget _buildStatusTab(bool isConnected) {
+    // P59: Check if anomaly has been sustained >15s → escalate display to CRITICAL
+    final bool _isEscalatedCritical = _anomalySince != null &&
+        DateTime.now().difference(_anomalySince!).inSeconds > 15;
+
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // P59: Escalation banner — shown when anomaly sustained >15s
+          if (_isEscalatedCritical) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              margin: const EdgeInsets.only(bottom: 12),
+              decoration: BoxDecoration(
+                color: Colors.red.withAlpha(40),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.red.withAlpha(150), width: 1.5),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.crisis_alert_rounded, color: Colors.red, size: 20),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'CRITICAL — Anomaly sustained for ${DateTime.now().difference(_anomalySince!).inSeconds}s. Evacuate area immediately.',
+                      style: const TextStyle(color: Colors.red, fontSize: 13, fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+
           // STATS ROW - PPV (primary metric) + Moisture
           Row(
             children: [
@@ -2019,12 +2082,14 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'PRECURSOR: ${_formatPrecursorPattern(_lastPrecursorPattern!)}',
+                          'PRECURSOR: ${_getPrecursorDescription(_lastPrecursorPattern)}',
                           style: const TextStyle(color: Color(0xFFFF6F00), fontSize: 13, fontWeight: FontWeight.w700),
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          'Confidence: ${(_lastPrecursorScore * 100).toStringAsFixed(0)}% — Physics-informed pattern match',
+                          'Confidence: ${(_lastPrecursorScore * 100).toStringAsFixed(0)}%'
+                          '${_lastAnomalyResult.precursorConfidence >= 0.0 ? ' · Classifier: ${(_lastAnomalyResult.precursorConfidence * 100).toStringAsFixed(1)}%' : ''}'
+                          ' — Physics-informed pattern match',
                           style: TextStyle(color: const Color(0xFFFF6F00).withAlpha(180), fontSize: 11),
                         ),
                       ],
@@ -2093,6 +2158,23 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
               anomalyHistory: _anomalyScoreHistory.toList(),
               modelVersion: _anomalyService.modeLabel,
             ),
+          // P58: Confidence display alongside anomaly score
+          if (_mlModelLoaded && _hasReceivedVibData && _lastAnomalyResult.precursorConfidence >= 0.0) ...[
+            const SizedBox(height: 4),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Row(
+                children: [
+                  Icon(Icons.percent_rounded, color: Colors.white.withAlpha(100), size: 12),
+                  const SizedBox(width: 4),
+                  Text(
+                    'Classifier confidence: ${(_lastAnomalyResult.precursorConfidence * 100).toStringAsFixed(1)}%',
+                    style: TextStyle(color: Colors.white.withAlpha(130), fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+          ],
           if (_mlModelLoaded && _hasReceivedVibData)
             const SizedBox(height: 12),
 
@@ -2507,6 +2589,15 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
                 : _t.tr('sensor_not_connected'),
             style: TextStyle(color: Colors.white.withAlpha(90), fontSize: 11),
           ),
+
+          // P62: Packet sequence number and timestamp
+          if (isConnected && _lastSeq > 0) ...[
+            const SizedBox(height: 4),
+            Text(
+              'Pkt #$_lastSeq • ${_lastPacketTime.toString().split('.').first}',
+              style: TextStyle(color: Colors.white.withAlpha(60), fontSize: 10),
+            ),
+          ],
         ],
       ),
     );
@@ -2527,10 +2618,21 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
       warnings.add(_simpleWarningRow(Icons.psychology_alt, Colors.redAccent, _t.tr('unusual_vibration')));
     }
 
+    // P59: Escalation — anomaly persisting >15s → show CRITICAL override
+    if (_anomalySince != null &&
+        DateTime.now().difference(_anomalySince!).inSeconds > 15) {
+      final elapsed = DateTime.now().difference(_anomalySince!).inSeconds;
+      warnings.add(_simpleWarningRow(
+        Icons.crisis_alert_rounded,
+        Colors.red,
+        'CRITICAL — Anomaly sustained for ${elapsed}s. Evacuate area.',
+      ));
+    }
+
     // Precursor
     if (_isPrecursorDriven && _lastPrecursorPattern != null) {
       warnings.add(_simpleWarningRow(Icons.warning_amber_rounded, const Color(0xFFFF6F00),
-        'Precursor: ${_formatPrecursorPattern(_lastPrecursorPattern!)} (${(_lastPrecursorScore * 100).toStringAsFixed(0)}%)'));
+        '${_getPrecursorDescription(_lastPrecursorPattern)} (${(_lastPrecursorScore * 100).toStringAsFixed(0)}%)'));
     }
 
     // Fukuzono / PSD
@@ -2592,6 +2694,21 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
       case 'crack_propagation': return _t.tr('crack_propagation');
       case 'imminent_failure': return _t.tr('imminent_failure');
       default: return pattern;
+    }
+  }
+
+  /// P53: Human-readable descriptions for precursor classifier output
+  String _getPrecursorDescription(String? className) {
+    switch (className) {
+      case 'soil_creep':
+        return 'Soil Creep — gradual downslope movement detected';
+      case 'crack_propagation':
+        return 'Crack Propagation — fracture activity in subsoil';
+      case 'imminent_failure':
+        return 'IMMINENT FAILURE — evacuate the area immediately';
+      case 'normal':
+      default:
+        return 'Normal ground vibration';
     }
   }
 
