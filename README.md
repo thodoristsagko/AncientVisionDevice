@@ -53,12 +53,6 @@ docker compose run --rm flutter && \
 docker compose run --rm ml
 ```
 
-Or, if a `build-all` service is defined in `docker-compose.yml`:
-
-```bash
-docker compose run --rm build-all
-```
-
 ### Output Summary
 
 | Target   | Output path                                                    |
