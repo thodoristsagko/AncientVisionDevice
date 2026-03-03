@@ -153,12 +153,14 @@ class TestSuccessfulRun:
 
     def _run_success(self, rp, field_dir):
         """
-        Run main() with subprocess mocked to succeed and docker branch disabled
-        (shutil.which returns None so the DinD block is skipped).
+        Run main() with subprocess mocked to succeed, model verification bypassed,
+        and docker branch disabled (shutil.which returns None so the DinD block is
+        skipped).
         """
         success = MagicMock(returncode=0)
         with patch("subprocess.run", return_value=success), \
-             patch("shutil.which", return_value=None):
+             patch("shutil.which", return_value=None), \
+             patch.object(rp, "_verify_new_models", return_value=True):
             rp.main()
 
     def test_baseline_count_reset_after_success(self, tmp_path, monkeypatch):
@@ -169,7 +171,7 @@ class TestSuccessfulRun:
         field_dir = rp.DATA_DIR / "field"
         field_dir.mkdir(parents=True, exist_ok=True)
         (field_dir / ".sample_count").write_text("42")
-        (field_dir / "session_001.csv").write_text("t,x,y,z\n")
+        (field_dir / "session_001.csv").write_text("t,x,y,z\n0.0,0.1,0.2,0.3\n")
 
         self._run_success(rp, field_dir)
 
@@ -184,6 +186,7 @@ class TestSuccessfulRun:
 
         field_dir = rp.DATA_DIR / "field"
         field_dir.mkdir(parents=True, exist_ok=True)
+        (field_dir / "session_001.csv").write_text("t,x,y,z\n0.0,0.1,0.2,0.3\n")
 
         self._run_success(rp, field_dir)
 
@@ -199,8 +202,93 @@ class TestSuccessfulRun:
         # field dir exists but .sample_count does NOT.
         field_dir = rp.DATA_DIR / "field"
         field_dir.mkdir(parents=True, exist_ok=True)
+        (field_dir / "session_001.csv").write_text("t,x,y,z\n0.0,0.1,0.2,0.3\n")
 
         self._run_success(rp, field_dir)
 
         baseline = (rp.DATA_DIR / ".baseline_count").read_text().strip()
         assert baseline == "0"
+
+
+# ---------------------------------------------------------------------------
+# P28: Model backup and restore
+# ---------------------------------------------------------------------------
+
+class TestBackupAndRestoreModels:
+    """_backup_models / _restore_models correctly copy and restore .tflite/.json files."""
+
+    def test_backup_and_restore_models(self, tmp_path, monkeypatch):
+        rp = _load_pipeline(tmp_path, monkeypatch)
+
+        assets_dir = tmp_path / "assets"
+        assets_dir.mkdir(parents=True)
+        backup_dir = tmp_path / "backup"
+
+        # Create original model files
+        (assets_dir / "vibration_anomaly.tflite").write_bytes(b"original_tflite")
+        (assets_dir / "vibration_scaler.json").write_text('{"original": true}')
+
+        # Backup
+        rp._backup_models(assets_dir, backup_dir)
+
+        # Overwrite originals with new content
+        (assets_dir / "vibration_anomaly.tflite").write_bytes(b"new_tflite")
+        (assets_dir / "vibration_scaler.json").write_text('{"new": true}')
+
+        # Verify the overwritten files differ
+        assert (assets_dir / "vibration_anomaly.tflite").read_bytes() == b"new_tflite"
+
+        # Restore from backup
+        rp._restore_models(backup_dir, assets_dir)
+
+        # Verify originals are back
+        assert (assets_dir / "vibration_anomaly.tflite").read_bytes() == b"original_tflite"
+        assert (assets_dir / "vibration_scaler.json").read_text() == '{"original": true}'
+
+
+# ---------------------------------------------------------------------------
+# P30: Pre-training data validation
+# ---------------------------------------------------------------------------
+
+class TestValidateTrainingData:
+    """_validate_training_data raises or returns correct sample counts."""
+
+    def test_validate_training_data_empty(self, tmp_path, monkeypatch):
+        """Empty field_dir (no CSV files at all) raises RuntimeError."""
+        rp = _load_pipeline(tmp_path, monkeypatch)
+
+        field_dir = tmp_path / "field"
+        field_dir.mkdir(parents=True)
+        # No CSV files created
+
+        with pytest.raises(RuntimeError, match="No valid training samples found"):
+            rp._validate_training_data(field_dir)
+
+    def test_validate_training_data_corrupt(self, tmp_path, monkeypatch):
+        """A CSV containing only a header line (no data rows) counts as 0 samples
+        and results in a RuntimeError when it is the only file present."""
+        rp = _load_pipeline(tmp_path, monkeypatch)
+
+        field_dir = tmp_path / "field"
+        field_dir.mkdir(parents=True)
+        # Write a CSV with only a header — no data rows
+        (field_dir / "session_001.csv").write_text("t,x,y,z\n")
+
+        with pytest.raises(RuntimeError, match="No valid training samples found"):
+            rp._validate_training_data(field_dir)
+
+    def test_validate_training_data_counts_rows(self, tmp_path, monkeypatch):
+        """A CSV with a header plus 3 data rows returns a sample count of 3."""
+        rp = _load_pipeline(tmp_path, monkeypatch)
+
+        field_dir = tmp_path / "field"
+        field_dir.mkdir(parents=True)
+        (field_dir / "session_001.csv").write_text(
+            "t,x,y,z\n"
+            "0.0,0.1,0.2,0.3\n"
+            "0.005,0.4,0.5,0.6\n"
+            "0.010,0.7,0.8,0.9\n"
+        )
+
+        count = rp._validate_training_data(field_dir)
+        assert count == 3, f"Expected 3 samples, got {count}"
