@@ -1,0 +1,23 @@
+# docker-compose.collect.yml
+# Run on field laptop to collect vibration data from M5StickC and Firestore.
+# Usage: docker compose -f docker-compose.collect.yml up
+#
+# Optional Firestore sync: set GOOGLE_APPLICATION_CREDENTIALS to the path of a
+# GCP service account JSON on the host, e.g.:
+#   GOOGLE_APPLICATION_CREDENTIALS=/path/to/creds.json \
+#   docker compose -f docker-compose.collect.yml up
+
+services:
+
+  data-collector:
+    build:
+      context: .
+      dockerfile: docker/collect/Dockerfile
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./data:/workspace/data
+    environment:
+      - DATA_DIR=/workspace/data
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-}
+    restart: unless-stopped
