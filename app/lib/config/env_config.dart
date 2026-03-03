@@ -22,7 +22,7 @@ class EnvConfig {
 
   static const String geminiApiKey = String.fromEnvironment(
     'GEMINI_API_KEY',
-    defaultValue: 'AIzaSyCHz6ruZy1mziMJe_MDH5jlUhKTDqxo4e4',
+    defaultValue: '',
   );
 
   static const String openScanUsername = String.fromEnvironment(
