@@ -9,12 +9,9 @@
 #
 # Data persistence:
 #   - ./data          — bind-mount for easy host access to CSVs
-#   - field-data      — named Docker volume for durable persistence across reboots
 #
-# Backup:   docker run --rm -v field-data:/data -v $(pwd):/backup alpine \
-#             tar czf /backup/field-data-backup.tar.gz -C /data .
-# Restore:  docker run --rm -v field-data:/data -v $(pwd):/backup alpine \
-#             tar xzf /backup/field-data-backup.tar.gz -C /data
+# Backup:   tar czf field-data-backup.tar.gz -C ./data .
+# Restore:  tar xzf field-data-backup.tar.gz -C ./data
 
 services:
 
@@ -26,12 +23,7 @@ services:
       - "8765:8765"
     volumes:
       - ./data:/workspace/data
-      - field-data:/workspace/data-volume
     environment:
       - DATA_DIR=/workspace/data
       - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-}
     restart: unless-stopped
-
-volumes:
-  field-data:
-    driver: local
