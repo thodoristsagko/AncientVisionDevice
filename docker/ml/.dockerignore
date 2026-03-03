@@ -1,0 +1,8 @@
+.git
+src/
+docker/firmware/
+docker/flutter/
+data/field/*.csv
+app/
+docs/
+.pio/

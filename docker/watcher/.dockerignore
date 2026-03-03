@@ -1,0 +1,10 @@
+.git
+src/
+app/
+docker/firmware/
+docker/flutter/
+docker/ml/
+docker/collect/
+scripts/
+docs/
+.pio/
