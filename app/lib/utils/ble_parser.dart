@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 
 /// Result of parsing BLE characteristic data.
 sealed class BleParseResult {}
@@ -7,6 +8,7 @@ class ImuData extends BleParseResult {
   final double x, y, z, vib, ppv, rms, freq, crest, cent, kurt, stalta;
   final double arias, cav, temp, dwt1, dwt2, dwt3; // v4.0 fields
   final double peak; // v5.0: peak acceleration
+  final int seq; // v5.1: firmware sequence number for missed-packet detection
 
   ImuData({
     required this.x,
@@ -27,6 +29,7 @@ class ImuData extends BleParseResult {
     this.dwt2 = 0,
     this.dwt3 = 0,
     this.peak = 0,
+    this.seq = 0,
   });
 }
 
@@ -200,6 +203,8 @@ BleParseResult parseBleJson(String jsonStr, String charUuid) {
       dwt3: (data['dwt3'] as num?)?.toDouble() ?? 0.0,
       // v5.0 firmware field (backward compatible)
       peak: (data['peak'] as num?)?.toDouble() ?? 0.0,
+      // v5.1 firmware field: sequence number for missed-packet detection
+      seq: (data['seq'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -231,4 +236,13 @@ BleParseResult parseBleJson(String jsonStr, String charUuid) {
   }
 
   return BleParseError('unknown_uuid: $charUuid');
+}
+
+/// Returns true if the BLE device name matches the AncientVision prefix.
+/// Use this to filter scan results before connecting.
+bool isAncientVisionDevice(String? deviceName) {
+  if (deviceName == null || deviceName.isEmpty) return false;
+  return deviceName.toLowerCase().startsWith('ancientvision') ||
+      deviceName.toLowerCase().startsWith('ancient_vision') ||
+      deviceName.toLowerCase().startsWith('av_sensor');
 }
