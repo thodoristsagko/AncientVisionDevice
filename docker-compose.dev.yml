@@ -1,0 +1,51 @@
+# docker-compose.dev.yml
+# Interactive development shells for each build environment.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml run --rm ml-dev        # Python + TensorFlow shell
+#   docker compose -f docker-compose.dev.yml run --rm flutter-dev   # Flutter + Android SDK shell
+#   docker compose -f docker-compose.dev.yml run --rm firmware-dev  # PlatformIO shell
+#
+# All containers mount the full repo so changes are reflected immediately.
+# Use Ctrl+D or `exit` to leave the shell.
+#
+# To smoke-test an env without entering interactively, pass a command:
+#   docker compose -f docker-compose.dev.yml run --rm ml-dev python --version
+
+services:
+
+  ml-dev:
+    build:
+      context: .
+      dockerfile: docker/ml/Dockerfile
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    entrypoint: [""]
+    command: ["/bin/bash"]
+    stdin_open: true
+    tty: true
+
+  flutter-dev:
+    build:
+      context: .
+      dockerfile: docker/flutter/Dockerfile
+    volumes:
+      - ./app:/app
+    working_dir: /app
+    entrypoint: [""]
+    command: ["/bin/bash"]
+    stdin_open: true
+    tty: true
+
+  firmware-dev:
+    build:
+      context: .
+      dockerfile: docker/firmware/Dockerfile
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    entrypoint: [""]
+    command: ["/bin/bash"]
+    stdin_open: true
+    tty: true
