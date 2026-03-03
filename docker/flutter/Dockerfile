@@ -1,9 +1,14 @@
 FROM ghcr.io/cirruslabs/flutter:3.22.3
 
-WORKDIR /app
+# The image ships with an empty /etc/passwd, which causes any user-name
+# lookup (including Docker BuildKit's own startup) to fail with
+# "unable to find user root".  Switch to numeric UID 0 (no name lookup
+# required) and populate /etc/passwd so that subsequent tools work.
+USER 0
+RUN printf 'root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534::/nonexistent:/usr/sbin/nologin\n' > /etc/passwd \
+ && printf 'root:x:0:\nnobody:x:65534:\n' > /etc/group
 
-# Accept Android SDK licenses non-interactively.
-RUN yes | sdkmanager --licenses || true
+WORKDIR /app
 
 # Copy pubspec files first so that the flutter pub get layer is cached
 # independently of application source changes.

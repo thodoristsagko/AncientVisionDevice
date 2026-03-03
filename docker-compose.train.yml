@@ -29,6 +29,7 @@ services:
       - ./app/assets/ml:/workspace/app/assets/ml
       - ./app/build:/workspace/app/build
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./docker-compose.yml:/workspace/docker-compose.yml:ro
     environment:
       - DATA_DIR=/workspace/data
     entrypoint: ["python", "scripts/run_pipeline.py"]
