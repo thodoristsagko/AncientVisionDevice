@@ -4,7 +4,8 @@
 .DEFAULT_GOAL := help
 
 .PHONY: help build firmware flutter ml collect train monitor dev-ml dev-flutter dev-firmware \
-        test simulate backup logs clean
+        test simulate backup logs clean report drift validate-config quality-check \
+        label replay schedule playback sync annotate
 
 # ---------------------------------------------------------------------------
 # Help
@@ -32,6 +33,16 @@ help:
 	@echo "  backup         Run scripts/backup_data.sh"
 	@echo "  logs           Tail logs from data-collector service"
 	@echo "  clean          Stop all compose stacks and prune Docker system"
+	@echo ""
+	@echo "  report         Generate Markdown field report from collected CSVs"
+	@echo "  drift          Check feature drift vs training distribution"
+	@echo "  validate-config Validate all ML JSON config/scaler files"
+	@echo "  quality-check  Show data quality dashboard (one-shot)"
+	@echo "  label          Interactive session labeling CLI"
+	@echo "  annotate       Auto-label unlabeled CSV rows by threshold"
+	@echo "  replay         Replay a field CSV against the collector"
+	@echo "  schedule       Trigger retraining check (--once mode)"
+	@echo "  sync           Sync field CSVs to Firebase Storage"
 	@echo ""
 
 # ---------------------------------------------------------------------------
@@ -138,6 +149,60 @@ backup:
 logs:
 	@echo "==> Tailing logs from data-collector service..."
 	docker compose -f docker-compose.collect.yml logs -f data-collector
+
+# ---------------------------------------------------------------------------
+# Clean
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Field data tools
+# ---------------------------------------------------------------------------
+
+report:
+	@echo "==> Generating field data report..."
+	python scripts/generate_report.py --data-dir ./data/field --output ./data/field_report.md
+	@echo "Report written to: ./data/field_report.md"
+
+drift:
+	@echo "==> Checking feature drift vs training distribution..."
+	python scripts/data_drift_check.py --data-dir ./data/field
+
+validate-config:
+	@echo "==> Validating ML config and scaler files..."
+	python scripts/validate_config.py --assets-dir app/assets/ml
+
+quality-check:
+	@echo "==> Data quality dashboard (one-shot)..."
+	python scripts/data_quality_dashboard.py --data-dir ./data/field --refresh 0
+
+label:
+	@echo "==> Starting interactive session labeler..."
+	@if [ -z "$(CSV)" ]; then \
+		echo "Usage: make label CSV=path/to/session.csv"; exit 1; \
+	fi
+	python scripts/label_session.py $(CSV)
+
+annotate:
+	@echo "==> Auto-labeling unlabeled CSV rows by threshold..."
+	python scripts/batch_label.py --data-dir ./data/field
+
+replay:
+	@echo "==> Replaying session CSV against collector..."
+	@if [ -z "$(CSV)" ]; then \
+		echo "Usage: make replay CSV=path/to/session.csv [SPEED=1.0]"; exit 1; \
+	fi
+	python scripts/session_playback.py $(CSV) --speed $(or $(SPEED),1.0)
+
+schedule:
+	@echo "==> Running training scheduler check..."
+	python scripts/training_scheduler.py --data-dir ./data/field --once
+
+sync:
+	@echo "==> Syncing field data to Firebase Storage..."
+	@if [ -z "$(BUCKET)" ]; then \
+		echo "Usage: make sync BUCKET=my-firebase-bucket"; exit 1; \
+	fi
+	python scripts/sync_to_firebase.py --data-dir ./data/field --bucket $(BUCKET)
 
 # ---------------------------------------------------------------------------
 # Clean
