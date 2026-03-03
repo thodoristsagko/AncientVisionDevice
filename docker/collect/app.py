@@ -28,6 +28,7 @@ def create_app():
 
     count_file = field_dir / ".sample_count"
     _count_lock = threading.Lock()
+    _csv_lock = threading.Lock()
     _seen_keys: set = set()
     _seen_lock = threading.Lock()
 
@@ -48,14 +49,15 @@ def create_app():
                 return "duplicate"
             _seen_keys.add(key)
 
-        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        csv_path = field_dir / f"{date_str}.csv"
-        write_header = not csv_path.exists()
-        with open(csv_path, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=CSV_HEADER)
-            if write_header:
-                writer.writeheader()
-            writer.writerow({k: data[k] for k in CSV_HEADER})
+        with _csv_lock:
+            date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            csv_path = field_dir / f"{date_str}.csv"
+            write_header = not csv_path.exists()
+            with open(csv_path, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=CSV_HEADER)
+                if write_header:
+                    writer.writeheader()
+                writer.writerow({k: data[k] for k in CSV_HEADER})
 
         with _count_lock:
             _write_count(_read_count() + 1)
