@@ -1,0 +1,48 @@
+{
+  "model_version": "1.0",
+  "extractor": {
+    "name": "superpoint",
+    "model_file": "superpoint.tflite",
+    "input_width": 640,
+    "input_height": 480,
+    "max_keypoints": 1024,
+    "keypoint_threshold": 0.005,
+    "nms_radius": 4,
+    "descriptor_dim": 256,
+    "num_channels": 1
+  },
+  "matcher": {
+    "name": "lightglue",
+    "model_file": "lightglue.tflite",
+    "descriptor_dim": 256,
+    "num_heads": 4,
+    "num_layers": 9,
+    "match_threshold": 0.2,
+    "width_confidence": 0.99,
+    "depth_confidence": 0.95,
+    "flash_attention": false
+  },
+  "alternatives": {
+    "aliked": {
+      "model_file": "aliked.tflite",
+      "descriptor_dim": 128,
+      "max_keypoints": 1024,
+      "keypoint_threshold": 0.2,
+      "nms_radius": 2
+    }
+  },
+  "fallback": {
+    "enabled": true,
+    "method": "harris",
+    "max_keypoints": 500,
+    "harris_k": 0.04,
+    "nms_radius": 8,
+    "descriptor_patch_size": 8
+  },
+  "preprocessing": {
+    "grayscale": true,
+    "normalize": true,
+    "mean": 0.449,
+    "std": 0.226
+  }
+}

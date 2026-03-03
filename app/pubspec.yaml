@@ -1,0 +1,87 @@
+name: ancient_vision
+description: Archaeological field management app for FLL project
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  url_launcher: ^6.2.0
+  flutter_map: ^6.1.0
+  latlong2: ^0.9.0
+  firebase_core: ^2.24.2
+  cloud_firestore: ^4.14.0
+  firebase_auth: ^4.16.0
+  firebase_storage: ^11.6.0
+  google_sign_in: ^6.2.1
+  path_provider: ^2.1.1
+  wakelock_plus: ^1.1.1
+  geolocator: ^10.1.0
+  image_picker: ^1.0.7
+  http: ^1.1.0
+  flutter_blue_plus: ^1.31.0
+  permission_handler: ^11.3.0
+  # Ultra-advanced photogrammetry features
+  image: ^4.1.7  # Advanced image processing & quality analysis
+  camera: ^0.10.5+9  # Advanced camera control (photo & video)
+  archive: ^3.4.10  # ZIP creation for exports
+  vector_math: ^2.1.4  # 3D math utilities for custom point cloud rendering
+  # ULTRA++ Advanced Features
+  mobile_scanner: ^5.1.1  # QR/barcode scanning with MLKit (modern replacement for qr_code_scanner)
+  device_info_plus: ^10.1.0  # Device info for RAM detection and hardware capabilities
+  speech_to_text: ^6.6.0  # Voice commands (hands-free)
+  flutter_tts: ^4.0.2  # Text-to-speech feedback
+  audioplayers: ^5.2.1  # Alarm sounds for safety alerts
+  shared_preferences: ^2.2.2  # Settings persistence
+  crypto: ^3.0.3  # Cryptographic hashing for PIN security
+  flutter_cache_manager: ^3.3.1  # Offline caching
+  pdf: ^3.10.7  # PDF report generation
+  share_plus: ^7.2.1  # Advanced sharing options
+  uuid: ^4.2.2  # UUID generation for reconstruction IDs
+  path: ^1.8.3  # Path manipulation utilities
+  intl: ^0.19.0  # Date/time formatting for reports
+  flutter_local_notifications: ^17.0.0  # Local push notifications
+  local_auth: ^2.1.6  # Biometric authentication (fingerprint, face, PIN)
+  flutter_background_service: ^5.0.5  # Background service to keep app running
+  flutter_background_service_android: ^6.2.2  # Android-specific background service
+  fl_chart: ^0.66.0  # Charts for analytics visualization
+  connectivity_plus: ^5.0.2  # Network connectivity monitoring for offline indicator
+  # AI & Machine Learning
+  google_mlkit_image_labeling: ^0.12.0  # On-device AI image classification
+  google_mlkit_object_detection: ^0.13.0  # Object detection for artifacts
+  google_mlkit_commons: ^0.7.1  # Shared ML Kit utilities
+  tflite_flutter: ^0.11.0
+  google_generative_ai: ^0.4.6  # Gemini AI for coin recognition  # TensorFlow Lite for custom coin classifier
+  file_picker: ^8.0.0
+  exif: ^3.3.0
+  model_viewer_plus: ^1.7.0  # GLTF/GLB 3D model viewer with textures
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^2.0.0
+  flutter_launcher_icons: ^0.13.1
+  path_provider_platform_interface: any
+  plugin_platform_interface: any
+
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/logo.png"
+  adaptive_icon_background: "#0D3A39"
+  adaptive_icon_foreground: "assets/logo.png"
+  adaptive_icon_foreground_inset: 16
+  min_sdk_android: 21
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/
+    - assets/audio/
+    - assets/ml/
+    - assets/geo/
+    - assets/data/

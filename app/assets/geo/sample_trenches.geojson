@@ -1,0 +1,61 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"name": "Trench A1", "type": "excavation"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [22.9820, 38.6230],
+          [22.9825, 38.6230],
+          [22.9825, 38.6233],
+          [22.9820, 38.6233],
+          [22.9820, 38.6230]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"name": "Trench B2", "type": "excavation"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [22.9828, 38.6231],
+          [22.9832, 38.6231],
+          [22.9832, 38.6235],
+          [22.9828, 38.6235],
+          [22.9828, 38.6231]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"name": "Temple Wall (North)", "type": "wall"},
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [22.9821, 38.6232],
+          [22.9824, 38.6232],
+          [22.9824, 38.6234]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"name": "Column Base", "type": "feature"},
+      "geometry": {
+        "type": "Point",
+        "coordinates": [22.9823, 38.6233]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"name": "Altar Foundation", "type": "feature"},
+      "geometry": {
+        "type": "Point",
+        "coordinates": [22.9830, 38.6233]
+      }
+    }
+  ]
+}
