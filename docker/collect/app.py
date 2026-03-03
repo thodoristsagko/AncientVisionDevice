@@ -89,12 +89,14 @@ def create_app():
             app.logger.info("Firestore sync disabled (no credentials)")
             return
 
+        collection_name = os.environ.get("FIRESTORE_COLLECTION", "vibration_samples")
+
         def _loop():
             from google.cloud import firestore
             db = firestore.Client()
             while True:
                 try:
-                    for doc in db.collection("vibration_samples").stream():
+                    for doc in db.collection(collection_name).stream():
                         raw = doc.to_dict()
                         raw.setdefault("label", "unknown")
                         if any(f not in raw for f in REQUIRED_FIELDS):

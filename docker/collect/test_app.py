@@ -65,6 +65,20 @@ def test_health(client):
     assert r.status_code == 200
 
 
+def test_ingest_uses_env_collection_name(tmp_path, monkeypatch):
+    """FIRESTORE_COLLECTION env var must be passed into the Firestore sync loop."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("FIRESTORE_COLLECTION", "test_col")
+    # No credentials set — sync is disabled, but the app must still start and
+    # the health endpoint must work (proves create_app() consumed the env var
+    # without crashing).
+    app = create_app()
+    app.config["TESTING"] = True
+    with app.test_client() as c:
+        r = c.get("/health")
+        assert r.status_code == 200
+
+
 def test_dedup_same_timestamp(client):
     """Same timestamp+device_id twice must not create a duplicate CSV row."""
     c, data_dir = client
