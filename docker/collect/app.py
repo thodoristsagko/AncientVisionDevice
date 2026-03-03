@@ -11,7 +11,7 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, request
@@ -31,6 +31,12 @@ REQUIRED_FIELDS = [
 
 CSV_HEADER = REQUIRED_FIELDS
 
+# Columns required for schema validation (Task 4)
+SCHEMA_REQUIRED_COLUMNS = ["device_id", "timestamp", "ppv", "rms", "freq", "kurtosis"]
+
+# Valid label values (Task 1)
+VALID_LABELS = {"normal", "anomaly", "precursor", "unknown"}
+
 # Numeric range validation: field -> (min_inclusive, max_inclusive)
 FIELD_RANGES = {
     "ppv":      (0.0, 100.0),
@@ -40,6 +46,18 @@ FIELD_RANGES = {
     "kurtosis": (-5.0, 50.0),
     "stalta":   (0.0, 100.0),
 }
+
+# Module-level config dict (Task 2)
+_config: dict = {
+    "firestore_collection": os.environ.get("FIRESTORE_COLLECTION", "vibration_samples"),
+    "trigger_threshold": 100,
+    "rate_limit_rps": 10,
+    "max_ppv": 100,
+}
+
+# Module-level rate-limit hits counter (Task 5)
+_rate_limit_hits: int = 0
+_rate_limit_hits_lock = threading.Lock()
 
 
 def create_app():
@@ -58,9 +76,27 @@ def create_app():
     _stats_cache: dict = {"data": None, "ts": 0.0}
     _stats_lock = threading.Lock()
 
-    # Rate-limiting state: sliding window, max 10 requests/device_id/second
+    # Rate-limiting state: sliding window, max rate_limit_rps requests/device_id/second
     _rate_windows: dict[str, list] = {}
     _rate_lock = threading.Lock()
+
+    # Task 4: Scan existing CSV files for schema validation
+    invalid_files: list = []
+    for csv_path in sorted(field_dir.glob("*.csv")):
+        try:
+            with open(csv_path, newline="") as f:
+                reader = csv.DictReader(f)
+                fieldnames = reader.fieldnames or []
+                missing_cols = [c for c in SCHEMA_REQUIRED_COLUMNS if c not in fieldnames]
+                if missing_cols:
+                    jlog("warning", "csv_schema_invalid", file=str(csv_path.name),
+                         missing_columns=missing_cols)
+                    invalid_files.append(csv_path.name)
+        except Exception as exc:
+            jlog("warning", "csv_schema_read_error", file=str(csv_path.name), error=str(exc))
+            invalid_files.append(csv_path.name)
+
+    app.config["invalid_files"] = invalid_files
 
     def _read_count():
         try:
@@ -149,13 +185,17 @@ def create_app():
         # Rate limiting per device_id
         device_id = data.get("device_id", "")
         now_ts = time.monotonic()
+        rps_limit = _config["rate_limit_rps"]
         with _rate_lock:
             window = _rate_windows.get(device_id, [])
             # Keep only timestamps within the last 1 second
             window = [t for t in window if now_ts - t < 1.0]
-            if len(window) >= 10:
+            if len(window) >= rps_limit:
                 _rate_windows[device_id] = window
                 jlog("warning", "ingest_rejected", reason="rate_limited", device_id=device_id)
+                global _rate_limit_hits
+                with _rate_limit_hits_lock:
+                    _rate_limit_hits += 1
                 return jsonify({"error": "rate_limited", "device_id": device_id}), 429
             window.append(now_ts)
             _rate_windows[device_id] = window
@@ -300,6 +340,228 @@ def create_app():
         sorted_devices = sorted(device_set)
         return jsonify({"devices": sorted_devices, "count": len(sorted_devices)})
 
+    # --- Task 1: /label endpoint ---
+
+    @app.route("/label", methods=["POST"])
+    def label():
+        """Update the label for a specific sample identified by timestamp+device_id."""
+        body = request.get_json(silent=True) or {}
+        timestamp = body.get("timestamp", "")
+        device_id = body.get("device_id", "")
+        new_label = body.get("label", "")
+
+        if not timestamp or not device_id:
+            return jsonify({"error": "missing fields: timestamp, device_id"}), 400
+
+        if new_label not in VALID_LABELS:
+            return jsonify({"error": f"invalid label: {new_label!r}. Must be one of {sorted(VALID_LABELS)}"}), 400
+
+        total_updated = 0
+
+        with _csv_lock:
+            for csv_path in sorted(field_dir.glob("*.csv")):
+                try:
+                    with open(csv_path, newline="") as f:
+                        reader = csv.DictReader(f)
+                        fieldnames = reader.fieldnames or []
+                        rows = list(reader)
+
+                    # Ensure label column exists
+                    if "label" not in fieldnames:
+                        fieldnames = list(fieldnames) + ["label"]
+
+                    updated = 0
+                    for row in rows:
+                        if row.get("timestamp") == timestamp and row.get("device_id") == device_id:
+                            row["label"] = new_label
+                            updated += 1
+
+                    if updated > 0:
+                        with open(csv_path, "w", newline="") as f:
+                            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+                            writer.writeheader()
+                            writer.writerows(rows)
+                        total_updated += updated
+                        jlog("info", "label_updated", device_id=device_id, timestamp=timestamp,
+                             label=new_label, rows=updated, file=csv_path.name)
+                except Exception as exc:
+                    jlog("warning", "label_error", file=str(csv_path.name), error=str(exc))
+
+        if total_updated == 0:
+            return jsonify({"error": "no matching row found"}), 404
+
+        _invalidate_stats_cache()
+        return jsonify({"status": "ok", "rows_updated": total_updated})
+
+    # --- Task 2: /config endpoint ---
+
+    @app.route("/config", methods=["GET", "POST"])
+    def config():
+        """GET returns current config. POST updates trigger_threshold and rate_limit_rps."""
+        if request.method == "GET":
+            return jsonify(dict(_config))
+
+        body = request.get_json(silent=True) or {}
+        errors = []
+
+        if "trigger_threshold" in body:
+            try:
+                val = int(body["trigger_threshold"])
+                if not (1 <= val <= 10000):
+                    errors.append("trigger_threshold must be 1-10000")
+                else:
+                    _config["trigger_threshold"] = val
+            except (TypeError, ValueError):
+                errors.append("trigger_threshold must be an integer")
+
+        if "rate_limit_rps" in body:
+            try:
+                val = int(body["rate_limit_rps"])
+                if not (1 <= val <= 100):
+                    errors.append("rate_limit_rps must be 1-100")
+                else:
+                    _config["rate_limit_rps"] = val
+            except (TypeError, ValueError):
+                errors.append("rate_limit_rps must be an integer")
+
+        if errors:
+            return jsonify({"error": errors}), 400
+
+        jlog("info", "config_updated", **{k: _config[k] for k in ("trigger_threshold", "rate_limit_rps")})
+        return jsonify(dict(_config))
+
+    # --- Task 3: /data/old retention endpoint ---
+
+    @app.route("/data/old", methods=["DELETE"])
+    def delete_old_data():
+        """Delete rows older than ?days=N (default 30) from all CSV files."""
+        try:
+            days = int(request.args.get("days", 30))
+            if days < 0:
+                return jsonify({"error": "days must be >= 0"}), 400
+        except (TypeError, ValueError):
+            return jsonify({"error": "days must be an integer"}), 400
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        total_deleted = 0
+        files_processed = 0
+
+        with _csv_lock:
+            for csv_path in sorted(field_dir.glob("*.csv")):
+                try:
+                    with open(csv_path, newline="") as f:
+                        reader = csv.DictReader(f)
+                        fieldnames = reader.fieldnames or []
+                        rows = list(reader)
+
+                    kept = []
+                    deleted = 0
+                    for row in rows:
+                        ts_str = row.get("timestamp", "")
+                        try:
+                            # Parse ISO 8601 timestamp; handle with or without timezone
+                            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                            if ts.tzinfo is None:
+                                ts = ts.replace(tzinfo=timezone.utc)
+                            if ts < cutoff:
+                                deleted += 1
+                            else:
+                                kept.append(row)
+                        except (ValueError, AttributeError):
+                            # Unparseable timestamp: keep row
+                            kept.append(row)
+
+                    if deleted > 0:
+                        with open(csv_path, "w", newline="") as f:
+                            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+                            writer.writeheader()
+                            writer.writerows(kept)
+                        total_deleted += deleted
+                        jlog("info", "retention_deleted", file=csv_path.name, deleted=deleted,
+                             kept=len(kept), cutoff_days=days)
+
+                    files_processed += 1
+                except Exception as exc:
+                    jlog("warning", "retention_error", file=str(csv_path.name), error=str(exc))
+
+        if total_deleted > 0:
+            _invalidate_stats_cache()
+
+        return jsonify({"deleted_rows": total_deleted, "files_processed": files_processed})
+
+    # --- Task 4: /data/invalid endpoint ---
+
+    @app.route("/data/invalid")
+    def data_invalid():
+        """Return list of CSV files that failed schema validation on startup."""
+        return jsonify({"invalid_files": app.config.get("invalid_files", [])})
+
+    # --- Task 5: /metrics endpoint (Prometheus) ---
+
+    @app.route("/metrics")
+    def metrics():
+        """Return Prometheus-compatible metrics in exposition format."""
+        stats_data = _compute_stats()
+        total_samples = stats_data["total_samples"]
+        devices_active = len(stats_data["devices"])
+
+        with _rate_limit_hits_lock:
+            hits = _rate_limit_hits
+
+        lines = [
+            "# HELP ancientvision_samples_total Total samples collected",
+            "# TYPE ancientvision_samples_total counter",
+            f"ancientvision_samples_total {total_samples}",
+            "# HELP ancientvision_devices_active Number of unique devices",
+            "# TYPE ancientvision_devices_active gauge",
+            f"ancientvision_devices_active {devices_active}",
+            "# HELP ancientvision_rate_limit_hits_total Rate limit rejections",
+            "# TYPE ancientvision_rate_limit_hits_total counter",
+            f"ancientvision_rate_limit_hits_total {hits}",
+            "",
+        ]
+        return Response("\n".join(lines), mimetype="text/plain; version=0.0.4")
+
+    # --- Task 7: /export/stream endpoint (NDJSON) ---
+
+    @app.route("/export/stream")
+    def export_stream():
+        """Stream all collected data as NDJSON. Supports optional ?device_id=X filter."""
+        device_filter = request.args.get("device_id", "").strip() or None
+
+        def generate():
+            for csv_path in sorted(field_dir.glob("*.csv")):
+                try:
+                    with open(csv_path, newline="") as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            if device_filter and row.get("device_id") != device_filter:
+                                continue
+                            yield json.dumps(row) + "\n"
+                except Exception as exc:
+                    jlog("warning", "export_stream_error", file=str(csv_path.name), error=str(exc))
+
+        return Response(generate(), mimetype="application/x-ndjson")
+
+    # --- Task 6: API key authentication ---
+
+    @app.before_request
+    def _api_key_auth():
+        """Enforce API key if API_KEY env var is set. Exempt: /health, /metrics."""
+        api_key = os.environ.get("API_KEY", "").strip()
+        if not api_key:
+            # Dev mode: authentication disabled
+            return None
+        exempt = {"/health", "/metrics"}
+        if request.path in exempt:
+            return None
+        provided = request.headers.get("X-API-Key", "")
+        if provided != api_key:
+            jlog("warning", "auth_rejected", path=request.path,
+                 remote=request.remote_addr)
+            return jsonify({"error": "unauthorized"}), 401
+        return None
+
     def _start_firestore_sync():
         """
         Background thread: polls Firestore every 5 min for phone-uploaded samples.
@@ -311,7 +573,7 @@ def create_app():
             jlog("info", "startup", firestore_sync="disabled", reason="no_credentials")
             return
 
-        collection_name = os.environ.get("FIRESTORE_COLLECTION", "vibration_samples")
+        collection_name = _config["firestore_collection"]
 
         def _loop():
             from google.cloud import firestore
