@@ -1,4 +1,6 @@
 numpy==1.26.4
 scikit-learn==1.4.2
-tensorflow-cpu==2.16.1
-flatbuffers==24.3.25
+# TF 2.15 bundles Keras 2; TF 2.16+ ships Keras 3 which breaks TFLiteConverter
+# (LLVM MLIR type-inference crash). Pin to 2.15.1 for stable TFLite export.
+tensorflow-cpu==2.15.1
+flatbuffers==23.5.26

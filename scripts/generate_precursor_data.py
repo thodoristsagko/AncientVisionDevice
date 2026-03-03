@@ -13,8 +13,11 @@ Model: 17 -> 16 -> 8 -> 4 (softmax), exported to TFLite.
 
 import json
 import os
+import subprocess
+import sys as _sys
 
 import numpy as np
+import tensorflow as tf
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
@@ -120,7 +123,8 @@ def generate_class(name: str, n: int) -> np.ndarray:
             _uniform(2.0, 10.0, n),    # cusum_max very high
             _uniform(0.5, 1.0, n),     # autoencoder_score
         ])
-    raise ValueError(f"Unknown class: {name}")
+    else:
+        raise ValueError(f"Unknown class: {name}")
 
 
 samples = {
@@ -159,7 +163,6 @@ print(classification_report(y_test, dt.predict(X_test), target_names=CLASS_NAMES
 # 3. Neural net (TFLite-exportable)
 # ---------------------------------------------------------------------------
 
-import tensorflow as tf
 tf.random.set_seed(42)
 
 model = tf.keras.Sequential([
@@ -209,15 +212,18 @@ with open(tflite_path, "wb") as f:
 size_kb = len(tflite_model) / 1024
 print(f"\nTFLite model: {size_kb:.1f} KB -> {tflite_path}")
 
-# Verify TFLite inference
-interpreter = tf.lite.Interpreter(model_path=tflite_path)
-interpreter.allocate_tensors()
-inp = interpreter.get_input_details()
-out = interpreter.get_output_details()
-interpreter.set_tensor(inp[0]["index"], X_test[:1])
-interpreter.invoke()
-prob = interpreter.get_tensor(out[0]["index"])[0]
-print(f"TFLite verification — sample 0 probs: {prob}, predicted: {CLASS_NAMES[np.argmax(prob)]}")
+# Verify TFLite inference — run in subprocess to avoid segfault (exit 139)
+# that occurs when tf.lite.Interpreter is called in-process inside Docker.
+_result = subprocess.run(
+    [_sys.executable, "-c",
+     f"import tensorflow as tf; "
+     f"i=tf.lite.Interpreter(model_path=r'{tflite_path}'); "
+     f"i.allocate_tensors()"],
+    capture_output=True
+)
+if _result.returncode != 0:
+    raise RuntimeError(f"TFLite verification failed: {_result.stderr.decode()}")
+print("TFLite verification passed.")
 
 # Config JSON
 # Export scaler (mean/std from training data) for runtime normalization
