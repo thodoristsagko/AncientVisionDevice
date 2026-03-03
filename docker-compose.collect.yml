@@ -39,3 +39,20 @@ services:
           memory: 256m
           cpus: '0.5'
     restart: unless-stopped
+    networks:
+      - collector-net
+
+  nginx:
+    build: ./docker/nginx
+    ports:
+      - "80:80"
+    depends_on:
+      data-collector:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - collector-net
+
+networks:
+  collector-net:
+    driver: bridge
