@@ -248,6 +248,25 @@ print(f"[P24] Total augmented samples added: {total_augmented}")
 print(f"[P24] Final dataset: {X.shape[0]} samples")
 
 # ---------------------------------------------------------------------------
+# P130: Feature correlation matrix
+# ---------------------------------------------------------------------------
+
+_corr_matrix = np.corrcoef(X.T)  # shape (17, 17)
+_strong_pairs = []
+print("\n[P130] Strong feature correlations (|r| > 0.5):")
+_found_any = False
+for _ci in range(len(FEATURE_NAMES)):
+    for _cj in range(_ci + 1, len(FEATURE_NAMES)):
+        _r = _corr_matrix[_ci, _cj]
+        if abs(_r) > 0.5:
+            _sign = "+" if _r > 0 else "-"
+            print(f"  {FEATURE_NAMES[_ci]:>20} <-> {FEATURE_NAMES[_cj]:<20}  r={_r:+.3f}  {_sign}")
+            _strong_pairs.append((FEATURE_NAMES[_ci], FEATURE_NAMES[_cj], float(_r)))
+            _found_any = True
+if not _found_any:
+    print("  (none found)")
+
+# ---------------------------------------------------------------------------
 # 2. Scale full dataset (needed for CV and holdout splits)
 # ---------------------------------------------------------------------------
 
@@ -478,5 +497,40 @@ metrics = {
 with open(metrics_path, "w") as f:
     json.dump(metrics, f, indent=2)
 print(f"[METRICS] Written to {metrics_path}")
+
+# ---------------------------------------------------------------------------
+# P131: Model card generation
+# ---------------------------------------------------------------------------
+
+_model_card_version = config["model_version"]
+_model_card_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+_holdout_pct = holdout_acc * 100
+_cv_pct = cv_scores.mean() * 100
+_cv_std_pct = cv_scores.std() * 100
+_feature_list = "\n".join(f"- {fn}" for fn in FEATURE_NAMES)
+
+_model_card_content = f"""# Precursor Classifier Model Card
+**Version:** {_model_card_version}  **Trained:** {_model_card_date}
+
+## Performance
+- Holdout accuracy: {_holdout_pct:.1f}%
+- CV accuracy: {_cv_pct:.1f}% ± {_cv_std_pct:.1f}%
+- ROC AUC: {_roc_auc_macro:.4f}
+
+## Data
+- Total samples: {len(X)}  Augmented: {total_augmented}
+- Classes: soil_creep, crack_propagation, imminent_failure, normal
+
+## Features (17)
+{_feature_list}
+
+## Thresholds
+Alert above probability 0.5 for precursor detection
+"""
+
+_model_card_path = os.path.join(ASSETS_DIR, "precursor_model_card.md")
+with open(_model_card_path, "w") as _f:
+    _f.write(_model_card_content)
+print(f"[P131] Model card written to {_model_card_path}")
 
 print("\nDone.")
