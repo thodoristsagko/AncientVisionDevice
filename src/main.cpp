@@ -37,6 +37,13 @@
 #include <Wire.h>
 #include "esp_task_wdt.h"
 #include "esp_system.h"  // P101: esp_reset_reason()
+#include "nvs_flash.h"   // P180: NVS persistent settings
+#include "nvs.h"         // P180: NVS read/write API
+
+#if WIFI_ENABLED
+#include <WiFi.h>
+#include <HTTPClient.h>
+#endif
 
 // Uncomment to enable debug serial output (costs ~2-3KB flash)
 // #define DEBUG
@@ -53,6 +60,13 @@
 
 // P149: OTA update readiness — set to 1 when update server is configured
 #define OTA_ENABLED 0
+
+// P179: WiFi direct push to data collector
+#define WIFI_ENABLED       0           // Set to 1 to enable WiFi push
+#define WIFI_SSID          "ancientvision_ap"
+#define WIFI_PASSWORD      "field_deploy_pw"
+#define COLLECTOR_URL      "http://192.168.1.100:8765/collect"
+#define WIFI_PUSH_INTERVAL 30000       // Push every 30s
 
 // Sampling Configuration
 const int SAMPLE_RATE = 200;             // 200 Hz IMU sampling
@@ -258,6 +272,9 @@ const int BATTERY_INTERVAL = 2000;   // Read battery every 2s
 unsigned long g_lastBleNotifyMs = 0;   // millis() of last BLE notification sent
 float g_lastBleNotifyPpv = -1.0f;      // PPV at time of last BLE notification (-1 = never sent)
 
+// ===================== P179: WIFI PUSH TIMING =====================
+unsigned long g_lastWifiPushMs = 0;    // millis() of last WiFi push attempt
+
 // ===================== P148: DEBUG MODE =====================
 bool g_debugMode = false;              // Toggled via BLE CMD "DEBUG ON" / "DEBUG OFF"
 
@@ -317,6 +334,11 @@ void sendBLEData();
 void updateDisplay();
 void testAlert();
 void checkForOtaUpdate();
+void loadNvsSettings();
+void saveNvsSettings();
+#if WIFI_ENABLED
+void wifiPushData();
+#endif
 
 // ===================== P149: OTA UPDATE READINESS STUB =====================
 // Future: replace body with ArduinoOTA or custom HTTP OTA check when a
@@ -325,6 +347,106 @@ void checkForOtaUpdate();
 void checkForOtaUpdate() {
   Serial.println("OTA check: disabled (no update server configured)");
 }
+
+// ===================== P180: NVS PERSISTENT SETTINGS =====================
+void loadNvsSettings() {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open("ancientvision", NVS_READONLY, &handle);
+  if (err != ESP_OK) {
+    Serial.printf("NVS load: namespace open failed (0x%x) — using defaults\n", err);
+    return;
+  }
+
+  // Load ppvNoiseFloor (stored as uint32 bit-cast of float)
+  uint32_t noiseRaw = 0;
+  err = nvs_get_u32(handle, "noiseFloor", &noiseRaw);
+  if (err == ESP_OK && noiseRaw != 0) {
+    memcpy(&ppvNoiseFloor, &noiseRaw, sizeof(float));
+    ppvCalibrated = true;
+    Serial.printf("NVS load: ppvNoiseFloor=%.4f mm/s\n", ppvNoiseFloor);
+  } else {
+    ppvNoiseFloor = 0.01f;
+    Serial.println("NVS load: ppvNoiseFloor default=0.01");
+  }
+
+  // Load g_highGainMode
+  uint8_t gainVal = 0;
+  err = nvs_get_u8(handle, "highGain", &gainVal);
+  if (err == ESP_OK) {
+    g_highGainMode = (gainVal != 0);
+    Serial.printf("NVS load: g_highGainMode=%d\n", (int)g_highGainMode);
+  } else {
+    g_highGainMode = false;
+    Serial.println("NVS load: g_highGainMode default=false");
+  }
+
+  nvs_close(handle);
+}
+
+void saveNvsSettings() {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open("ancientvision", NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    Serial.printf("NVS save: namespace open failed (0x%x)\n", err);
+    return;
+  }
+
+  // Store ppvNoiseFloor as uint32 bit-cast of float
+  uint32_t noiseRaw = 0;
+  memcpy(&noiseRaw, &ppvNoiseFloor, sizeof(float));
+  nvs_set_u32(handle, "noiseFloor", noiseRaw);
+
+  // Store g_highGainMode
+  nvs_set_u8(handle, "highGain", g_highGainMode ? 1 : 0);
+
+  err = nvs_commit(handle);
+  if (err != ESP_OK) {
+    Serial.printf("NVS save: commit failed (0x%x)\n", err);
+  } else {
+    Serial.printf("NVS save: noiseFloor=%.4f highGain=%d\n", ppvNoiseFloor, (int)g_highGainMode);
+  }
+
+  nvs_close(handle);
+}
+
+// ===================== P179: WIFI DATA PUSH =====================
+#if WIFI_ENABLED
+void wifiPushData() {
+  // Attempt WiFi connection if not already connected
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi: connecting...");
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    unsigned long wifiStart = millis();
+    while (WiFi.status() != WL_CONNECTED && (millis() - wifiStart < 5000UL)) {
+      delay(100);
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("WiFi: connection timeout — skipping push");
+      return;
+    }
+    Serial.printf("WiFi: connected, IP=%s\n", WiFi.localIP().toString().c_str());
+  }
+
+  // Build JSON payload from current sensor readings
+  char jsonBody[256];
+  snprintf(jsonBody, sizeof(jsonBody),
+    "{\"ppv\":%.2f,\"rms\":%.4f,\"stalta\":%.2f,\"kurtosis\":0,\"fw\":\"%s\",\"seq\":%lu}",
+    vibrationPPV, vibrationRMS, staLtaRatio, FW_VERSION, (unsigned long)g_seq);
+
+  // POST with 3s timeout guard
+  HTTPClient http;
+  http.begin(COLLECTOR_URL);
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(3000);  // 3s max — non-blocking if server unreachable
+  int httpCode = http.POST(jsonBody);
+  if (httpCode > 0) {
+    Serial.printf("WiFi push: HTTP %d\n", httpCode);
+  } else {
+    Serial.printf("WiFi push: error %s\n", http.errorToString(httpCode).c_str());
+  }
+  http.end();
+}
+#endif
 
 // ===================== BLE CALLBACKS =====================
 class MyServerCallbacks: public BLEServerCallbacks {
@@ -452,6 +574,16 @@ void setup() {
   // Initialize moisture sensor pin
   pinMode(MOISTURE_PIN, INPUT);
   DBG_PRINTLN("Moisture sensor initialized");
+
+  // P180: Initialize NVS and load persisted calibration settings
+  esp_err_t nvsErr = nvs_flash_init();
+  if (nvsErr == ESP_ERR_NVS_NO_FREE_PAGES || nvsErr == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    // NVS partition was truncated; erase and reinitialise
+    nvs_flash_erase();
+    nvs_flash_init();
+    Serial.println("NVS: partition erased and reinitialised");
+  }
+  loadNvsSettings();
 
   // Initialize BLE
   setupBLE();
@@ -626,7 +758,16 @@ void loop() {
     g_calibrating = false;
     Serial.println("BLE CMD: CALIBRATE period ended");
     DBG_PRINTLN("Calibration period expired");
+    saveNvsSettings();  // P180: persist calibrated noise floor
   }
+
+  // P179: WiFi periodic push
+#if WIFI_ENABLED
+  if (currentMillis - g_lastWifiPushMs >= WIFI_PUSH_INTERVAL) {
+    g_lastWifiPushMs = currentMillis;
+    wifiPushData();
+  }
+#endif
 
   // Button A: Hold 3s = toggle low power, short press = test alert
   if (M5.BtnA.pressedFor(3000) && !longPressHandled) {
@@ -807,11 +948,13 @@ void processVibrationWindow() {
     g_highGainMode = true;
     DBG_PRINTLN("AGC: switched to ±16g range");
     Serial.println("AGC: high range enabled");
+    saveNvsSettings();   // P180: persist gain mode change
   } else if (vibrationPPV < 0.5f && g_highGainMode) {
     setAccelRange(4);    // Restore ±4g for better resolution
     g_highGainMode = false;
     DBG_PRINTLN("AGC: switched to ±4g range");
     Serial.println("AGC: normal range restored");
+    saveNvsSettings();   // P180: persist gain mode change
   }
 
   // In low power mode: skip heavy logging if vibration is safely low
