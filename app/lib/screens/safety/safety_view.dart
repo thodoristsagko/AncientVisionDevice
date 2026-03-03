@@ -184,6 +184,25 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
   bool _simpleMode = true;
   bool _hasReceivedVibData = false; // Latches true once PPV/RMS data arrives
 
+  // P46: Session peak tracking
+  double _sessionPeakPpv = 0.0;
+  double _sessionPeakScore = 0.0;
+
+  // P47: All-clear timer (30s continuous normal before showing green confirmed)
+  DateTime? _normalSince;
+
+  // P57: Inference debounce — max 2Hz
+  DateTime? _lastInferenceTime;
+
+  // P60: Stale data detection (5s no data → show dashes)
+  bool _isStale = false;
+  Timer? _staleTimer;
+
+  // P61: Session timer
+  final DateTime _sessionStart = DateTime.now();
+  Timer? _sessionTimer;
+  String _sessionElapsed = '00:00:00';
+
   // FFT BLE data from firmware (real spectral bins)
   FftBleData? _lastFftData;
 
@@ -203,6 +222,16 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
         _uiDirty = false;
         setState(() {});
       }
+    });
+
+    // P61: Session timer — update elapsed every second
+    _sessionTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      final elapsed = DateTime.now().difference(_sessionStart);
+      final h = elapsed.inHours.toString().padLeft(2, '0');
+      final m = (elapsed.inMinutes % 60).toString().padLeft(2, '0');
+      final s = (elapsed.inSeconds % 60).toString().padLeft(2, '0');
+      setState(() => _sessionElapsed = '$h:$m:$s');
     });
   }
 
@@ -226,6 +255,8 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
     _reconnectTimer?.cancel();
     _keepAliveTimer?.cancel();
     _uiRefreshTimer?.cancel();
+    _staleTimer?.cancel();
+    _sessionTimer?.cancel();
     _dspService.dispose();
     _anomalyService.dispose();
     super.dispose();
@@ -748,6 +779,18 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
       // Update last data received for keepalive monitoring
       _lastDataReceived = DateTime.now();
 
+      // P60: Reset stale timer — cancel any pending stale flag, restart 5s countdown
+      _staleTimer?.cancel();
+      if (_isStale) {
+        _isStale = false;
+        _uiDirty = true;
+      }
+      _staleTimer = Timer(const Duration(seconds: 5), () {
+        if (mounted) {
+          setState(() => _isStale = true);
+        }
+      });
+
       // Debug: log received data with full UUID
       debugPrint('>>> PARSED BLE Data UUID=$charUuid data=$data');
 
@@ -799,6 +842,9 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
             _ppvPeakHold = _ppv;
             _ppvPeakTime = DateTime.now();
           }
+
+          // P46: Session peak tracking
+          if (_ppv > _sessionPeakPpv) _sessionPeakPpv = _ppv;
 
           // PPV alarm: DIN 4150-3 heritage limit exceeded
           if (_effectivePpv > 3.0) {
@@ -1023,6 +1069,12 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
 
     // 5. ML anomaly detection
     if (_mlModelLoaded && (_ppv > 0 || _rms > 0)) {
+      // P57: Debounce inference to max 2Hz (500ms minimum interval)
+      final now = DateTime.now();
+      if (_lastInferenceTime != null && now.difference(_lastInferenceTime!).inMilliseconds < 500) {
+        // Skip inference this packet — too soon
+      } else {
+        _lastInferenceTime = now;
       try {
         final features = {
           'rms': _rms,
@@ -1044,6 +1096,16 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
         _lastMLFeatures = features;
         needsRebuild = true;
 
+        // P46: Update session peak anomaly score
+        if (result.score > _sessionPeakScore) _sessionPeakScore = result.score;
+
+        // P47: Track all-clear timer — reset if not normal, start if entering normal
+        if (result.level != AnomalyLevel.normal) {
+          _normalSince = null;
+        } else {
+          _normalSince ??= DateTime.now();
+        }
+
         // Alarm + haptic for red-level ML anomaly
         if (result.level == AnomalyLevel.anomaly && result.score >= 0.8) {
           _triggerFullScreenAlert(
@@ -1062,6 +1124,7 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
       } catch (e) {
         debugPrint('ML anomaly detection error: $e');
       }
+      } // end else (debounce guard)
     }
 
     // 5b. Feed PSD slope to adaptive service and compute Fukuzono
@@ -1695,6 +1758,17 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
                         ],
                       ),
                       const SizedBox(height: 6),
+                      // P61: Session timer display
+                      Row(
+                        children: [
+                          Icon(Icons.timer_outlined, color: Colors.white.withAlpha(80), size: 13),
+                          const SizedBox(width: 4),
+                          Text('Session: $_sessionElapsed',
+                              style: TextStyle(color: Colors.white.withAlpha(80), fontSize: 11)),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+
                       // Action row
                       Row(
                         children: [
@@ -1877,18 +1951,18 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
               Expanded(
                 child: SafetyStatCard(
                   title: 'PPV (DIN 4150-3)',
-                  value: _ppv > 0 ? '${_ppv.toStringAsFixed(1)} mm/s' : '${_vibration.toStringAsFixed(3)} g',
-                  status: _getVibrationStatus(),
-                  statusColor: _getPPVColor(),
+                  value: _isStale ? '---' : (_ppv > 0 ? '${_ppv.toStringAsFixed(1)} mm/s' : '${_vibration.toStringAsFixed(3)} g'),
+                  status: _isStale ? 'No data' : _getVibrationStatus(),
+                  statusColor: _isStale ? Colors.grey : _getPPVColor(),
                 ),
               ),
               const SizedBox(width: 12),
               Expanded(
                 child: SafetyStatCard(
                   title: 'Soil Moisture',
-                  value: '$_moisturePercent %',
-                  status: _getMoistureStatus(),
-                  statusColor: (_moisturePercent < 30 || _moisturePercent > 60) ? Colors.orange : null,
+                  value: _isStale ? '---' : '$_moisturePercent %',
+                  status: _isStale ? 'No data' : _getMoistureStatus(),
+                  statusColor: _isStale ? Colors.grey : ((_moisturePercent < 30 || _moisturePercent > 60) ? Colors.orange : null),
                 ),
               ),
             ],
@@ -2290,9 +2364,11 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
         statusIcon = Icons.check_circle_rounded;
     }
 
-    // PPV context string
+    // PPV context string — P60: show dashes if data is stale
     final String ppvContext;
-    if (_ppv > 0) {
+    if (_isStale) {
+      ppvContext = '--- mm/s';
+    } else if (_ppv > 0) {
       final freqLimit = _dominantFreq <= 10 ? 3.0 : (_dominantFreq <= 50 ? 5.0 : 8.0);
       final percentage = (_ppv / freqLimit * 100).clamp(0, 999).toStringAsFixed(0);
       if (_ppv >= freqLimit) {
@@ -2375,10 +2451,60 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
           // Warnings section
           ..._buildSimpleWarnings(isConnected),
 
+          // P60: Stale data warning
+          if (_isStale && isConnected) ...[
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.signal_wifi_off_rounded, color: Colors.orange.withAlpha(200), size: 14),
+                const SizedBox(width: 6),
+                Text('No data — sensor may be offline',
+                    style: TextStyle(color: Colors.orange.withAlpha(200), fontSize: 11, fontWeight: FontWeight.w600)),
+              ],
+            ),
+          ],
+
+          // P46: Session peak values
+          if (_sessionPeakPpv > 0 || _sessionPeakScore > 0) ...[
+            const SizedBox(height: 10),
+            Text(
+              'Session Peak: PPV ${_sessionPeakPpv.toStringAsFixed(2)} mm/s | Score ${_sessionPeakScore.toStringAsFixed(3)}',
+              style: TextStyle(color: Colors.white.withAlpha(140), fontSize: 11),
+              textAlign: TextAlign.center,
+            ),
+          ],
+
+          // P47: All-clear indicator (only after 30 continuous seconds of normal)
+          if (_normalSince != null &&
+              DateTime.now().difference(_normalSince!).inSeconds >= 30 &&
+              safetyLevel == 'safe') ...[
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+              decoration: BoxDecoration(
+                color: const Color(0xFF4CAF50).withAlpha(40),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFF4CAF50).withAlpha(120)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.verified_rounded, color: Color(0xFF4CAF50), size: 14),
+                  const SizedBox(width: 6),
+                  Text('ALL CLEAR — ${DateTime.now().difference(_normalSince!).inSeconds}s normal',
+                      style: const TextStyle(color: Color(0xFF4CAF50), fontSize: 11, fontWeight: FontWeight.w700)),
+                ],
+              ),
+            ),
+          ],
+
           // Connection info
           const SizedBox(height: 14),
           Text(
-            isConnected ? _t.trArgs('sensor_active', [_lastUpdate]) : _t.tr('sensor_not_connected'),
+            isConnected
+                ? (_isStale ? '--- last: $_lastUpdate' : _t.trArgs('sensor_active', [_lastUpdate]))
+                : _t.tr('sensor_not_connected'),
             style: TextStyle(color: Colors.white.withAlpha(90), fontSize: 11),
           ),
         ],
