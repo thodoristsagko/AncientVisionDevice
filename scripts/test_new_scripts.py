@@ -1122,3 +1122,189 @@ class TestVibrationTimeline(unittest.TestCase):
         c = mod.ppv_to_char(1.0, 1.0)
         self.assertIsInstance(c, str)
         self.assertEqual(len(c), 1)
+
+
+# ===========================================================================
+# data_drift_detector tests
+# ===========================================================================
+
+def _make_drift_csv(path: Path, n: int = 100,
+                    ppv_mean: float = 0.05, ppv_std: float = 0.01,
+                    ax_mean: float = 0.1, ay_mean: float = 0.2,
+                    az_mean: float = 9.8) -> None:
+    """Write a CSV with ppv, ax, ay, az columns."""
+    import random
+    random.seed(42)
+    rows = []
+    for i in range(n):
+        rows.append({
+            "ppv": str(ppv_mean + random.gauss(0, ppv_std)),
+            "ax": str(ax_mean + random.gauss(0, 0.01)),
+            "ay": str(ay_mean + random.gauss(0, 0.01)),
+            "az": str(az_mean + random.gauss(0, 0.05)),
+            "label": "normal",
+        })
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+class TestDataDriftDetector:
+    """Tests for data_drift_detector.py."""
+
+    def _run(self, args: list) -> "subprocess.CompletedProcess":
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "data_drift_detector.py")] + args,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_no_data(self, tmp_path):
+        """Exits 0 and prints informative message when no CSV data exists."""
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        result = self._run(["--data-dir", str(empty_dir)])
+        assert result.returncode == 0
+        combined = result.stdout + result.stderr
+        assert any(phrase in combined for phrase in [
+            "No CSV data", "No baseline", "No data"
+        ]), f"Expected informative message in output: {combined!r}"
+
+    def test_save_baseline(self, tmp_path):
+        """--save-baseline writes drift_baseline.json with expected structure."""
+        _make_drift_csv(tmp_path / "session.csv")
+        baseline_path = tmp_path / "drift_baseline.json"
+        result = self._run([
+            "--data-dir", str(tmp_path),
+            "--baseline", str(baseline_path),
+            "--save-baseline",
+        ])
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert baseline_path.exists(), "drift_baseline.json not created"
+        data = json.loads(baseline_path.read_text(encoding="utf-8"))
+        assert any(feat in data for feat in ["ppv", "ax", "ay", "az"]), (
+            f"Expected feature keys in baseline, got: {list(data.keys())}"
+        )
+        for feat in data:
+            assert "mean" in data[feat], f"Missing 'mean' for feature {feat}"
+            assert "std" in data[feat], f"Missing 'std' for feature {feat}"
+
+    def test_no_drift(self, tmp_path):
+        """Identical data as baseline produces exit 0 and 'No significant drift'."""
+        _make_drift_csv(tmp_path / "session.csv")
+        baseline_path = tmp_path / "drift_baseline.json"
+        self._run([
+            "--data-dir", str(tmp_path),
+            "--baseline", str(baseline_path),
+            "--save-baseline",
+        ])
+        result = self._run([
+            "--data-dir", str(tmp_path),
+            "--baseline", str(baseline_path),
+        ])
+        assert result.returncode == 0, (
+            f"Expected exit 0 for no drift, got {result.returncode}. stdout: {result.stdout}"
+        )
+        assert "No significant drift" in result.stdout, (
+            f"Expected 'No significant drift' in output: {result.stdout!r}"
+        )
+
+    def test_with_drift(self, tmp_path):
+        """Data shifted by many sigma from baseline -> exit 1 and drift flag."""
+        # Save baseline from data around ppv=0.05 with tight std
+        baseline_dir = tmp_path / "base"
+        baseline_dir.mkdir()
+        _make_drift_csv(baseline_dir / "b.csv", ppv_mean=0.05, ppv_std=0.005)
+        baseline_path = tmp_path / "drift_baseline.json"
+        self._run([
+            "--data-dir", str(baseline_dir),
+            "--baseline", str(baseline_path),
+            "--save-baseline",
+        ])
+        # Current data: ppv shifted to 5.0 -- far outside 2 sigma of baseline
+        current_dir = tmp_path / "current"
+        current_dir.mkdir()
+        _make_drift_csv(current_dir / "current.csv", ppv_mean=5.0, ppv_std=0.005)
+        result = self._run([
+            "--data-dir", str(current_dir),
+            "--baseline", str(baseline_path),
+        ])
+        assert result.returncode == 1, (
+            f"Expected exit 1 for drift, got {result.returncode}. stdout: {result.stdout}"
+        )
+        assert "DRIFT" in result.stdout, (
+            f"Expected 'DRIFT' in output: {result.stdout!r}"
+        )
+
+
+# ===========================================================================
+# retrain_advisor tests
+# ===========================================================================
+
+class TestRetrainAdvisor:
+    """Tests for retrain_advisor.py."""
+
+    def _run(self, args: list) -> "subprocess.CompletedProcess":
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "retrain_advisor.py")] + args,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_no_data(self, tmp_path):
+        """With no data and no model, exits 0 (NO_ACTION)."""
+        empty_dir = tmp_path / "data"
+        empty_dir.mkdir()
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        result = self._run([
+            "--data-dir", str(empty_dir),
+            "--model-dir", str(model_dir),
+        ])
+        assert result.returncode == 0, (
+            f"Expected exit 0 (NO_ACTION) with no data, got {result.returncode}. "
+            f"stdout: {result.stdout}"
+        )
+        assert "NO_ACTION" in result.stdout, (
+            f"Expected 'NO_ACTION' in output: {result.stdout!r}"
+        )
+
+    def test_with_samples(self, tmp_path):
+        """With > 500 labeled samples, a valid recommendation is printed."""
+        import random
+        random.seed(0)
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+
+        labels = ["normal", "soil_creep", "crack_propagation", "imminent_failure"]
+        rows = []
+        for i in range(600):
+            rows.append({
+                "ppv": str(0.05 + random.gauss(0, 0.01)),
+                "ax": str(0.1 + random.gauss(0, 0.01)),
+                "ay": str(0.2 + random.gauss(0, 0.01)),
+                "az": str(9.8 + random.gauss(0, 0.05)),
+                "label": labels[i % len(labels)],
+            })
+        csv_path = data_dir / "session.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+
+        result = self._run([
+            "--data-dir", str(data_dir),
+            "--model-dir", str(model_dir),
+        ])
+        assert result.returncode in (0, 1, 2), (
+            f"Unexpected exit code: {result.returncode}. stdout: {result.stdout}"
+        )
+        assert any(kw in result.stdout for kw in ["NO_ACTION", "RETRAIN_SOON", "RETRAIN_NOW"]), (
+            f"Expected recommendation keyword in output: {result.stdout!r}"
+        )
+        assert "Score" in result.stdout, (
+            f"Expected 'Score' in output: {result.stdout!r}"
+        )

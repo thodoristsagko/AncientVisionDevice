@@ -15,7 +15,7 @@
         ensemble-train gen-precursor hyperparameter-search merge-sessions model-comparison \
         plot-session reset pipeline run-pipeline send-alert simulate-anomaly \
         threshold-optimize train-autoencoder training-smoke visualize-features visualize-latent \
-        field-report calibrate
+        field-report calibrate drift-check retrain-advisor
 
 # ---------------------------------------------------------------------------
 # Help
