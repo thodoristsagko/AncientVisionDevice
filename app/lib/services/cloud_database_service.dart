@@ -2,6 +2,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 
+import 'connectivity_monitor_service.dart';
+
 /// Central service for Firestore cloud database operations
 /// Hybrid approach: Cloud when logged in, local SharedPreferences when not
 /// All user data is stored under users/{userId}/... in Firestore
@@ -16,12 +18,300 @@ import 'package:flutter/foundation.dart';
 /// ConnectivityMonitorService.instance.recordFirestoreResult(success: true);
 /// ```
 class CloudDatabaseService {
-  static final CloudDatabaseService _instance = CloudDatabaseService._internal();
+  static final CloudDatabaseService _instance =
+      CloudDatabaseService._internal();
   factory CloudDatabaseService() => _instance;
   CloudDatabaseService._internal();
 
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseAuth _auth = FirebaseAuth.instance;
+
+  // ============== RETRY QUEUE ==============
+
+  /// In-memory retry queue for failed writes (max 50 items).
+  final List<Map<String, dynamic>> _retryQueue = [];
+  static const int _retryQueueMaxSize = 50;
+
+  /// Number of items currently waiting for retry.
+  int get retryQueueSize => _retryQueue.length;
+
+  // ============== RATE LIMITING ==============
+
+  int _writesThisSecond = 0;
+  DateTime _secondStart = DateTime.now();
+  static const int _maxWritesPerSecond = 10;
+
+  // ============== UPLOAD STATISTICS ==============
+
+  int _totalUploaded = 0;
+  int _totalFailed = 0;
+
+  /// Cumulative successful writes since app start.
+  int get totalUploaded => _totalUploaded;
+
+  /// Cumulative failed writes since app start.
+  int get totalFailed => _totalFailed;
+
+  /// Success rate: totalUploaded / (totalUploaded + totalFailed).
+  /// Returns 0.0 if no writes have been attempted.
+  double get successRate {
+    final total = _totalUploaded + _totalFailed;
+    if (total == 0) return 0.0;
+    return _totalUploaded / total;
+  }
+
+  // ============== CORE WRITE HELPERS ==============
+
+  /// Resets the writes-per-second counter when a new second has elapsed.
+  void _tickRateWindow() {
+    final now = DateTime.now();
+    if (now.difference(_secondStart).inSeconds >= 1) {
+      _secondStart = now;
+      _writesThisSecond = 0;
+    }
+  }
+
+  /// Returns true if a write token was consumed within the rate limit.
+  bool _acquireWriteToken() {
+    _tickRateWindow();
+    if (_writesThisSecond >= _maxWritesPerSecond) {
+      return false;
+    }
+    _writesThisSecond++;
+    return true;
+  }
+
+  /// Waits until the current rate-limit window expires and resets the counter.
+  Future<void> _waitForNextWindow() async {
+    final ms =
+        1000 - DateTime.now().difference(_secondStart).inMilliseconds;
+    await Future<void>.delayed(Duration(milliseconds: ms.clamp(0, 1000)));
+    _secondStart = DateTime.now();
+    _writesThisSecond = 1; // count the write we are about to do
+  }
+
+  /// True when Firestore is likely reachable.
+  bool get _networkAvailable =>
+      ConnectivityMonitorService.instance.isNetworkConnected;
+
+  /// Adds a failed write to the retry queue (drops oldest when full).
+  void _enqueueRetry({
+    required String collection,
+    required String? docId,
+    required Map<String, dynamic> data,
+    required bool merge,
+  }) {
+    if (_retryQueue.length >= _retryQueueMaxSize) {
+      _retryQueue.removeAt(0);
+    }
+    _retryQueue.add(<String, dynamic>{
+      'collection': collection,
+      'docId': docId,
+      'data': data,
+      'merge': merge,
+    });
+  }
+
+  /// Attempts to flush the oldest queued item after a successful write.
+  Future<void> _flushOneRetryItem() async {
+    if (_retryQueue.isEmpty || !_networkAvailable) return;
+    if (!_acquireWriteToken()) return;
+
+    final item = _retryQueue.first;
+    try {
+      final collection = item['collection'] as String;
+      final docId = item['docId'] as String?;
+      final data = item['data'] as Map<String, dynamic>;
+      final merge = (item['merge'] as bool?) ?? true;
+      final colRef = _firestore.collection(collection);
+      if (docId != null) {
+        await colRef.doc(docId).set(data, SetOptions(merge: merge));
+      } else {
+        await colRef.add(data);
+      }
+      _retryQueue.removeAt(0);
+      _totalUploaded++;
+      if (kDebugMode) {
+        debugPrint(
+            '[CloudDatabaseService] Retry flush succeeded. '
+            'Queue: ${_retryQueue.length}');
+      }
+    } catch (e) {
+      // Keep item in queue for the next flush attempt.
+      if (kDebugMode) {
+        debugPrint('[CloudDatabaseService] Retry flush failed: $e');
+      }
+    }
+  }
+
+  /// Performs a Firestore set/merge with rate limiting, connection awareness,
+  /// retry queue, and statistics tracking.
+  Future<void> _safeSet(
+    DocumentReference<Map<String, dynamic>> ref,
+    Map<String, dynamic> data, {
+    bool merge = true,
+  }) async {
+    // Derive a collection path string for the retry queue entry.
+    final parts = ref.path.split('/');
+    final collectionPath = parts.take(parts.length - 1).join('/');
+
+    if (!_networkAvailable) {
+      _totalFailed++;
+      _enqueueRetry(
+        collection: collectionPath,
+        docId: ref.id,
+        data: data,
+        merge: merge,
+      );
+      if (kDebugMode) {
+        debugPrint(
+            '[CloudDatabaseService] Offline — queued write to ${ref.path}');
+      }
+      return;
+    }
+
+    if (!_acquireWriteToken()) {
+      await _waitForNextWindow();
+    }
+
+    try {
+      await ref.set(data, SetOptions(merge: merge));
+      _totalUploaded++;
+      await _flushOneRetryItem();
+    } catch (e) {
+      _totalFailed++;
+      _enqueueRetry(
+        collection: collectionPath,
+        docId: ref.id,
+        data: data,
+        merge: merge,
+      );
+      if (kDebugMode) {
+        debugPrint(
+            '[CloudDatabaseService] Write failed, queued for retry: $e');
+      }
+      rethrow;
+    }
+  }
+
+  /// Performs a Firestore add with rate limiting, connection awareness,
+  /// retry queue, and statistics tracking.
+  Future<String?> _safeAdd(
+    CollectionReference<Map<String, dynamic>> ref,
+    Map<String, dynamic> data,
+  ) async {
+    if (!_networkAvailable) {
+      _totalFailed++;
+      _enqueueRetry(
+        collection: ref.path,
+        docId: null,
+        data: data,
+        merge: false,
+      );
+      if (kDebugMode) {
+        debugPrint(
+            '[CloudDatabaseService] Offline — queued add to ${ref.path}');
+      }
+      return null;
+    }
+
+    if (!_acquireWriteToken()) {
+      await _waitForNextWindow();
+    }
+
+    try {
+      final docRef = await ref.add(data);
+      _totalUploaded++;
+      await _flushOneRetryItem();
+      return docRef.id;
+    } catch (e) {
+      _totalFailed++;
+      _enqueueRetry(
+        collection: ref.path,
+        docId: null,
+        data: data,
+        merge: false,
+      );
+      if (kDebugMode) {
+        debugPrint(
+            '[CloudDatabaseService] Add failed, queued for retry: $e');
+      }
+      rethrow;
+    }
+  }
+
+  // ============== BATCH UPLOAD ==============
+
+  /// Uploads a list of items to Firestore using WriteBatch operations.
+  ///
+  /// Each item must contain a `_collection` key with the name of the
+  /// subcollection under the current user's document.  An optional `_docId`
+  /// key specifies the document ID; if absent, Firestore auto-generates one.
+  /// All other keys are written as document fields.
+  ///
+  /// Batches are limited to 500 operations automatically.  Returns the total
+  /// number of items successfully committed.
+  Future<int> batchUpload(List<Map<String, dynamic>> items) async {
+    if (userId == null || items.isEmpty) return 0;
+
+    int written = 0;
+    const batchLimit = 500;
+
+    for (int i = 0; i < items.length; i += batchLimit) {
+      final end =
+          (i + batchLimit < items.length) ? i + batchLimit : items.length;
+      final chunk = items.sublist(i, end);
+      final batch = _firestore.batch();
+
+      for (final item in chunk) {
+        final collectionName = item['_collection'] as String?;
+        if (collectionName == null) continue;
+        final docId = item['_docId'] as String?;
+        final data = Map<String, dynamic>.from(item)
+          ..remove('_collection')
+          ..remove('_docId');
+        final colRef = _firestore
+            .collection('users')
+            .doc(userId)
+            .collection(collectionName);
+        final ref = docId != null ? colRef.doc(docId) : colRef.doc();
+        batch.set(ref, data, SetOptions(merge: true));
+      }
+
+      try {
+        await batch.commit();
+        written += chunk.length;
+        _totalUploaded += chunk.length;
+        if (kDebugMode) {
+          debugPrint(
+              '[CloudDatabaseService] Batch commit: ${chunk.length} items');
+        }
+      } catch (e) {
+        _totalFailed += chunk.length;
+        if (kDebugMode) {
+          debugPrint('[CloudDatabaseService] Batch commit failed: $e');
+        }
+        // Queue individual items for later retry.
+        for (final item in chunk) {
+          final collectionName = item['_collection'] as String?;
+          if (collectionName == null) continue;
+          final docId = item['_docId'] as String?;
+          final data = Map<String, dynamic>.from(item)
+            ..remove('_collection')
+            ..remove('_docId');
+          _enqueueRetry(
+            collection: 'users/$userId/$collectionName',
+            docId: docId,
+            data: data,
+            merge: true,
+          );
+        }
+      }
+    }
+    return written;
+  }
+
+  // ============== IDENTITY HELPERS ==============
 
   /// Get current user ID (null if not logged in)
   String? get userId => _auth.currentUser?.uid;
@@ -67,12 +357,14 @@ class CloudDatabaseService {
   Future<void> saveProgressStats(Map<String, dynamic> data) async {
     if (userId == null) return;
     try {
-      await _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('progress')
-          .doc('stats')
-          .set(data, SetOptions(merge: true));
+      await _safeSet(
+        _firestore
+            .collection('users')
+            .doc(userId)
+            .collection('progress')
+            .doc('stats'),
+        data,
+      );
     } catch (e) {
       debugPrint('Error saving progress stats: $e');
     }
@@ -98,17 +390,20 @@ class CloudDatabaseService {
   }
 
   /// Save daily stats
-  Future<void> saveDailyStats(String dateKey, Map<String, dynamic> data) async {
+  Future<void> saveDailyStats(
+      String dateKey, Map<String, dynamic> data) async {
     if (userId == null) return;
     try {
-      await _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('progress')
-          .doc('daily')
-          .collection('days')
-          .doc(dateKey)
-          .set(data, SetOptions(merge: true));
+      await _safeSet(
+        _firestore
+            .collection('users')
+            .doc(userId)
+            .collection('progress')
+            .doc('daily')
+            .collection('days')
+            .doc(dateKey),
+        data,
+      );
     } catch (e) {
       debugPrint('Error saving daily stats: $e');
     }
@@ -161,12 +456,14 @@ class CloudDatabaseService {
   Future<void> saveSettings(Map<String, dynamic> data) async {
     if (userId == null) return;
     try {
-      await _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('settings')
-          .doc('app')
-          .set(data, SetOptions(merge: true));
+      await _safeSet(
+        _firestore
+            .collection('users')
+            .doc(userId)
+            .collection('settings')
+            .doc('app'),
+        data,
+      );
     } catch (e) {
       debugPrint('Error saving settings: $e');
     }
@@ -196,7 +493,9 @@ class CloudDatabaseService {
           .collection('journal')
           .orderBy('createdAt', descending: true)
           .get();
-      return snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList();
+      return snapshot.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
     } catch (e) {
       debugPrint('Error getting journal entries: $e');
       return [];
@@ -207,12 +506,10 @@ class CloudDatabaseService {
   Future<String?> addJournalEntry(Map<String, dynamic> data) async {
     if (userId == null) return null;
     try {
-      final docRef = await _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('journal')
-          .add(data);
-      return docRef.id;
+      return await _safeAdd(
+        _firestore.collection('users').doc(userId).collection('journal'),
+        data,
+      );
     } catch (e) {
       debugPrint('Error adding journal entry: $e');
       return null;
@@ -220,15 +517,18 @@ class CloudDatabaseService {
   }
 
   /// Update journal entry
-  Future<void> updateJournalEntry(String id, Map<String, dynamic> data) async {
+  Future<void> updateJournalEntry(
+      String id, Map<String, dynamic> data) async {
     if (userId == null) return;
     try {
-      await _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('journal')
-          .doc(id)
-          .update(data);
+      await _safeSet(
+        _firestore
+            .collection('users')
+            .doc(userId)
+            .collection('journal')
+            .doc(id),
+        data,
+      );
     } catch (e) {
       debugPrint('Error updating journal entry: $e');
     }
@@ -261,7 +561,9 @@ class CloudDatabaseService {
           .collection('voiceNotes')
           .orderBy('createdAt', descending: true)
           .get();
-      return snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList();
+      return snapshot.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
     } catch (e) {
       debugPrint('Error getting voice notes: $e');
       return [];
@@ -272,12 +574,13 @@ class CloudDatabaseService {
   Future<String?> addVoiceNote(Map<String, dynamic> data) async {
     if (userId == null) return null;
     try {
-      final docRef = await _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('voiceNotes')
-          .add(data);
-      return docRef.id;
+      return await _safeAdd(
+        _firestore
+            .collection('users')
+            .doc(userId)
+            .collection('voiceNotes'),
+        data,
+      );
     } catch (e) {
       debugPrint('Error adding voice note: $e');
       return null;
@@ -301,7 +604,9 @@ class CloudDatabaseService {
       }
 
       final snapshot = await query.get();
-      return snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList();
+      return snapshot.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
     } catch (e) {
       debugPrint('Error getting weather logs: $e');
       return [];
@@ -312,12 +617,13 @@ class CloudDatabaseService {
   Future<String?> addWeatherLog(Map<String, dynamic> data) async {
     if (userId == null) return null;
     try {
-      final docRef = await _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('weatherLogs')
-          .add(data);
-      return docRef.id;
+      return await _safeAdd(
+        _firestore
+            .collection('users')
+            .doc(userId)
+            .collection('weatherLogs'),
+        data,
+      );
     } catch (e) {
       debugPrint('Error adding weather log: $e');
       return null;
@@ -354,7 +660,9 @@ class CloudDatabaseService {
           .where('timestamp', isLessThanOrEqualTo: end.toIso8601String())
           .orderBy('timestamp', descending: true)
           .get();
-      return snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList();
+      return snapshot.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
     } catch (e) {
       debugPrint('Error getting weather logs for date range: $e');
       return [];
@@ -384,12 +692,14 @@ class CloudDatabaseService {
   Future<void> saveNotificationSettings(Map<String, dynamic> data) async {
     if (userId == null) return;
     try {
-      await _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('settings')
-          .doc('notifications')
-          .set(data, SetOptions(merge: true));
+      await _safeSet(
+        _firestore
+            .collection('users')
+            .doc(userId)
+            .collection('settings')
+            .doc('notifications'),
+        data,
+      );
     } catch (e) {
       debugPrint('Error saving notification settings: $e');
     }
@@ -406,7 +716,9 @@ class CloudDatabaseService {
           .orderBy('timestamp', descending: true)
           .limit(50)
           .get();
-      return snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList();
+      return snapshot.docs
+          .map((doc) => {'id': doc.id, ...doc.data()})
+          .toList();
     } catch (e) {
       debugPrint('Error getting notification history: $e');
       return [];
@@ -417,11 +729,13 @@ class CloudDatabaseService {
   Future<void> addNotification(Map<String, dynamic> data) async {
     if (userId == null) return;
     try {
-      await _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('notifications')
-          .add(data);
+      await _safeAdd(
+        _firestore
+            .collection('users')
+            .doc(userId)
+            .collection('notifications'),
+        data,
+      );
     } catch (e) {
       debugPrint('Error adding notification: $e');
     }
@@ -465,12 +779,14 @@ class CloudDatabaseService {
   Future<void> savePreferences(Map<String, dynamic> data) async {
     if (userId == null) return;
     try {
-      await _firestore
-          .collection('users')
-          .doc(userId)
-          .collection('settings')
-          .doc('preferences')
-          .set(data, SetOptions(merge: true));
+      await _safeSet(
+        _firestore
+            .collection('users')
+            .doc(userId)
+            .collection('settings')
+            .doc('preferences'),
+        data,
+      );
     } catch (e) {
       debugPrint('Error saving preferences: $e');
     }
@@ -482,8 +798,14 @@ class CloudDatabaseService {
   Future<void> clearAllUserData() async {
     if (userId == null) return;
     try {
-      // Delete subcollections
-      final collections = ['progress', 'journal', 'voiceNotes', 'weatherLogs', 'notifications', 'settings'];
+      final collections = [
+        'progress',
+        'journal',
+        'voiceNotes',
+        'weatherLogs',
+        'notifications',
+        'settings',
+      ];
       for (final collection in collections) {
         final snapshot = await _firestore
             .collection('users')
@@ -503,7 +825,8 @@ class CloudDatabaseService {
     const batchLimit = 500;
     for (int i = 0; i < docs.length; i += batchLimit) {
       final batch = _firestore.batch();
-      final end = (i + batchLimit < docs.length) ? i + batchLimit : docs.length;
+      final end =
+          (i + batchLimit < docs.length) ? i + batchLimit : docs.length;
       for (int j = i; j < end; j++) {
         batch.delete(docs[j].reference);
       }
