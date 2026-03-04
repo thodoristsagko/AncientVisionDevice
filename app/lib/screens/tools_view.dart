@@ -9,6 +9,9 @@ import '../services/auth_service.dart';
 import '../services/export_service.dart';
 import '../services/pdf_export_service.dart';
 import '../services/local_storage_service.dart';
+import '../services/session_export_service.dart';
+import '../services/emergency_share_service.dart';
+import '../services/vibration_anomaly_service.dart';
 import 'field_journal_screen.dart';
 import 'quick_capture_screen.dart';
 import 'manual_entry_form_screen.dart';
@@ -17,6 +20,7 @@ import 'settings_screen.dart';
 import 'help_screen.dart';
 import 'admin_panel_screen.dart';
 import 'ai_recognition_screen.dart';
+import 'calibration_wizard_screen.dart';
 
 class ToolsView extends StatelessWidget {
   const ToolsView({super.key});
@@ -134,6 +138,12 @@ class ToolsView extends StatelessWidget {
                           ),
                         ),
                       ]),
+                      const SizedBox(height: 18),
+
+                      // === VIBRATION & SAFETY TOOLS ===
+                      _buildCategoryHeader('Vibration & Safety'),
+                      const SizedBox(height: 10),
+                      _buildVibrationToolsSection(context),
                       const SizedBox(height: 18),
 
                       // === ADMIN SECTION (only visible to admins) ===
@@ -315,6 +325,124 @@ class ToolsView extends StatelessWidget {
     );
   }
 
+
+  Widget _buildVibrationToolsSection(BuildContext context) {
+    return Column(
+      children: [
+        // Session Export
+        _buildBigToolButton(
+          context,
+          icon: Icons.ios_share_rounded,
+          title: 'Export Session Data',
+          description: 'Share current session as CSV',
+          color: const Color(0xFF607D8B),
+          onTap: () async {
+            try {
+              // Export an empty/placeholder session when called standalone;
+              // the real export with actual data is triggered from safety_view.
+              await SessionExportService.instance.exportSession([]);
+            } catch (e) {
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'No active session data to export. Start monitoring first.',
+                    ),
+                  ),
+                );
+              }
+            }
+          },
+        ),
+        const SizedBox(height: 10),
+
+        // Calibration
+        _buildBigToolButton(
+          context,
+          icon: Icons.tune_rounded,
+          title: 'Calibrate Device',
+          description: 'Reset baseline for current environment',
+          color: const Color(0xFFFFC107),
+          onTap: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => const CalibrationWizardScreen(),
+              ),
+            );
+          },
+        ),
+        const SizedBox(height: 10),
+
+        // Emergency Share
+        _buildBigToolButton(
+          context,
+          icon: Icons.emergency_share_rounded,
+          title: 'Emergency Report',
+          description: 'Share alert data with site supervisor',
+          color: const Color(0xFFF44336),
+          onTap: () async {
+            final anomalyService = VibrationAnomalyService.instance;
+            try {
+              await EmergencyShareService.shareAlertAutoLocation(
+                ppv: 0.0,
+                anomalyScore: 0.0,
+                deviceId: anomalyService.isInitialized
+                    ? 'AncientVision'
+                    : 'No device',
+                precursorPattern: null,
+              );
+            } catch (e) {
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Share failed: $e')),
+                );
+              }
+            }
+          },
+        ),
+        const SizedBox(height: 10),
+
+        // Data Quality Check
+        _buildBigToolButton(
+          context,
+          icon: Icons.fact_check_rounded,
+          title: 'Check Data Quality',
+          description: 'Run quality analysis on collected samples',
+          color: const Color(0xFF00BCD4),
+          onTap: () {
+            showDialog(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                backgroundColor: const Color(0xFF1C2523),
+                title: const Text(
+                  'Data Quality Check',
+                  style: TextStyle(color: Colors.white),
+                ),
+                content: const Text(
+                  'Connect to the collector service to run quality analysis.\n\n'
+                  'Start the collector with:\n'
+                  '  docker compose -f docker-compose.collect.yml up\n\n'
+                  'Then access the quality report at:\n'
+                  '  http://localhost:8765/stats',
+                  style: TextStyle(color: Colors.white70, fontSize: 13),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text(
+                      'OK',
+                      style: TextStyle(color: Color(0xFFFFC107)),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
 
   void _showExportDialog(BuildContext context) {
     showModalBottomSheet(
