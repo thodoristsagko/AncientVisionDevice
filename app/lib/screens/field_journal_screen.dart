@@ -36,6 +36,9 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
   WeatherLog? _currentWeather;
   DateTimeRange? _dateRange;
 
+  /// Sort order for the journal list.
+  _SortMode _sortMode = _SortMode.dateDesc;
+
   // SharedPreferences key for local storage
   static const _entriesKey = 'journal_entries';
 
@@ -404,6 +407,11 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
               onPressed: _showFilterDialog,
             ),
             IconButton(
+              icon: const Icon(Icons.sort),
+              tooltip: 'Sort entries',
+              onPressed: _showSortDialog,
+            ),
+            IconButton(
               icon: const Icon(Icons.ios_share),
               tooltip: 'Export entries',
               onPressed: _exportEntries,
@@ -478,6 +486,23 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
             (e.tags?.any((t) => t.toLowerCase().contains(query)) ?? false) ||
             (e.transcription?.toLowerCase().contains(query) ?? false);
       }).toList();
+    }
+
+    // Apply sort
+    filteredEntries = List<JournalEntry>.from(filteredEntries);
+    switch (_sortMode) {
+      case _SortMode.dateDesc:
+        filteredEntries.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      case _SortMode.dateAsc:
+        filteredEntries.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      case _SortMode.severity:
+        // Sort by entry type severity: problem > observation > daily > method > other
+        filteredEntries.sort((a, b) {
+          final rankA = _entryTypeSeverityRank(a.type);
+          final rankB = _entryTypeSeverityRank(b.type);
+          if (rankA != rankB) return rankA.compareTo(rankB);
+          return b.createdAt.compareTo(a.createdAt);
+        });
     }
 
     // Group entries by date
@@ -768,7 +793,71 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
   }
 
   Widget _buildEntryCard(JournalEntry entry) {
-    return GestureDetector(
+    // Extract PPV from entry metadata if recorded during a vibration event
+    final ppvRaw = entry.metadata?['ppv'];
+    final double? entryPpv = ppvRaw != null ? (ppvRaw as num).toDouble() : null;
+
+    return Dismissible(
+      key: ValueKey(entry.id),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 20),
+        margin: const EdgeInsets.only(bottom: 12),
+        decoration: BoxDecoration(
+          color: Colors.red.withAlpha(200),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.delete, color: Colors.white, size: 28),
+            SizedBox(height: 4),
+            Text(
+              'Delete',
+              style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+      ),
+      confirmDismiss: (_) async {
+        // Optimistically remove from list
+        final idx = _entries.indexOf(entry);
+        setState(() => _entries.remove(entry));
+        await _saveEntriesLocal();
+
+        // Show undo snackbar
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Entry "${entry.title}" deleted'),
+              duration: const Duration(seconds: 5),
+              action: SnackBarAction(
+                label: 'UNDO',
+                textColor: Colors.amber,
+                onPressed: () {
+                  setState(() {
+                    _entries.insert(idx.clamp(0, _entries.length), entry);
+                    _entries.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+                  });
+                  _saveEntriesLocal();
+                  if (_cloudDb.useCloud) {
+                    _cloudDb.addJournalEntry(entry.toJson());
+                  }
+                },
+              ),
+              backgroundColor: const Color(0xFF1C2523),
+            ),
+          );
+          // Also delete from cloud (after snackbar shown — undo may cancel it)
+          if (_cloudDb.useCloud) {
+            await _cloudDb.deleteJournalEntry(entry.id);
+          }
+        }
+        // Return false: we already removed from list manually
+        return false;
+      },
+      child: GestureDetector(
       onTap: () => _showEntryDetails(entry),
       onLongPress: () => _showEntryOptions(entry),
       child: Container(
@@ -821,6 +910,29 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
                     ],
                   ),
                 ),
+                // PPV badge — shown when entry was logged with vibration data
+                if (entryPpv != null) ...[
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: _ppvBadgeColor(entryPpv).withAlpha(40),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: _ppvBadgeColor(entryPpv).withAlpha(150),
+                        width: 1,
+                      ),
+                    ),
+                    child: Text(
+                      '${entryPpv.toStringAsFixed(2)} mm/s',
+                      style: TextStyle(
+                        color: _ppvBadgeColor(entryPpv),
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                ],
                 if (entry.isPinned)
                   const Icon(Icons.push_pin, color: Colors.amber, size: 16),
                 if (entry.transcription != null && entry.transcription!.isNotEmpty)
@@ -963,7 +1075,15 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
           ],
         ),
       ),
-    );
+      ), // closes GestureDetector
+    ); // closes Dismissible
+  }
+
+  Color _ppvBadgeColor(double ppv) {
+    if (ppv >= 2.0) return const Color(0xFFE53935);
+    if (ppv >= 0.5) return const Color(0xFFFFC107);
+    if (ppv >= 0.1) return const Color(0xFFFF9800);
+    return const Color(0xFF4CAF50);
   }
 
   /// Quick-entry bottom sheet: minimal fields + live PPV/anomaly context + GPS.
@@ -1266,6 +1386,45 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
                   _selectedFilter = type;
                 });
                 Navigator.pop(context);
+              },
+            )),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showSortDialog() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1C2523),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Sort Entries',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 16),
+            ..._SortMode.values.map((mode) => ListTile(
+              leading: Icon(mode.icon, color: mode.color),
+              title: Text(mode.label, style: const TextStyle(color: Colors.white)),
+              trailing: _sortMode == mode
+                  ? const Icon(Icons.check, color: Colors.green)
+                  : null,
+              onTap: () {
+                setState(() => _sortMode = mode);
+                Navigator.pop(ctx);
               },
             )),
           ],
@@ -1890,6 +2049,22 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
     );
   }
 
+  /// Lower rank = shown first when sorting by severity.
+  int _entryTypeSeverityRank(JournalEntryType type) {
+    switch (type) {
+      case JournalEntryType.problem:
+        return 0;
+      case JournalEntryType.observation:
+        return 1;
+      case JournalEntryType.daily:
+        return 2;
+      case JournalEntryType.method:
+        return 3;
+      default:
+        return 4;
+    }
+  }
+
   String _formatDateKey(DateTime date) {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
@@ -1908,5 +2083,48 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
 
   String _formatDateTime(DateTime date) {
     return '${_formatDateKey(date)} at ${_formatTime(date)}';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sort mode enum
+// ---------------------------------------------------------------------------
+
+enum _SortMode {
+  dateDesc,
+  dateAsc,
+  severity;
+
+  String get label {
+    switch (this) {
+      case _SortMode.dateDesc:
+        return 'Newest first';
+      case _SortMode.dateAsc:
+        return 'Oldest first';
+      case _SortMode.severity:
+        return 'By severity (problems first)';
+    }
+  }
+
+  IconData get icon {
+    switch (this) {
+      case _SortMode.dateDesc:
+        return Icons.arrow_downward;
+      case _SortMode.dateAsc:
+        return Icons.arrow_upward;
+      case _SortMode.severity:
+        return Icons.warning_amber_rounded;
+    }
+  }
+
+  Color get color {
+    switch (this) {
+      case _SortMode.dateDesc:
+        return Colors.white70;
+      case _SortMode.dateAsc:
+        return Colors.white70;
+      case _SortMode.severity:
+        return Colors.orange;
+    }
   }
 }

@@ -1018,3 +1018,161 @@ def test_delete_device_data_invalid_id(client):
     # Test that very long device_id is rejected
     r = c.delete("/data/device/" + "x" * 100)
     assert r.status_code == 400
+
+
+# ===========================================================================
+# New tests: /data/export, POST /ingest 1 MB size validation,
+#             GET /session/<session_id>/summary
+# ===========================================================================
+
+def test_data_export_returns_csv(client):
+    """GET /data/export returns CSV with correct Content-Type and disposition."""
+    c, _ = client
+    _post_sample(c, ts_suffix="1")
+    _post_sample(c, ts_suffix="2")
+    r = c.get("/data/export")
+    assert r.status_code == 200
+    assert "text/csv" in r.content_type
+    assert "export.csv" in r.headers.get("Content-Disposition", "")
+
+
+def test_data_export_contains_all_rows(client):
+    """GET /data/export includes all ingested rows."""
+    c, _ = client
+    _post_sample(c, ts_suffix="1")
+    _post_sample(c, ts_suffix="2")
+    _post_sample(c, {"device_id": "m5stick-02"}, ts_suffix="3")
+    r = c.get("/data/export")
+    text = r.data.decode("utf-8")
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    # header + 3 data rows
+    assert len(lines) == 4
+
+
+def test_data_export_empty_has_header(client):
+    """GET /data/export with no data still returns the CSV header."""
+    c, _ = client
+    r = c.get("/data/export")
+    assert r.status_code == 200
+    text = r.data.decode("utf-8")
+    assert "device_id" in text
+    assert "ppv" in text
+
+
+def test_data_export_filename_is_export_csv(client):
+    """GET /data/export Content-Disposition filename is exactly 'export.csv'."""
+    c, _ = client
+    r = c.get("/data/export")
+    disposition = r.headers.get("Content-Disposition", "")
+    assert "filename=export.csv" in disposition
+
+
+def test_ingest_rejects_payload_over_1mb(client):
+    """POST /ingest rejects payloads with Content-Length > 1 MB with 413."""
+    c, _ = client
+    # Build a minimal valid-looking payload but with a very large body string
+    # We set the content_length header manually to trigger the check
+    large_body = b"x" * (1048576 + 1)
+    r = c.post(
+        "/ingest",
+        data=large_body,
+        content_type="application/json",
+        headers={"Content-Length": str(len(large_body))},
+    )
+    assert r.status_code == 413
+
+
+def test_ingest_accepts_payload_at_1mb_boundary(client):
+    """POST /ingest with Content-Length exactly at 1 MB is NOT rejected by size check."""
+    c, _ = client
+    import json as _json
+    # A small valid payload — size check uses content_length header
+    payload_bytes = _json.dumps(BASE_PAYLOAD).encode()
+    r = c.post(
+        "/ingest",
+        data=payload_bytes,
+        content_type="application/json",
+        headers={"Content-Length": str(1048576)},
+    )
+    # The size limit is >1MB so exactly 1MB is allowed (but JSON will fail to parse
+    # because the body is only the payload — that's fine, we just want no 413)
+    assert r.status_code != 413
+
+
+def test_session_field_summary_404_when_no_rows(client):
+    """GET /session/<id>/summary returns 404 when no CSV rows match."""
+    c, _ = client
+    r = c.get("/session/nonexistent-session-id/summary")
+    assert r.status_code == 404
+    body = r.get_json()
+    assert "error" in body
+
+
+def test_session_field_summary_returns_stats(client):
+    """GET /session/<id>/summary returns correct stats for matching rows."""
+    c, data_dir = client
+
+    # Write a CSV with session_id field directly
+    import csv as _csv
+    field_dir = data_dir / "field"
+    field_dir.mkdir(exist_ok=True)
+    csv_path = field_dir / "2026-03-04.csv"
+    fieldnames = list(BASE_PAYLOAD.keys()) + ["session_id"]
+    rows = [
+        {**BASE_PAYLOAD, "timestamp": "2026-03-04T10:00:00Z",
+         "ppv": "0.10", "label": "normal", "session_id": "sess-abc"},
+        {**BASE_PAYLOAD, "timestamp": "2026-03-04T10:00:10Z",
+         "ppv": "0.20", "label": "anomaly", "session_id": "sess-abc"},
+        {**BASE_PAYLOAD, "timestamp": "2026-03-04T10:00:20Z",
+         "ppv": "0.05", "label": "normal", "session_id": "sess-other"},
+    ]
+    with open(csv_path, "w", newline="") as f:
+        writer = _csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    r = c.get("/session/sess-abc/summary")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["session_id"] == "sess-abc"
+    assert body["sample_count"] == 2
+    assert body["anomaly_count"] == 1
+    assert abs(body["peak_ppv"] - 0.20) < 1e-5
+    assert abs(body["mean_ppv"] - 0.15) < 1e-5
+    assert body["first_ts"] == "2026-03-04T10:00:00Z"
+    assert body["last_ts"] == "2026-03-04T10:00:10Z"
+    # 10 seconds between first and last
+    assert body["duration_seconds"] == pytest.approx(10.0, abs=0.01)
+
+
+def test_session_field_summary_invalid_session_id(client):
+    """GET /session/<id>/summary rejects suspicious session_ids."""
+    c, _ = client
+    r = c.get("/session/../etc/passwd/summary")
+    # Flask routing may return 404 for path traversal via URL, which is fine
+    assert r.status_code in (400, 404)
+
+    r = c.get("/session/" + "x" * 129 + "/summary")
+    assert r.status_code == 400
+
+
+def test_session_field_summary_single_row_no_duration(client):
+    """GET /session/<id>/summary with a single row has None duration."""
+    c, data_dir = client
+
+    import csv as _csv
+    field_dir = data_dir / "field"
+    field_dir.mkdir(exist_ok=True)
+    csv_path = field_dir / "2026-03-04.csv"
+    fieldnames = list(BASE_PAYLOAD.keys()) + ["session_id"]
+    with open(csv_path, "w", newline="") as f:
+        writer = _csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow({**BASE_PAYLOAD, "timestamp": "2026-03-04T09:00:00Z",
+                         "ppv": "0.05", "label": "normal", "session_id": "solo-sess"})
+
+    r = c.get("/session/solo-sess/summary")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["sample_count"] == 1
+    assert body["duration_seconds"] is None

@@ -44,17 +44,28 @@ logging.basicConfig(
 TRIGGER_THRESHOLD = int(os.environ.get("TRIGGER_THRESHOLD", "100"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "60"))
 BACKOFF_BASE = int(os.environ.get("BACKOFF_BASE", "60"))   # seconds to wait after a failure
-TRIGGER_COOLDOWN_SECS = int(os.environ.get("TRIGGER_COOLDOWN_SECS", "300"))
+# RETRAIN_COOLDOWN_SECONDS is the canonical name; TRIGGER_COOLDOWN_SECS is the legacy alias.
+# If both are set, RETRAIN_COOLDOWN_SECONDS takes precedence.
+RETRAIN_COOLDOWN_SECONDS = int(
+    os.environ.get(
+        "RETRAIN_COOLDOWN_SECONDS",
+        os.environ.get("TRIGGER_COOLDOWN_SECS", "300"),
+    )
+)
+TRIGGER_COOLDOWN_SECS = RETRAIN_COOLDOWN_SECONDS  # kept for backward compat
 TRIGGER_WRITE_MAX_RETRIES = 3
 SAMPLE_RATE_HISTORY_SIZE = 600  # 10 minutes of 1-minute windows
 ANOMALY_SPIKE_THRESHOLD = int(os.environ.get("ANOMALY_SPIKE_THRESHOLD", "10"))
 HEALTH_PORT = int(os.environ.get("HEALTH_PORT", "8766"))
 
 # ---------------------------------------------------------------------------
-# Global state for health endpoint
+# Global state for health / stats endpoints
 # ---------------------------------------------------------------------------
 _triggers_fired: int = 0
 _last_check_ts: float = 0.0
+_last_trigger_ts: float | None = None   # wall-clock (time.time()) of most recent trigger
+_cooldown_active: bool = False
+_cooldown_remaining_seconds: float = 0.0
 _health_lock = threading.Lock()
 
 
@@ -72,29 +83,41 @@ def jlog(level: str, msg: str, **fields) -> None:
 
 
 # ---------------------------------------------------------------------------
-# HTTP health endpoint (background daemon thread, port HEALTH_PORT)
+# HTTP health + stats endpoint (background daemon thread, port HEALTH_PORT)
 # ---------------------------------------------------------------------------
 
 class _HealthHandler(BaseHTTPRequestHandler):
-    """Minimal HTTP handler serving GET /health."""
+    """Minimal HTTP handler serving GET /health and GET /stats."""
 
-    def do_GET(self) -> None:  # noqa: N802
-        if self.path != "/health":
-            self.send_response(404)
-            self.end_headers()
-            return
-        with _health_lock:
-            payload = {
-                "status": "ok",
-                "triggers_fired": _triggers_fired,
-                "last_check_ts": _last_check_ts,
-            }
+    def _send_json(self, payload: dict, status: int = 200) -> None:
         body = json.dumps(payload).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/health":
+            with _health_lock:
+                payload = {
+                    "status": "ok",
+                    "triggers_fired": _triggers_fired,
+                    "last_check_ts": _last_check_ts,
+                }
+            self._send_json(payload)
+        elif self.path == "/stats":
+            with _health_lock:
+                payload = {
+                    "triggers_fired": _triggers_fired,
+                    "last_trigger_ts": _last_trigger_ts,
+                    "cooldown_active": _cooldown_active,
+                    "cooldown_remaining_seconds": round(_cooldown_remaining_seconds, 1),
+                }
+            self._send_json(payload)
+        else:
+            self.send_response(404)
+            self.end_headers()
 
     def log_message(self, fmt, *args) -> None:  # noqa: N802
         """Silence access logs -- we use jlog() instead."""
@@ -453,10 +476,16 @@ def main() -> None:
     )
 
     while True:
-        # Update last-check timestamp for health endpoint
-        global _last_check_ts
+        # Update last-check timestamp and cooldown state for health/stats endpoints
+        global _last_check_ts, _cooldown_active, _cooldown_remaining_seconds, _last_trigger_ts
+        now_wall = time.time()
+        now_mono = time.monotonic()
         with _health_lock:
-            _last_check_ts = time.time()
+            _last_check_ts = now_wall
+            elapsed = now_mono - last_trigger_time if last_trigger_time > 0 else RETRAIN_COOLDOWN_SECONDS
+            remaining_cd = max(0.0, RETRAIN_COOLDOWN_SECONDS - elapsed)
+            _cooldown_active = last_trigger_time > 0 and remaining_cd > 0
+            _cooldown_remaining_seconds = remaining_cd
 
         total = _read_int(data_dir / "field" / ".sample_count")
         delta = sample_delta(data_dir)
@@ -488,13 +517,12 @@ def main() -> None:
         )
 
         # Check whether we should trigger a retrain
-        now = time.monotonic()
         if delta >= TRIGGER_THRESHOLD:
             if lock_file.exists():
                 logging.info("Lock file exists -- trainer already running; skipping trigger.")
                 _log_json("trigger_skipped", reason="lock_file_exists")
-            elif now < backoff_until:
-                remaining = int(backoff_until - now)
+            elif now_mono < backoff_until:
+                remaining = int(backoff_until - now_mono)
                 logging.info(
                     f"In backoff after {consecutive_failures} consecutive failure(s); "
                     f"waiting {remaining}s more."
@@ -505,16 +533,16 @@ def main() -> None:
                     consecutive_failures=consecutive_failures,
                     remaining_secs=remaining,
                 )
-            elif now - last_trigger_time < TRIGGER_COOLDOWN_SECS:
-                remaining = int(TRIGGER_COOLDOWN_SECS - (now - last_trigger_time))
+            elif now_mono - last_trigger_time < TRIGGER_COOLDOWN_SECS:
+                remaining = int(TRIGGER_COOLDOWN_SECS - (now_mono - last_trigger_time))
                 logging.info(
                     f"Trigger cooldown active; waiting {remaining}s more "
-                    f"(last trigger {int(now - last_trigger_time)}s ago)."
+                    f"(last trigger {int(now_mono - last_trigger_time)}s ago)."
                 )
                 _log_json(
                     "trigger_skipped",
                     reason="cooldown_active",
-                    seconds_since_last_trigger=int(now - last_trigger_time),
+                    seconds_since_last_trigger=int(now_mono - last_trigger_time),
                     remaining_secs=remaining,
                 )
             else:
@@ -560,7 +588,9 @@ def main() -> None:
                     _log_json("trigger_launch_aborted", reason="trigger_file_write_failed")
                 else:
                     logging.info("Threshold reached -- launching trainer.")
-                    last_trigger_time = now
+                    last_trigger_time = now_mono
+                    with _health_lock:
+                        _last_trigger_ts = now_wall
 
                     write_status(
                         data_dir,

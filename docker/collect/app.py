@@ -209,8 +209,8 @@ def create_app():
         """Batch ingest endpoint for phone session sync.
         Accepts either a single sample or an array of samples.
         """
-        # Check request size limit (50 KB max for batches)
-        if request.content_length and request.content_length > 51200:
+        # Check request size limit (1 MB max for batches)
+        if request.content_length and request.content_length > 1048576:
             jlog("warning", "ingest_rejected", reason="payload_too_large",
                  size_bytes=request.content_length)
             return jsonify({"error": "payload too large"}), 413
@@ -1213,6 +1213,116 @@ def create_app():
                     jlog("warning", "export_stream_error", file=str(csv_path.name), error=str(exc))
 
         return Response(generate(), mimetype="application/x-ndjson")
+
+    # --- GET /data/export: return all field data as CSV download ---
+
+    @app.route("/data/export", methods=["GET"])
+    def data_export():
+        """Return all collected field data as a single CSV download.
+
+        Content-Type: text/csv
+        Content-Disposition: attachment; filename=export.csv
+        """
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=CSV_HEADER, extrasaction="ignore")
+        header_written = False
+
+        for csv_path in sorted(field_dir.glob("*.csv")):
+            try:
+                with open(csv_path, newline="") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        if not header_written:
+                            writer.writeheader()
+                            header_written = True
+                        writer.writerow(row)
+            except Exception:
+                pass
+
+        if not header_written:
+            writer.writeheader()
+
+        csv_content = buf.getvalue()
+        return Response(
+            csv_content,
+            mimetype="text/csv",
+            headers={"Content-Disposition": 'attachment; filename=export.csv'},
+        )
+
+    # --- GET /session/<session_id>/summary: stats computed from field CSV rows ---
+
+    @app.route("/session/<session_id>/summary", methods=["GET"])
+    def session_field_summary(session_id: str):
+        """Return a computed summary for all field CSV rows that have session_id matching.
+
+        Returns: sample_count, duration_seconds, peak_ppv, mean_ppv,
+                 anomaly_count, first_ts, last_ts
+        Returns 404 if no rows match.
+        """
+        # Basic input validation
+        if ".." in session_id or "/" in session_id or "\\" in session_id or len(session_id) > 128:
+            return jsonify({"error": "invalid session_id"}), 400
+
+        sample_count = 0
+        anomaly_count = 0
+        peak_ppv = 0.0
+        ppv_sum = 0.0
+        first_ts: str | None = None
+        last_ts: str | None = None
+
+        for csv_path in sorted(field_dir.glob("*.csv")):
+            try:
+                with open(csv_path, newline="") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        if row.get("session_id") != session_id:
+                            continue
+                        sample_count += 1
+                        ts_str = row.get("timestamp", "")
+                        if ts_str:
+                            if first_ts is None or ts_str < first_ts:
+                                first_ts = ts_str
+                            if last_ts is None or ts_str > last_ts:
+                                last_ts = ts_str
+                        try:
+                            ppv_val = float(row.get("ppv", 0) or 0)
+                            if ppv_val > peak_ppv:
+                                peak_ppv = ppv_val
+                            ppv_sum += ppv_val
+                        except (ValueError, TypeError):
+                            pass
+                        label = row.get("label", "")
+                        if label in ("anomaly", "precursor"):
+                            anomaly_count += 1
+            except Exception as exc:
+                jlog("warning", "session_field_summary_read_error",
+                     file=csv_path.name, error=str(exc))
+
+        if sample_count == 0:
+            return jsonify({"error": "session not found"}), 404
+
+        # Compute duration from first/last timestamp
+        duration_seconds: float | None = None
+        if first_ts and last_ts and first_ts != last_ts:
+            try:
+                t0 = datetime.fromisoformat(first_ts.replace("Z", "+00:00"))
+                t1 = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+                duration_seconds = round((t1 - t0).total_seconds(), 3)
+            except Exception:
+                pass
+
+        mean_ppv = round(ppv_sum / sample_count, 6) if sample_count > 0 else 0.0
+
+        return jsonify({
+            "session_id": session_id,
+            "sample_count": sample_count,
+            "duration_seconds": duration_seconds,
+            "peak_ppv": round(peak_ppv, 6),
+            "mean_ppv": mean_ppv,
+            "anomaly_count": anomaly_count,
+            "first_ts": first_ts,
+            "last_ts": last_ts,
+        })
 
     # --- Task 6: CORS headers and security headers ---
 

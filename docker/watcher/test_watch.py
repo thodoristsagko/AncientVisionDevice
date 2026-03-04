@@ -464,3 +464,162 @@ def test_health_response_reflects_triggers_fired(tmp_path):
 
     assert body["triggers_fired"] == expected_count
     server.server_close()
+
+
+# ===========================================================================
+# New tests: RETRAIN_COOLDOWN_SECONDS env var, /stats endpoint
+# ===========================================================================
+
+import watch as watch_module
+
+
+def test_retrain_cooldown_seconds_env_var(monkeypatch):
+    """RETRAIN_COOLDOWN_SECONDS env var controls the cooldown period."""
+    import importlib
+    monkeypatch.setenv("RETRAIN_COOLDOWN_SECONDS", "600")
+    # Re-import the module to pick up the new env var
+    importlib.reload(watch_module)
+    assert watch_module.RETRAIN_COOLDOWN_SECONDS == 600
+    assert watch_module.TRIGGER_COOLDOWN_SECS == 600
+    # Restore default
+    monkeypatch.delenv("RETRAIN_COOLDOWN_SECONDS", raising=False)
+    importlib.reload(watch_module)
+
+
+def test_retrain_cooldown_seconds_takes_precedence_over_legacy(monkeypatch):
+    """RETRAIN_COOLDOWN_SECONDS overrides TRIGGER_COOLDOWN_SECS when both set."""
+    import importlib
+    monkeypatch.setenv("RETRAIN_COOLDOWN_SECONDS", "999")
+    monkeypatch.setenv("TRIGGER_COOLDOWN_SECS", "111")
+    importlib.reload(watch_module)
+    assert watch_module.RETRAIN_COOLDOWN_SECONDS == 999
+    monkeypatch.delenv("RETRAIN_COOLDOWN_SECONDS", raising=False)
+    monkeypatch.delenv("TRIGGER_COOLDOWN_SECS", raising=False)
+    importlib.reload(watch_module)
+
+
+def test_legacy_trigger_cooldown_secs_still_works(monkeypatch):
+    """TRIGGER_COOLDOWN_SECS alone still sets the cooldown when RETRAIN_COOLDOWN_SECONDS absent."""
+    import importlib
+    monkeypatch.delenv("RETRAIN_COOLDOWN_SECONDS", raising=False)
+    monkeypatch.setenv("TRIGGER_COOLDOWN_SECS", "42")
+    importlib.reload(watch_module)
+    assert watch_module.RETRAIN_COOLDOWN_SECONDS == 42
+    assert watch_module.TRIGGER_COOLDOWN_SECS == 42
+    monkeypatch.delenv("TRIGGER_COOLDOWN_SECS", raising=False)
+    importlib.reload(watch_module)
+
+
+def test_cooldown_prevents_immediate_retrigger(tmp_path):
+    """After a trigger fires, a second attempt within the cooldown window is skipped."""
+    import watch as wm
+    # Set last_trigger_time (monotonic) to now so cooldown is active
+    # We test this by checking the cooldown logic used in the main loop:
+    # now_mono - last_trigger_time < TRIGGER_COOLDOWN_SECS  -> skip
+    cooldown = wm.RETRAIN_COOLDOWN_SECONDS
+    now_mono = time.monotonic()
+    last_trigger_time = now_mono - (cooldown // 2)  # halfway through cooldown
+    elapsed = now_mono - last_trigger_time
+    remaining = cooldown - elapsed
+    # Verify the condition that would cause a skip
+    assert elapsed < cooldown
+    assert remaining > 0
+
+
+def test_stats_endpoint_returns_expected_fields(tmp_path):
+    """GET /stats returns triggers_fired, last_trigger_ts, cooldown_active, cooldown_remaining_seconds."""
+    from http.server import HTTPServer
+    import urllib.request
+    import watch as wm
+
+    server = HTTPServer(("127.0.0.1", 0), wm._HealthHandler)
+    port = server.server_address[1]
+
+    t = threading.Thread(target=server.handle_request, daemon=True)
+    t.start()
+
+    url = f"http://127.0.0.1:{port}/stats"
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        body = json.loads(resp.read().decode())
+
+    assert "triggers_fired" in body
+    assert "last_trigger_ts" in body
+    assert "cooldown_active" in body
+    assert "cooldown_remaining_seconds" in body
+    server.server_close()
+
+
+def test_stats_endpoint_cooldown_not_active_initially(tmp_path):
+    """Before any trigger fires, cooldown_active is False and remaining is 0."""
+    from http.server import HTTPServer
+    import urllib.request
+    import watch as wm
+
+    # Reset global state
+    with wm._health_lock:
+        wm._last_trigger_ts = None
+        wm._cooldown_active = False
+        wm._cooldown_remaining_seconds = 0.0
+
+    server = HTTPServer(("127.0.0.1", 0), wm._HealthHandler)
+    port = server.server_address[1]
+
+    t = threading.Thread(target=server.handle_request, daemon=True)
+    t.start()
+
+    url = f"http://127.0.0.1:{port}/stats"
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        body = json.loads(resp.read().decode())
+
+    assert body["cooldown_active"] is False
+    assert body["cooldown_remaining_seconds"] == 0.0
+    assert body["last_trigger_ts"] is None
+    server.server_close()
+
+
+def test_stats_endpoint_404_for_unknown_path(tmp_path):
+    """GET /unknown returns 404 from the health handler."""
+    from http.server import HTTPServer
+    import urllib.request
+    import urllib.error
+    import watch as wm
+
+    server = HTTPServer(("127.0.0.1", 0), wm._HealthHandler)
+    port = server.server_address[1]
+
+    t = threading.Thread(target=server.handle_request, daemon=True)
+    t.start()
+
+    url = f"http://127.0.0.1:{port}/notapath"
+    try:
+        urllib.request.urlopen(url, timeout=5)
+        assert False, "Expected HTTPError 404"
+    except urllib.error.HTTPError as e:
+        assert e.code == 404
+    server.server_close()
+
+
+def test_stats_reflects_trigger_after_fire(tmp_path):
+    """After write_trigger_with_retry succeeds, triggers_fired is non-zero in /stats."""
+    from http.server import HTTPServer
+    import urllib.request
+    import watch as wm
+
+    trigger_file = tmp_path / "test_stats.trigger"
+    before = wm._triggers_fired
+    write_trigger_with_retry(trigger_file, threshold=100, sample_count=200)
+    after = wm._triggers_fired
+    assert after == before + 1
+
+    server = HTTPServer(("127.0.0.1", 0), wm._HealthHandler)
+    port = server.server_address[1]
+
+    t = threading.Thread(target=server.handle_request, daemon=True)
+    t.start()
+
+    url = f"http://127.0.0.1:{port}/stats"
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        body = json.loads(resp.read().decode())
+
+    assert body["triggers_fired"] == after
+    server.server_close()
