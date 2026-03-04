@@ -71,74 +71,96 @@ docker compose run --rm ml
 
 ## System Architecture
 
-```ascii
+```
 ┌─────────────────────────────────────────────────────────────────┐
 │                    AncientVision System                          │
 └─────────────────────────────────────────────────────────────────┘
 
-  ┌──────────────┐    BLE JSON     ┌──────────────────────────────┐
-  │  M5StickC+2  │ ─────────────► │      Android Phone           │
-  │  (Firmware)  │  200Hz accel   │                              │
-  │              │  3-axis binary  │  ┌──────────────────────┐   │
-  │  ・ IMU      │                 │  │  Flutter App          │   │
-  │  ・ BLE      │                 │  │                      │   │
-  │  ・ Screen   │                 │  │  DSP (isolate)       │   │
-  └──────────────┘                 │  │  ├─ FFT / DWT        │   │
-                                   │  │  ├─ Kurtosis/Crest   │   │
-  ┌──────────────┐                 │  │  └─ PSD Slope        │   │
-  │  Field Data  │                 │  │                      │   │
-  │  Collector   │◄────────────── │  │  ML Pipeline         │   │
-  │  (Docker)    │  POST /ingest  │  │  ├─ Autoencoder      │   │
-  │              │                 │  │  ├─ Precursor Class. │   │
-  │  /stats      │                 │  │  └─ Rule-based Fall. │   │
-  │  /export     │                 │  └──────────────────────┘   │
-  │  /devices    │                 └──────────────────────────────┘
+  ┌──────────────┐   BLE JSON    ┌──────────────────────────────┐
+  │  M5StickC+2  │ ────────────► │       Flutter App (Android)   │
+  │  (Firmware)  │  22+ fields   │                              │
+  │              │               │  ┌─────────────────────────┐ │
+  │  • 200Hz IMU │               │  │ VibrationDspService     │ │
+  │  • FFT basic │               │  │ • FFT / DWT / Kurtosis  │ │
+  │  • BLE adv   │               │  │ • Signal quality        │ │
+  │  • PPV calc  │               │  └──────────┬──────────────┘ │
+  └──────────────┘               │             │                 │
+                                 │  ┌──────────▼──────────────┐ │
+  ┌──────────────┐               │  │ AdaptiveAnomalyService  │ │
+  │  Field Data  │               │  │ • Autoencoder TFLite    │ │
+  │  Collector   │◄──────────────│  │ • Calibration          │ │
+  │  (Flask:8765)│  HTTP POST    │  └──────────┬──────────────┘ │
+  └──────┬───────┘               │             │                 │
+         │ CSV                   │  ┌──────────▼──────────────┐ │
+  ┌──────▼───────┐               │  │ PrecursorClassifier     │ │
+  │ File Watcher │               │  │ • 4-class TFLite        │ │
+  │ (Retrain     │               │  │ • soil_creep etc.       │ │
+  │  trigger)    │               │  └──────────┬──────────────┘ │
+  └──────┬───────┘               │             │ SafetyView UI   │
+         │ .retrain_trigger      └─────────────┼────────────────┘
+  ┌──────▼───────┐                             │
+  │  ML Trainer  │        Firestore            ▼
+  │ (run_pipeline│◄──────────────────   Cloud Sync
+  │  .py)        │
   └──────┬───────┘
-         │ CSV + Firestore
-         ▼
-  ┌──────────────┐
-  │  ML Training │
-  │  Pipeline    │
-  │  (Docker)    │
-  │              │
-  │  Watcher ────┼──► Trainer ──► .tflite ──► app/assets/ml/
-  │  (100 samples│    ├─ Autoencoder
-  │   threshold) │    └─ Precursor Classifier
-  └──────────────┘
+         │ .tflite + scaler
+  ┌──────▼───────────────────────────────────────┐
+  │              app/assets/ml/                  │
+  │  precursor_classifier.tflite (17 features)   │
+  │  autoencoder.tflite (11 features)            │
+  │  precursor_classifier_scaler.json            │
+  └──────────────────────────────────────────────┘
 ```
 
 **Data Flow:**
-1. Firmware → BLE → Flutter (real-time display + ML inference)
-2. Flutter → HTTP → Collector (field data logging)
-3. Watcher monitors CSV count → triggers trainer at 100 new samples
-4. Trainer outputs .tflite models → bundled into APK via Docker build
+1. **Firmware → BLE → Flutter** (real-time display + ML inference)
+   - M5StickC Plus 2 sends 22+ JSON fields at ~100 Hz over BLE
+   - 200 Hz raw acceleration logged in circular buffer
+2. **Flutter → HTTP → Collector** (field data logging)
+   - VibrationDspService runs FFT/DWT/kurtosis in isolate (non-blocking)
+   - AdaptiveAnomalyService runs autoencoder inference on 11-sample windows
+   - PrecursorClassifier runs 4-class inference on 17 features
+   - All samples posted to collector (Flask at 8765)
+3. **Collector → Watcher → Trainer** (continuous learning)
+   - CSV accumulates in `./data/field_samples.csv`
+   - Watcher monitors new samples; at 100+ threshold, triggers trainer
+   - Trainer runs 5-fold CV, exports .tflite + scaler.json
+4. **Trainer → APK → Field** (deployment)
+   - Models bundled into next APK build via Docker
+   - App loads models at startup; hot-swap via Firestore updates
 
 ---
 
 ## Field Deployment Checklist
 
-### Before Deployment
-- [ ] Charge M5StickC Plus 2 battery (>80%)
-- [ ] Flash latest firmware: `python -m platformio run -t upload`
-- [ ] Verify BLE JSON in serial monitor (fw, seq, ppv fields present)
-- [ ] Install Flutter APK on Android phone
-- [ ] Test BLE connection — device should appear as "AncientVision"
-- [ ] Verify app shows real-time PPV readings
-- [ ] Start data collector: `make collect`
-- [ ] Test data ingestion: `make simulate` → check `/stats` endpoint
+### Before Leaving for Site
+- [ ] Charge M5StickC Plus 2 battery (check LED: green = full)
+- [ ] Verify firmware version on device screen (should show v5.x.x)
+- [ ] Run `make validate-config` — confirm model files valid
+- [ ] Run `make health` — all services green
+- [ ] Start data collector: `make collect` (or Docker service)
+- [ ] Test BLE connection with Android phone (AncientVision app)
+- [ ] Run `make simulate` — confirm samples appear in collector
 
-### At the Site
-- [ ] Mount sensor on stable surface (avoid direct soil contact)
-- [ ] Note sensor orientation (Z-axis vertical preferred)
-- [ ] Run 5-minute baseline before beginning excavation
-- [ ] Monitor app for ANOMALY alerts during work
-- [ ] Record GPS coordinates for sensor placement
+### On Site Setup
+- [ ] Place device on stable, undisturbed soil (not on loose fill)
+- [ ] Allow 60-second calibration period before recording
+- [ ] Note GPS coordinates (app auto-captures if location enabled)
+- [ ] Set site name in app Settings for report labeling
+- [ ] Verify signal quality indicator shows "Good" or better
+
+### During Monitoring
+- [ ] Watch for ANOMALY level (amber) — investigate source
+- [ ] CRITICAL level (red) — evacuate non-essential personnel
+- [ ] Log any external vibration sources (machinery, footsteps)
+- [ ] Run `make calibration-check` daily to verify sensor health
 
 ### After Session
-- [ ] Export session data: `curl http://localhost:8765/export > session.csv`
-- [ ] Back up field data: `make backup`
-- [ ] If 100+ new samples: retrain → `make train`
-- [ ] Check training metrics: `cat app/assets/ml/precursor_training_metrics.json`
+- [ ] Export session CSV from app (Tools → Export)
+- [ ] Run `make backup` to archive field data
+- [ ] Run `make report` to generate session summary
+- [ ] Run `make drift` to check if retraining needed
+- [ ] Push data: `make sync BUCKET=your-firebase-bucket`
 
 ---
 
