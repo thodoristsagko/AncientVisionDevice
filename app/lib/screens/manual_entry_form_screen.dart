@@ -15,6 +15,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../services/local_storage_service.dart';
 import '../services/image_service.dart';
 import '../services/site_service.dart';
+import '../services/critical_event_log_service.dart';
 import '../models/reconstruction_result.dart';
 import '../config/env_config.dart';
 
@@ -61,6 +62,16 @@ class _ManualEntryFormScreenState extends State<ManualEntryFormScreen>
   Timer? _autoSaveTimer;
   Timer? _editDebounceTimer;
 
+  // Location field focus node — used for auto-suggest GPS on focus
+  final FocusNode _locationFocusNode = FocusNode();
+
+  // PPV at discovery — captured from last CriticalEvent when form is opened
+  double? _ppvAtDiscovery;
+  String _anomalyLevelAtDiscovery = 'Unknown';
+
+  // Whether an explicit "Save Draft" action is in progress
+  bool _isSavingDraft = false;
+
   // Random example hints
   late String _nameHint;
   late String _typeHint;
@@ -99,6 +110,19 @@ class _ManualEntryFormScreenState extends State<ManualEntryFormScreen>
 
     // Load draft if exists
     _loadDraft();
+
+    // Capture PPV / anomaly level at the moment the form is opened.
+    _capturePpvAtDiscovery();
+
+    // Auto-suggest GPS when the location section gains focus (lat field).
+    _locationFocusNode.addListener(() {
+      if (_locationFocusNode.hasFocus &&
+          _latController.text.isEmpty &&
+          _lngController.text.isEmpty &&
+          !_isGettingLocation) {
+        _getCurrentLocation();
+      }
+    });
 
     // Pre-fill site from active site (only if draft didn't set it)
     SiteService().getActiveSite().then((site) {
@@ -668,6 +692,70 @@ class _ManualEntryFormScreenState extends State<ManualEntryFormScreen>
     }
   }
 
+  /// Read the most recent PPV from the last CRITICAL event (if any) and
+  /// snapshot it as the vibration context at time of discovery entry.
+  Future<void> _capturePpvAtDiscovery() async {
+    try {
+      final events = CriticalEventLogService.instance.events;
+      if (events.isNotEmpty) {
+        final last = events.first; // newest first
+        final age = DateTime.now().difference(last.timestamp);
+        // Only use if the event is within the last 30 minutes (still relevant).
+        if (age.inMinutes <= 30) {
+          if (mounted) {
+            setState(() {
+              _ppvAtDiscovery = last.ppv;
+              // Derive a simple risk label from PPV.
+              if (last.ppv >= 2.0) {
+                _anomalyLevelAtDiscovery = 'CRITICAL';
+              } else if (last.ppv >= 0.5) {
+                _anomalyLevelAtDiscovery = 'ANOMALY';
+              } else if (last.ppv >= 0.1) {
+                _anomalyLevelAtDiscovery = 'UNUSUAL';
+              } else {
+                _anomalyLevelAtDiscovery = 'NORMAL';
+              }
+            });
+          }
+        }
+      }
+    } catch (_) {
+      // Non-critical — form works without PPV data.
+    }
+  }
+
+  /// Explicitly save the current form data as a draft (user-initiated).
+  Future<void> _saveDraftExplicitly() async {
+    if (_nameController.text.isEmpty && _typeController.text.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Enter at least a name or type before saving draft'),
+            backgroundColor: Colors.orange,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
+
+    setState(() => _isSavingDraft = true);
+    try {
+      await _autoSave();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Draft saved'),
+            backgroundColor: Color(0xFF2196F3),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSavingDraft = false);
+    }
+  }
+
   Future<void> _toggleVoice() async {
     if (_isListening) {
       await _stt.stop();
@@ -713,6 +801,7 @@ class _ManualEntryFormScreenState extends State<ManualEntryFormScreen>
   void dispose() {
     _autoSaveTimer?.cancel();
     _editDebounceTimer?.cancel();
+    _locationFocusNode.dispose();
     _nameController.dispose();
     _typeController.dispose();
     _siteController.dispose();
@@ -1072,6 +1161,7 @@ class _ManualEntryFormScreenState extends State<ManualEntryFormScreen>
                                       ),
                                       child: TextField(
                                         controller: _latController,
+                                        focusNode: _locationFocusNode,
                                         style: const TextStyle(
                                           color: Colors.white,
                                           fontSize: 14,
@@ -1370,7 +1460,49 @@ class _ManualEntryFormScreenState extends State<ManualEntryFormScreen>
                     side: const BorderSide(color: Colors.white38),
                     contentPadding: EdgeInsets.zero,
                   ),
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 16),
+
+                  // PPV AT DISCOVERY — read-only vibration context card
+                  _buildPpvDiscoveryCard(),
+
+                  const SizedBox(height: 16),
+
+                  // SAVE DRAFT BUTTON
+                  SizedBox(
+                    width: double.infinity,
+                    child: GestureDetector(
+                      onTap: _isSavingDraft ? null : _saveDraftExplicitly,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withAlpha(20),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: Colors.white.withAlpha(77),
+                            width: 1,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            _isSavingDraft
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54),
+                                  )
+                                : const Icon(Icons.save_alt_rounded, color: Colors.white70, size: 18),
+                            const SizedBox(width: 8),
+                            Text(
+                              _isSavingDraft ? 'Saving...' : 'Save Draft',
+                              style: const TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.w600),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
 
                   // SUBMIT BUTTON
                   SizedBox(
@@ -1423,6 +1555,73 @@ class _ManualEntryFormScreenState extends State<ManualEntryFormScreen>
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  /// Read-only card showing vibration context at time of entry.
+  Widget _buildPpvDiscoveryCard() {
+    Color levelColor;
+    switch (_anomalyLevelAtDiscovery) {
+      case 'CRITICAL':
+        levelColor = const Color(0xFFE53935);
+        break;
+      case 'ANOMALY':
+        levelColor = const Color(0xFFFF7043);
+        break;
+      case 'UNUSUAL':
+        levelColor = const Color(0xFFFFC107);
+        break;
+      default:
+        levelColor = const Color(0xFF4CAF50);
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: levelColor.withAlpha(15),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: levelColor.withAlpha(80), width: 1),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.sensors, color: levelColor, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Vibration at Discovery',
+                  style: TextStyle(color: Colors.white54, fontSize: 12),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _ppvAtDiscovery != null
+                      ? 'PPV ${_ppvAtDiscovery!.toStringAsFixed(3)} mm/s'
+                      : 'No recent vibration data',
+                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: levelColor.withAlpha(40),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: levelColor, width: 1),
+            ),
+            child: Text(
+              _anomalyLevelAtDiscovery,
+              style: TextStyle(
+                color: levelColor,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
