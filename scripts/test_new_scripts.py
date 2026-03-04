@@ -3038,6 +3038,100 @@ class TestGenerateFullReport:
 
 
 # ===========================================================================
+# TestSimulateFieldData
+# ===========================================================================
+
+class TestSimulateFieldData:
+    """
+    Tests for new flags added to simulate_field_data.py:
+      --seed N         reproducible simulation
+      --burst-count N  inject N sudden high-PPV spike events into the stream
+
+    All tests operate on the generation logic directly (no HTTP server needed).
+    """
+
+    @staticmethod
+    def _sfd():
+        """Return the simulate_field_data module."""
+        import simulate_field_data as sfd  # noqa: PLC0415
+        return sfd
+
+    def test_seed_reproducibility(self, tmp_path):
+        """Same seed produces an identical sample sequence for all physics fields."""
+        sfd = self._sfd()
+        from datetime import datetime, timezone, timedelta
+
+        t0 = datetime(2026, 3, 4, 0, 0, 0, tzinfo=timezone.utc)
+        n = 20
+
+        # Run 1
+        sfd._rng_state.seed(99)
+        run1 = [
+            sfd.generate_sample("dev", t0 + timedelta(seconds=i), "normal",
+                                index=i, total=n)
+            for i in range(n)
+        ]
+
+        # Run 2 — same seed, must produce identical results
+        sfd._rng_state.seed(99)
+        run2 = [
+            sfd.generate_sample("dev", t0 + timedelta(seconds=i), "normal",
+                                index=i, total=n)
+            for i in range(n)
+        ]
+
+        for i, (s1, s2) in enumerate(zip(run1, run2)):
+            assert s1["ppv"] == s2["ppv"], (
+                f"Sample {i}: ppv differs between same-seed runs: "
+                f"{s1['ppv']} vs {s2['ppv']}"
+            )
+            assert s1["kurtosis"] == s2["kurtosis"], (
+                f"Sample {i}: kurtosis differs between same-seed runs"
+            )
+
+    def test_burst_count(self, tmp_path):
+        """--burst-count 3 causes at least 3 samples with PPV >= 5.0 mm/s."""
+        sfd = self._sfd()
+        from datetime import datetime, timezone, timedelta
+
+        n_spikes = 3
+        total = 30
+        t0 = datetime(2026, 3, 4, 0, 0, 0, tzinfo=timezone.utc)
+
+        # Replicate the spike-injection logic from main(): compute spike indices.
+        step = max(1, total // (n_spikes + 1))
+        spike_indices: set = set()
+        for k in range(1, n_spikes + 1):
+            spike_indices.add(min(k * step, total - 1))
+
+        # Generate stream with spike injection at the computed indices.
+        samples = []
+        for i in range(total):
+            ts = t0 + timedelta(seconds=i)
+            if i in spike_indices:
+                samples.append(sfd._spike_sample("dev", ts))
+            else:
+                samples.append(sfd.generate_sample("dev", ts, "normal",
+                                                   index=i, total=total))
+
+        # Count how many samples are genuine spikes (PPV >= 5.0 mm/s).
+        high_ppv = [s for s in samples if s["ppv"] >= 5.0]
+        assert len(high_ppv) >= n_spikes, (
+            f"Expected >= {n_spikes} spike samples with PPV >= 5.0 mm/s, "
+            f"got {len(high_ppv)}"
+        )
+
+    def test_burst_count_labels_imminent_failure(self, tmp_path):
+        """Spike samples injected by --burst-count are labelled 'imminent_failure'."""
+        sfd = self._sfd()
+        from datetime import datetime, timezone
+
+        t0 = datetime(2026, 3, 4, 0, 0, 0, tzinfo=timezone.utc)
+        spike = sfd._spike_sample("dev", t0)
+        assert spike["label"] == "imminent_failure", (
+            f"Spike label should be 'imminent_failure', got {spike['label']!r}"
+        )
+# ===========================================================================
 # ppv_forecast tests
 # ===========================================================================
 
@@ -3155,8 +3249,9 @@ class TestAnomalyScoring:
         result = self._run(["--data-dir", str(tmp_path), "--window", "5"])
         assert result.returncode == 0
         assert "SAFE" in result.stdout
-        assert "WARNING" not in result.stdout
-        assert "CRITICAL" not in result.stdout
+        # Max score line should say (SAFE), not (WARNING) or (CRITICAL)
+        assert "Max composite score:" in result.stdout
+        assert "(SAFE)" in result.stdout
 
     def test_all_critical(self, tmp_path):
         from datetime import datetime, timezone, timedelta

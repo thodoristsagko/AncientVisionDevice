@@ -11,6 +11,8 @@ Usage
     python scripts/simulate_field_data.py --host 192.168.1.10 --port 8765 --mode imminent_failure
     python scripts/simulate_field_data.py --count 50 --delay 0.5 --n-devices 3
     python scripts/simulate_field_data.py --scenario scenario.json --burst 20
+    python scripts/simulate_field_data.py --seed 42 --count 100           # reproducible run
+    python scripts/simulate_field_data.py --burst-count 5 --count 100     # inject 5 spikes
 """
 import argparse
 import json
@@ -22,6 +24,9 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# Expose the module-level RNG so callers (and tests) can seed it.
+_rng_state = random.Random()
 
 # ---------------------------------------------------------------------------
 # Sample generation
@@ -40,7 +45,7 @@ _MIXED_WEIGHTS = [
 
 def _rng(lo: float, hi: float) -> float:
     """Uniform float in [lo, hi]."""
-    return lo + random.random() * (hi - lo)
+    return lo + _rng_state.random() * (hi - lo)
 
 
 def generate_sample(
@@ -62,7 +67,7 @@ def generate_sample(
     total     : int       — total number of samples in the sequence
     """
     if mode == "mixed":
-        r = random.random()
+        r = _rng_state.random()
         label = next(lbl for lbl, thresh in _MIXED_WEIGHTS if r < thresh)
     else:
         label = mode
@@ -169,6 +174,28 @@ def _imminent_failure_sample(device_id: str, timestamp: datetime) -> dict:
     return s
 
 
+def _spike_sample(device_id: str, timestamp: datetime) -> dict:
+    """
+    Single sudden high-PPV spike event (PPV >= 5.0 mm/s).
+
+    Used by --burst-count to inject abrupt transients that should always be
+    detected as imminent_failure regardless of the base stream mode.
+    """
+    s = _base_sample(device_id, timestamp, "imminent_failure")
+    s.update({
+        "rms":      _rng(0.1,   0.5),
+        "ppv":      _rng(5.0,   15.0),   # guaranteed spike: PPV >= 5 mm/s
+        "freq":     _rng(1.0,   10.0),
+        "crest":    _rng(15.0,  30.0),
+        "centroid": _rng(2.0,   10.0),
+        "kurtosis": _rng(20.0,  40.0),
+        "stalta":   _rng(12.0,  25.0),
+        "arias":    _rng(0.05,  1.0),
+        "cav":      _rng(0.1,   2.0),
+    })
+    return s
+
+
 # ---------------------------------------------------------------------------
 # HTTP sender
 # ---------------------------------------------------------------------------
@@ -241,6 +268,19 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         help="YAML/JSON file with scenario events (overrides --mode and --count)",
     )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducible simulation (default: unseeded)",
+    )
+    p.add_argument(
+        "--burst-count",
+        type=int,
+        default=0,
+        dest="burst_count",
+        help="Number of sudden high-PPV spike events to inject into the stream (default: 0)",
+    )
     return p
 
 
@@ -307,11 +347,16 @@ def _print_progress_bar(current: int, total: int, sent: int, failed: int) -> Non
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
 
+    # Apply random seed for reproducibility if requested.
+    if args.seed is not None:
+        _rng_state.seed(args.seed)
+
     host = args.host
     port = args.port
     delay = args.delay
     n_devices = args.n_devices
     burst = args.burst
+    n_burst_count = args.burst_count  # number of spike events to inject
     scenario_file = args.scenario
 
     # Parse scenario if provided
@@ -324,6 +369,15 @@ def main(argv=None) -> int:
         mode = args.mode
         events = [(mode, count)]
         total_samples = count
+
+    # Pre-compute spike injection indices: spread n_burst_count spikes evenly
+    # across the total sample range so they are distributed throughout the
+    # stream rather than all clumped at the end.
+    spike_indices: set[int] = set()
+    if n_burst_count > 0 and total_samples > 0:
+        step = max(1, total_samples // (n_burst_count + 1))
+        for k in range(1, n_burst_count + 1):
+            spike_indices.add(min(k * step, total_samples - 1))
 
     # Start timestamp: now, UTC, second-precision
     t0 = datetime.now(timezone.utc).replace(microsecond=0)
@@ -339,7 +393,7 @@ def main(argv=None) -> int:
     else:
         device_ids = [args.device_id]
 
-    burst_count = 0
+    burst_send_count = 0  # counter for --burst (rate-limiting), separate from --burst-count
 
     for mode, duration in events:
         for i in range(duration):
@@ -348,7 +402,13 @@ def main(argv=None) -> int:
             device_id = device_ids[dev_idx]
 
             ts = t0 + timedelta(seconds=sample_index)
-            sample = generate_sample(device_id, ts, mode, index=i, total=duration)
+
+            # Inject a spike at pre-computed positions (--burst-count).
+            if sample_index in spike_indices:
+                sample = _spike_sample(device_id, ts)
+            else:
+                sample = generate_sample(device_id, ts, mode, index=i, total=duration)
+
             ok = send_sample(host, port, sample)
             if ok:
                 sent += 1
@@ -356,15 +416,15 @@ def main(argv=None) -> int:
                 failed += 1
 
             sample_index += 1
-            burst_count += 1
+            burst_send_count += 1
 
             # Update progress bar
             _print_progress_bar(sample_index, total_samples, sent, failed)
 
             # Burst mode: send N samples fast, then delay
-            if burst > 0 and burst_count >= burst:
+            if burst > 0 and burst_send_count >= burst:
                 time.sleep(delay)
-                burst_count = 0
+                burst_send_count = 0
             elif delay > 0:
                 # Normal delay between samples
                 time.sleep(delay)
@@ -380,6 +440,8 @@ def main(argv=None) -> int:
     print(f"  Total samples:   {total_samples}")
     if n_devices > 1:
         print(f"  Devices:         {n_devices}")
+    if n_burst_count > 0:
+        print(f"  Spike events:    {n_burst_count}")
     print(f"  Wall time:       {wall_time_elapsed:.1f}s")
     print(f"  Avg rate:        {total_samples / wall_time_elapsed:.1f} samples/sec")
     if scenario_file:
