@@ -698,10 +698,21 @@ class CmdCharCallbacks: public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     String value = pCharacteristic->getValue().c_str();
     DBG_PRINTF("BLE CMD received: %s\n", value.c_str());
-    if (value == "CALIBRATE") {
+    // P79: CALIBRATE / CALIBRATE_START — trigger accelerometer bias calibration
+    // Normalise to uppercase for case-insensitive matching
+    String valueUpper = value;
+    valueUpper.toUpperCase();
+    if (valueUpper == "CALIBRATE" || valueUpper == "CALIBRATE_START") {
+      Serial.println("[CMD] CALIBRATE received — running bias calibration");
       g_calibrating = true;
       g_calibStartMs = millis();
-      Serial.println("BLE CMD: CALIBRATE started (30s)");
+      calibrateAccelBias();
+      // Notify the alert-status characteristic so the phone knows calibration completed
+      if (pAlertStatusChar) {
+        pAlertStatusChar->setValue((uint8_t*)"CALIBRATED", 10);
+        pAlertStatusChar->notify();
+      }
+      Serial.println("[CMD] CALIBRATE complete — notified phone");
     } else if (value == "ACCEL_CAL") {
       // P231: Zero-g accelerometer bias calibration — device must be flat and still
       Serial.println("BLE CMD: ACCEL_CAL — lay device flat, starting...");
@@ -1500,13 +1511,13 @@ void processVibrationWindow() {
     setAccelRange(16);   // Switch to ±16g to avoid clipping
     g_highGainMode = true;
     DBG_PRINTLN("AGC: switched to ±16g range");
-    Serial.println("AGC: high range enabled");
+    Serial.printf("[GAIN] Switching to ±16g (PPV=%.2f mm/s)\n", vibrationPPV);
     saveNvsSettings();   // P180: persist gain mode change
   } else if (vibrationPPV < 0.5f && g_highGainMode) {
     setAccelRange(4);    // Restore ±4g for better resolution
     g_highGainMode = false;
     DBG_PRINTLN("AGC: switched to ±4g range");
-    Serial.println("AGC: normal range restored");
+    Serial.printf("[GAIN] Returning to ±4g (PPV=%.2f mm/s)\n", vibrationPPV);
     saveNvsSettings();   // P180: persist gain mode change
   }
 
