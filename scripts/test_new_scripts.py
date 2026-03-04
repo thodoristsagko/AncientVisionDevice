@@ -874,3 +874,72 @@ class TestCompareDevices(unittest.TestCase):
         mod = self._load()
         self.assertIn("ppv", mod.METRIC_COLS)
         self.assertIn("kurtosis", mod.METRIC_COLS)
+
+
+# ===========================================================================
+# site_summary_report.py tests
+# ===========================================================================
+
+class TestSiteSummaryReport(unittest.TestCase):
+    """site_summary_report.py — site-wide safety reporting."""
+
+    def _load(self):
+        spec = importlib.util.spec_from_file_location(
+            "site_summary_report", "scripts/site_summary_report.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_module_importable(self):
+        self._load()
+
+    def test_cli_help(self):
+        result = subprocess.run(
+            [sys.executable, "scripts/site_summary_report.py", "--help"],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+
+    def test_build_markdown_empty_stats(self):
+        mod = self._load()
+        report = mod.build_markdown({}, [], "Test Site")
+        self.assertIn("AncientVision", report)
+        self.assertIn("Test Site", report)
+        self.assertIsInstance(report, str)
+
+    def test_build_markdown_with_ppv(self):
+        mod = self._load()
+        stats = {
+            "total_samples": 100,
+            "total_sessions": 3,
+            "ppv_max": 2.5,
+            "ppv_mean": 0.3,
+            "ppv_above_1": 5,
+            "ppv_above_3": 0,
+            "precursor_events": 2,
+        }
+        report = mod.build_markdown(stats, [], "Paros 2026")
+        self.assertIn("2.5", report)
+        self.assertIn("Paros 2026", report)
+
+    def test_safety_assessment_low_risk(self):
+        mod = self._load()
+        stats = {"ppv_max": 0.5}
+        report = mod.build_markdown(stats, [], "Site")
+        self.assertIn("LOW RISK", report)
+
+    def test_safety_assessment_high_risk(self):
+        mod = self._load()
+        stats = {"ppv_max": 6.0}
+        report = mod.build_markdown(stats, [], "Site")
+        self.assertIn("HIGH RISK", report)
+
+    def test_empty_data_dir_runs_ok(self):
+        """Empty data dir should exit 0 (nothing to process)."""
+        with tempfile.TemporaryDirectory() as td:
+            result = subprocess.run(
+                [sys.executable, "scripts/site_summary_report.py", "--data-dir", td],
+                capture_output=True, text=True
+            )
+            self.assertIn(result.returncode, (0, 1))

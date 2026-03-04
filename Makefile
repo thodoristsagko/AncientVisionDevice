@@ -9,7 +9,7 @@
         validate-data e2e status health augment online-learn tune onnx \
         live-dashboard ab-test augmentation-report \
         serve-model session-report calibration-check confidence-analysis monitor-model \
-        freq-analysis compare-devices
+        freq-analysis compare-devices site-summary
 
 # ---------------------------------------------------------------------------
 # Help
@@ -75,6 +75,7 @@ help:
 	@echo ""
 	@echo "  freq-analysis         Analyze seismic frequency bands in field data"
 	@echo "  compare-devices       Compare vibration patterns across multiple devices"
+	@echo "  site-summary          Generate comprehensive site safety summary report"
 	@echo ""
 
 
@@ -431,4 +432,11 @@ freq-analysis:
 compare-devices:
 	@echo "==> Comparing vibration patterns across devices..."
 	python scripts/compare_devices.py --data-dir ./data/field \
+		$(if $(OUTPUT),--output "$(OUTPUT)",)
+
+site-summary:
+	@echo "==> Generating site safety summary report..."
+	python scripts/site_summary_report.py \
+		--data-dir ./data/field \
+		$(if $(SITE_NAME),--site-name "$(SITE_NAME)",) \
 		$(if $(OUTPUT),--output "$(OUTPUT)",)
