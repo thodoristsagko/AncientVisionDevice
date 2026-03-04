@@ -64,11 +64,14 @@
 #define OTA_ENABLED 0
 
 // P179: WiFi direct push to data collector
-#define WIFI_ENABLED       0           // Set to 1 to enable WiFi push
-#define WIFI_SSID          "ancientvision_ap"
-#define WIFI_PASSWORD      "field_deploy_pw"
-#define COLLECTOR_URL      "http://192.168.1.100:8765/collect"
-#define WIFI_PUSH_INTERVAL 30000       // Push every 30s
+#define WIFI_ENABLED            0           // Set to 1 to enable WiFi push
+#define WIFI_SSID               "ancientvision_ap"
+#define WIFI_PASSWORD           "field_deploy_pw"
+#define WIFI_COLLECTOR_URL      "http://192.168.1.100:8765"
+#define COLLECTOR_URL           WIFI_COLLECTOR_URL "/ingest"
+#define WIFI_PUSH_INTERVAL      30000       // Push every 30s
+#define WIFI_CONNECT_TIMEOUT_MS 5000        // WiFi association timeout
+#define WIFI_HTTP_TIMEOUT_MS    5000        // HTTP request timeout
 
 // Sampling Configuration
 const int SAMPLE_RATE = 200;             // 200 Hz IMU sampling
@@ -312,6 +315,13 @@ float g_lastBleNotifyPpv = -1.0f;      // PPV at time of last BLE notification (
 // ===================== P179: WIFI PUSH TIMING =====================
 unsigned long g_lastWifiPushMs = 0;    // millis() of last WiFi push attempt
 
+// ===================== LOOP TIMING WATCHDOG =====================
+static unsigned long g_loopStartMs    = 0;   // millis() at start of current loop() iteration
+static unsigned long g_loopMaxMs      = 0;   // Maximum loop() iteration duration observed
+static unsigned long g_loopDiagLastMs = 0;   // millis() of last 60s diagnostic print
+static const unsigned long LOOP_WARN_MS = 2000UL;  // Warn if loop() takes >2s
+static const unsigned long LOOP_DIAG_INTERVAL = 60000UL; // Print max loop time every 60s
+
 // ===================== P148: DEBUG MODE =====================
 bool g_debugMode = false;              // Toggled via BLE CMD "DEBUG ON" / "DEBUG OFF"
 
@@ -551,35 +561,88 @@ void saveNvsSettings() {
 void wifiPushData() {
   // Attempt WiFi connection if not already connected
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi: connecting...");
+    Serial.printf("WiFi: connecting to %s ...\n", WIFI_SSID);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     unsigned long wifiStart = millis();
-    while (WiFi.status() != WL_CONNECTED && (millis() - wifiStart < 5000UL)) {
+    while (WiFi.status() != WL_CONNECTED &&
+           (millis() - wifiStart < (unsigned long)WIFI_CONNECT_TIMEOUT_MS)) {
       delay(100);
+      esp_task_wdt_reset();
     }
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("WiFi: connection timeout — skipping push");
       return;
     }
-    Serial.printf("WiFi: connected, IP=%s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("WiFi: connected, IP=%s RSSI=%ddBm\n",
+      WiFi.localIP().toString().c_str(), WiFi.RSSI());
   }
 
-  // Build JSON payload from current sensor readings
-  char jsonBody[256];
-  snprintf(jsonBody, sizeof(jsonBody),
-    "{\"ppv\":%.2f,\"rms\":%.4f,\"stalta\":%.2f,\"kurtosis\":0,\"fw\":\"%s\",\"seq\":%lu}",
-    vibrationPPV, vibrationRMS, staLtaRatio, FW_VERSION, (unsigned long)g_seq);
+  // Build full JSON payload matching the BLE IMU characteristic JSON.
+  // All fields from sendBLEData() imuData plus alert_level for server-side triage.
+  uint32_t evtMs     = g_evtActive ? (uint32_t)(millis() - g_evtStartMs) : 0u;
+  uint32_t uptimeSec = millis() / 1000u;
+  uint32_t tsNow     = (uint32_t)getCurrentEpoch();
+  const char* alertLevel = (currentAlert == CRITICAL) ? "critical" :
+                           (currentAlert == WARNING)  ? "warning"  : "safe";
 
-  // POST with 3s timeout guard
+  char jsonBody[512];
+  int jsonLen = snprintf(jsonBody, sizeof(jsonBody),
+    "{"
+    "\"ppv\":%.3f,"
+    "\"rms\":%.4f,"
+    "\"peak\":%.4f,"
+    "\"crest\":%.2f,"
+    "\"stalta\":%.3f,"
+    "\"freq\":0,"
+    "\"fw\":\"" FW_VERSION "\","
+    "\"seq\":%lu,"
+    "\"evtMs\":%lu,"
+    "\"boots\":%lu,"
+    "\"evts\":%lu,"
+    "\"gain\":%d,"
+    "\"cal\":%d,"
+    "\"tmp\":%.1f,"
+    "\"up\":%lu,"
+    "\"dbg\":%d,"
+    "\"led\":%d,"
+    "\"ts\":%lu,"
+    "\"alert_level\":\"%s\","
+    "\"moisture\":%d,"
+    "\"bat_pct\":%d,"
+    "\"bat_v\":%.2f,"
+    "\"chg\":%d"
+    "}",
+    vibrationPPV, vibrationRMS, vibrationPeak, crestFactor, staLtaRatio,
+    (unsigned long)g_seq, (unsigned long)evtMs,
+    (unsigned long)g_bootCount, (unsigned long)g_sessionEvts,
+    g_highGainMode ? 16 : 4,
+    g_calibrating ? 1 : 0,
+    imuTemp, (unsigned long)uptimeSec,
+    g_debugMode ? 1 : 0,
+    g_ledState  ? 1 : 0,
+    (unsigned long)tsNow,
+    alertLevel,
+    moisturePercent,
+    batteryPercent,
+    batteryVoltage,
+    batteryCharging ? 1 : 0);
+
+  if (jsonLen >= (int)sizeof(jsonBody)) {
+    Serial.println("WiFi push: JSON truncated — skipping");
+    return;
+  }
+
+  // POST with configurable timeout; errors are non-fatal
   HTTPClient http;
   http.begin(COLLECTOR_URL);
   http.addHeader("Content-Type", "application/json");
-  http.setTimeout(3000);  // 3s max — non-blocking if server unreachable
+  http.addHeader("X-Device-ID", g_deviceName);
+  http.setTimeout(WIFI_HTTP_TIMEOUT_MS);
   int httpCode = http.POST(jsonBody);
   if (httpCode > 0) {
-    Serial.printf("WiFi push: HTTP %d\n", httpCode);
+    Serial.printf("WiFi push: HTTP %d (%d bytes sent)\n", httpCode, jsonLen);
   } else {
-    Serial.printf("WiFi push: error %s\n", http.errorToString(httpCode).c_str());
+    Serial.printf("WiFi push: error [%s]\n", http.errorToString(httpCode).c_str());
   }
   http.end();
 }
@@ -945,12 +1008,63 @@ void setup() {
   // P82: record time when device enters ready/safe state
   g_safeSinceMs = millis();
 
-  // P81: Serial diagnostic banner for field operators
-  Serial.println("=== AncientVision v" FW_VERSION " ===");
-  Serial.printf("Boot count: %lu\n", (unsigned long)g_bootCount);
-  Serial.printf("BLE name: %s\n", g_deviceName);
-  Serial.println("IMU: OK");
-  Serial.println("Ready.");
+  // P81: Serial diagnostic banner for field operators (improved)
+  {
+    // Boot reason string
+    const char* bootReasonStr = "unknown";
+    switch (esp_reset_reason()) {
+      case ESP_RST_POWERON:  bootReasonStr = "Power-on";         break;
+      case ESP_RST_SW:       bootReasonStr = "Software reset";   break;
+      case ESP_RST_PANIC:    bootReasonStr = "Panic/crash";      break;
+      case ESP_RST_INT_WDT:  bootReasonStr = "Interrupt WDT";   break;
+      case ESP_RST_TASK_WDT: bootReasonStr = "Task WDT";        break;
+      case ESP_RST_WDT:      bootReasonStr = "Other WDT";       break;
+      case ESP_RST_DEEPSLEEP:bootReasonStr = "Deep sleep wake";  break;
+      case ESP_RST_BROWNOUT: bootReasonStr = "Brownout";         break;
+      default: break;
+    }
+
+    // PSRAM detection (ESP.getPsramSize() returns 0 if no PSRAM)
+    uint32_t psramSize = ESP.getPsramSize();
+    const char* psramStr = (psramSize > 0) ? "yes" : "none";
+
+    // Self-test result string (reuse bleOk / imuOk — not in scope here; use BLE pointer check)
+    bool selfTestPass = (pServer != NULL && pIMUChar != NULL);
+
+    Serial.println("========================================");
+    Serial.println("=== AncientVision Firmware v" FW_VERSION " ===");
+    Serial.println("Build: 2026-03-04");
+    Serial.printf("Chip: ESP32 @ %lu MHz\n", (unsigned long)(ESP.getCpuFreqMHz()));
+    Serial.printf("Flash: %luKB | Free heap: %luB | PSRAM: %s\n",
+      (unsigned long)(ESP.getFlashChipSize() / 1024),
+      (unsigned long)esp_get_free_heap_size(),
+      psramStr);
+    Serial.printf("Boot reason: %s\n", bootReasonStr);
+    Serial.printf("Reboot count: %lu\n", (unsigned long)g_bootCount);
+    Serial.printf("Accel bias: X=%.4fg Y=%.4fg Z=%.4fg\n",
+      g_accelBiasX, g_accelBiasY, g_accelBiasZ);
+    Serial.printf("NVS noise floor: %.4f mm/s\n", ppvNoiseFloor);
+#if WIFI_ENABLED
+    Serial.printf("WiFi: ENABLED (SSID: %s)\n", WIFI_SSID);
+#else
+    Serial.println("WiFi: DISABLED");
+#endif
+#if DEEP_SLEEP_ENABLED
+    Serial.printf("Deep sleep: ENABLED (%dmin timeout, %ds duration)\n",
+      DEEP_SLEEP_SAFE_MINUTES, DEEP_SLEEP_DURATION_S);
+#else
+    Serial.println("Deep sleep: DISABLED");
+#endif
+#if SD_LOGGING_ENABLED
+    Serial.println("SPIFFS: ENABLED");
+#else
+    Serial.println("SPIFFS: DISABLED");
+#endif
+    Serial.printf("Self-test: %s\n", selfTestPass ? "PASS" : "FAIL");
+    Serial.printf("BLE name: %s\n", g_deviceName);
+    Serial.println("========================================");
+    Serial.println("Ready.");
+  }
 
   lastSampleTime = micros();
 }
@@ -1049,6 +1163,28 @@ void loop() {
 
   unsigned long currentMicros = micros();
   unsigned long currentMillis = millis();
+
+  // ---- LOOP TIMING WATCHDOG: record iteration start ----
+  // Check previous iteration duration (g_loopStartMs > 0 after first loop)
+  if (g_loopStartMs > 0) {
+    unsigned long loopDurationMs = currentMillis - g_loopStartMs;
+    if (loopDurationMs > g_loopMaxMs) {
+      g_loopMaxMs = loopDurationMs;
+    }
+    if (loopDurationMs >= LOOP_WARN_MS) {
+      Serial.printf("WARN: loop() took %lums — possible blocking call\n",
+        (unsigned long)loopDurationMs);
+    }
+  }
+  g_loopStartMs = currentMillis;
+
+  // ---- LOOP TIMING DIAGNOSTIC: print max every 60s ----
+  if (currentMillis - g_loopDiagLastMs >= LOOP_DIAG_INTERVAL) {
+    g_loopDiagLastMs = currentMillis;
+    Serial.printf("DIAG: loop max=%lums heap=%luB\n",
+      (unsigned long)g_loopMaxMs, (unsigned long)esp_get_free_heap_size());
+    g_loopMaxMs = 0;  // Reset after reporting
+  }
 
   // ---- HIGH-FREQUENCY: Sample IMU at 200 Hz ----
   if (currentMicros - lastSampleTime >= SAMPLE_INTERVAL_US) {
