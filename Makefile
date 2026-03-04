@@ -6,7 +6,8 @@
 .PHONY: help build firmware flutter ml collect train monitor dev-ml dev-flutter dev-firmware \
         test simulate backup logs clean report drift validate-config quality-check \
         label replay schedule playback sync annotate analyze apk quantize benchmark load-test \
-        validate-data e2e status health augment online-learn tune onnx
+        validate-data e2e status health augment online-learn tune onnx \
+        live-dashboard ab-test augmentation-report
 
 # ---------------------------------------------------------------------------
 # Help
@@ -59,6 +60,10 @@ help:
 	@echo "  online-learn   Fine-tune models with recent field data"
 	@echo "  tune           Auto-tune classification thresholds from calibration data"
 	@echo "  onnx           Export TFLite models to ONNX format"
+	@echo ""
+	@echo "  live-dashboard        Live curses terminal dashboard (polls collector API)"
+	@echo "  ab-test               A/B compare two .tflite models (set MODEL_A= MODEL_B=)"
+	@echo "  augmentation-report   Class distribution + augmentation recommendations"
 	@echo ""
 
 # ---------------------------------------------------------------------------
@@ -321,3 +326,34 @@ validate-data:
 e2e:
 	@echo "==> Running end-to-end pipeline tests..."
 	python -m pytest scripts/test_e2e_pipeline.py -v
+
+# ---------------------------------------------------------------------------
+# Live dashboard / A-B test / augmentation report
+# ---------------------------------------------------------------------------
+
+live-dashboard:
+	@echo "==> Starting live terminal dashboard (Ctrl+C or q to quit)..."
+	python scripts/live_dashboard.py --url http://localhost:8765
+
+ab-test:
+	@if [ -z "$(MODEL_A)" ] || [ -z "$(MODEL_B)" ]; then \
+		echo ""; \
+		echo "Usage:  make ab-test MODEL_A=path/to/a.tflite MODEL_B=path/to/b.tflite"; \
+		echo ""; \
+		echo "Example:"; \
+		echo "  make ab-test \\"; \
+		echo "    MODEL_A=app/assets/ml/precursor_classifier.tflite \\"; \
+		echo "    MODEL_B=app/assets/ml/precursor_classifier_v2.tflite"; \
+		echo ""; \
+		exit 1; \
+	fi
+	@echo "==> Running A/B model comparison..."
+	python scripts/ab_test_models.py \
+		--model-a "$(MODEL_A)" \
+		--model-b "$(MODEL_B)" \
+		$(if $(SCALER),--scaler "$(SCALER)",) \
+		$(if $(N_SAMPLES),--n-samples "$(N_SAMPLES)",)
+
+augmentation-report:
+	@echo "==> Generating data augmentation report..."
+	python scripts/data_augmentation_report.py --data-dir ./data/field
