@@ -178,6 +178,9 @@ uint32_t g_sessionEvts = 0;    // STA/LTA event count for this session (resets o
 uint32_t g_evtStartMs = 0;     // millis() when current STA/LTA event began; 0 if no event active
 bool g_evtActive = false;      // True while an STA/LTA event is ongoing
 
+// ===================== ALERT DURATION TRACKING =====================
+static uint32_t g_alertStartMs = 0;  // millis() when current alert level started (supports P59 escalation)
+
 // ===================== DISPLAY TREND =====================
 float g_lastPpv = 0.0f;        // Previous PPV reading for trend arrow calculation
 
@@ -645,6 +648,7 @@ void wifiPushData() {
     Serial.printf("WiFi push: error [%s]\n", http.errorToString(httpCode).c_str());
   }
   http.end();
+  esp_task_wdt_reset();  // Prevent watchdog timeout after long HTTP operation
 }
 #endif
 
@@ -1018,6 +1022,8 @@ void setup() {
 
   // P82: record time when device enters ready/safe state
   g_safeSinceMs = millis();
+  // Alert duration tracker: starts at boot so alert_ms is always valid on first BLE send
+  g_alertStartMs = millis();
 
   // P81: Serial diagnostic banner for field operators (improved)
   {
@@ -1580,6 +1586,7 @@ void classifyHazard() {
       hazardType = newType;
       alertPersistence = 0;
       alertCooldown = 0;
+      g_alertStartMs = millis();  // Record when this alert level began (for alert_ms BLE field)
 
       // P74 + P76: track event start and count
       if (!g_evtActive) {
@@ -1610,6 +1617,7 @@ void classifyHazard() {
       hazardType = newType;
       alertCooldown = 0;
       alertPersistence = 0;
+      g_alertStartMs = millis();  // Record when this alert level began (for alert_ms BLE field)
 
       // P74: close the event timer when returning to SAFE
       if (newAlert == SAFE) {
@@ -1685,10 +1693,11 @@ void readBattery() {
 
 // ===================== DISPLAY (P208: Compact 4-line layout) =====================
 void updateDisplay() {
+  // Background color reflects alert severity for at-a-glance field visibility
   uint16_t bgColor;
   switch (currentAlert) {
-    case CRITICAL: bgColor = RED; break;
-    case WARNING:  bgColor = ORANGE; break;
+    case CRITICAL: bgColor = RED;          break;
+    case WARNING:  bgColor = ORANGE;       break;
     default:       bgColor = TFT_DARKGREEN; break;
   }
 
@@ -1697,9 +1706,10 @@ void updateDisplay() {
   M5.Lcd.setTextSize(1);
 
   // P208: Compute trend arrow from previous PPV reading
-  // Uses Unicode-safe ASCII arrows: up='^' down='v' flat='>'
-  char trendChar = (vibrationPPV > g_lastPpv * 1.05f) ? '^' :
-                   (vibrationPPV < g_lastPpv * 0.95f) ? 'v' : '>';
+  // Uses 10% change threshold to distinguish rising/falling from stable.
+  // ASCII arrows: '^' rising, 'v' falling, '>' stable
+  char trendChar = (vibrationPPV > g_lastPpv * 1.10f) ? '^' :
+                   (vibrationPPV < g_lastPpv * 0.90f) ? 'v' : '>';
   g_lastPpv = vibrationPPV;
 
   // Determine safety label string
@@ -1712,16 +1722,18 @@ void updateDisplay() {
     safeLabel = "CAUTION";
   }
 
-  // Line 1: "AV 5.1.0  [W] 85%"
-  // WiFi dot: 'W' if WIFI_ENABLED and connected, '-' otherwise
+  // Line 1: "AV 5.1.0  B%:85  BLE"
+  // Shows WiFi indicator when enabled, BLE connection indicator, battery
   #if WIFI_ENABLED
   bool wifiOk = (WiFi.status() == WL_CONNECTED);
   #else
   bool wifiOk = false;
   #endif
   M5.Lcd.setCursor(0, 0);
-  M5.Lcd.printf("AV " FW_VERSION "  %c  %d%%",
-    wifiOk ? 'W' : '-', batteryPercent);
+  M5.Lcd.printf("AV " FW_VERSION " B%%:%d %s%s",
+    batteryPercent,
+    deviceConnected ? "BLE" : "   ",  // BLE connection status
+    wifiOk ? " W" : "  ");            // WiFi connection status
 
   // Line 2: "PPV: 0.123^  SAFE"
   M5.Lcd.setCursor(0, 10);
@@ -1777,21 +1789,24 @@ void sendBLEData() {
 
   // Send simplified IMU JSON (only firmware-computed features)
   // Buffer sized for: existing fields + fw(5) + seq(10) + evtMs(10) + boots(10) + evts(10)
-  //                 + cal(1) + gain(2) + chg(1) + tmp(6) + up(10) + dbg(1) + ts(12) + led(1) + overhead
-  char imuData[380];
+  //                 + cal(1) + gain(2) + chg(1) + tmp(6) + up(10) + dbg(1) + ts(12) + led(1)
+  //                 + alert_ms(10) + overhead
+  char imuData[400];
   uint32_t evtMs = g_evtActive ? (uint32_t)(millis() - g_evtStartMs) : 0u;
+  uint32_t alertMs = (uint32_t)(millis() - g_alertStartMs);  // How long current alert level has been active
   uint32_t uptimeSec = millis() / 1000u;  // P146: device uptime in seconds
   uint32_t tsNow = (uint32_t)getCurrentEpoch(); // P199: wall-clock unix timestamp (0 if not set)
   int imuLen = snprintf(imuData, sizeof(imuData),
     "{\"ppv\":%.1f,\"stalta\":%.2f,\"rms\":%.4f,\"peak\":%.4f,\"crest\":%.1f,\"temp\":%.1f,\"mag\":%.4f"
     ",\"fw\":\"" FW_VERSION "\",\"seq\":%lu,\"evtMs\":%lu,\"boots\":%lu,\"evts\":%lu"
     ",\"cal\":%d,\"gain\":%d,\"chg\":%d"
-    ",\"tmp\":%.1f,\"up\":%lu,\"dbg\":%d,\"ts\":%lu,\"led\":%d}",
+    ",\"tmp\":%.1f,\"up\":%lu,\"dbg\":%d,\"ts\":%lu,\"led\":%d,\"alert_ms\":%lu}",
     vibrationPPV, staLtaRatio, vibrationRMS, vibrationPeak, crestFactor, imuTemp, vibrationMagnitude,
     (unsigned long)g_seq, (unsigned long)evtMs, (unsigned long)g_bootCount, (unsigned long)g_sessionEvts,
     g_calibrating ? 1 : 0, g_highGainMode ? 16 : 4, batteryCharging ? 1 : 0,
     imuTemp, (unsigned long)uptimeSec, g_debugMode ? 1 : 0, (unsigned long)tsNow,
-    g_ledState ? 1 : 0);  // P229: current LED state
+    g_ledState ? 1 : 0,    // P229: current LED state
+    (unsigned long)alertMs);  // How long current alert level has been active (supports P59 escalation)
   // P147: Motion threshold filter — only notify if PPV changed > 0.02 mm/s
   //       or more than 5 seconds have elapsed since last notification.
   //       The characteristic value is always updated so a phone read() gets
