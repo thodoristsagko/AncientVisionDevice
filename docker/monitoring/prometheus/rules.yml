@@ -68,3 +68,29 @@ groups:
         annotations:
           summary: "Data collector is experiencing high request latency"
           description: "95th percentile request latency is {{ $value | humanizeFloat(2) }}s (threshold: 0.5s)"
+
+      # Warning: Unusually high sample ingestion rate (possible replay or flood)
+      - alert: HighSampleIngestionRate
+        expr: rate(ancientvision_samples_total[5m]) > 50
+        for: 2m
+        labels:
+          severity: warning
+          service: data-collector
+        annotations:
+          summary: "Unusually high sample ingestion rate"
+          description: "Sample ingestion rate is {{ $value | humanize }}/s over 5 minutes"
+
+      # Warning: Training data class imbalance
+      - alert: ClassImbalanceWarning
+        expr: |
+          (
+            max(ancientvision_samples_by_class) /
+            min(ancientvision_samples_by_class) > 10
+          )
+        for: 5m
+        labels:
+          severity: warning
+          service: data-collector
+        annotations:
+          summary: "Training data class imbalance detected"
+          description: "Majority class is 10× larger than minority class"
