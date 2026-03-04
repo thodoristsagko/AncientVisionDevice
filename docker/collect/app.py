@@ -174,6 +174,12 @@ def create_app():
 
     @app.route("/ingest", methods=["POST"])
     def ingest():
+        # Check request size limit (10 KB max)
+        if request.content_length and request.content_length > 10240:
+            jlog("warning", "ingest_rejected", reason="payload_too_large",
+                 size_bytes=request.content_length)
+            return jsonify({"error": "payload too large"}), 413
+
         data = request.get_json(silent=True) or {}
 
         # Check required fields
@@ -196,7 +202,7 @@ def create_app():
                 global _rate_limit_hits
                 with _rate_limit_hits_lock:
                     _rate_limit_hits += 1
-                return jsonify({"error": "rate_limited", "device_id": device_id}), 429
+                return jsonify({"error": "rate_limited", "device_id": device_id}), 429, {"Retry-After": "1"}
             window.append(now_ts)
             _rate_windows[device_id] = window
 
@@ -353,8 +359,17 @@ def create_app():
         if not timestamp or not device_id:
             return jsonify({"error": "missing fields: timestamp, device_id"}), 400
 
+        # Validate label whitelist
         if new_label not in VALID_LABELS:
             return jsonify({"error": f"invalid label: {new_label!r}. Must be one of {sorted(VALID_LABELS)}"}), 400
+
+        # Prevent path traversal injection in device_id and timestamp
+        dangerous_chars = ("..", "/", "\\")
+        for field_val, field_name in [(device_id, "device_id"), (timestamp, "timestamp")]:
+            for dangerous in dangerous_chars:
+                if dangerous in field_val:
+                    jlog("warning", "label_injection_attempt", field=field_name, value=field_val)
+                    return jsonify({"error": f"suspicious characters in {field_name}"}), 400
 
         total_updated = 0
 
@@ -543,7 +558,17 @@ def create_app():
 
         return Response(generate(), mimetype="application/x-ndjson")
 
-    # --- Task 6: API key authentication ---
+    # --- Task 6: CORS headers and security headers ---
+
+    @app.after_request
+    def _add_cors_and_security_headers(response):
+        """Add CORS and security headers to all responses."""
+        cors_origin = os.environ.get("CORS_ORIGIN", "*")
+        response.headers["Access-Control-Allow-Origin"] = cors_origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        return response
 
     @app.before_request
     def _api_key_auth():
