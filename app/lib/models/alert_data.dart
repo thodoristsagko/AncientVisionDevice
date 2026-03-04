@@ -6,5 +6,16 @@ class AlertData {
   final String title;
   final String message;
 
-  AlertData({required this.time, required this.level, required this.title, required this.message});
+  /// Precise machine timestamp for relative-time display and CSV export.
+  /// Optional for backward compatibility with existing callers that only
+  /// pass a pre-formatted [time] string.
+  final DateTime? timestamp;
+
+  AlertData({
+    required this.time,
+    required this.level,
+    required this.title,
+    required this.message,
+    this.timestamp,
+  });
 }
