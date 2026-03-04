@@ -139,3 +139,36 @@ docker compose run --rm ml
 - [ ] Back up field data: `make backup`
 - [ ] If 100+ new samples: retrain → `make train`
 - [ ] Check training metrics: `cat app/assets/ml/precursor_training_metrics.json`
+
+---
+
+## Analysis Scripts
+
+| Script | Description |
+|---|---|
+| `scripts/simulate_field_data.py` | Sends synthetic samples to collector (normal/soil_creep/crack_propagation/imminent_failure/mixed modes) |
+| `scripts/evaluate_models.py` | Evaluate TFLite models against field CSVs; ROC curve, calibration, top-K, error analysis |
+| `scripts/visualize_features.py` | ASCII feature distribution histograms |
+| `scripts/field_report.py` | Field session summary report |
+| `scripts/health_check.py` | Ping all services and print status table |
+| `scripts/load_test.py` | API performance testing with p95 latency measurements |
+| `scripts/live_dashboard.py` | Curses terminal dashboard polling the collector API |
+| `scripts/ab_test_models.py` | A/B comparison of two TFLite model versions |
+| `scripts/data_augmentation_report.py` | Class imbalance analysis and augmentation recommendations |
+| `scripts/model_serve.py` | Lightweight HTTP inference server for model testing |
+| `scripts/session_report.py` | Generate Markdown session report from a field CSV |
+| `scripts/device_calibration_check.py` | Verify device calibration quality per device |
+| `scripts/reset_pipeline.py` | Safely reset the retrain trigger and baseline count |
+| `scripts/pipeline_status.py` | Comprehensive pipeline status report |
+
+## Docker Services
+
+| Service | Compose file | Description |
+|---|---|---|
+| `firmware` | `docker-compose.yml` | PlatformIO build → `firmware.bin` |
+| `flutter` | `docker-compose.yml` | Flutter release APK |
+| `ml` | `docker-compose.yml` | ML model training → `.tflite` |
+| `collect` | `docker-compose.collect.yml` | Flask data collector API (port 8765) |
+| `watcher` + `trainer` | `docker-compose.train.yml` | File-watcher triggers trainer; runs ONCE per stack start |
+| `ml-dev` / `flutter-dev` / `firmware-dev` | `docker-compose.dev.yml` | Interactive dev shells |
+| `prometheus` | `docker/monitoring/` | Metrics collection with alerting rules |

@@ -126,7 +126,10 @@ def test_dedup_same_timestamp(client):
     c.post("/ingest", json=payload)
     r = c.post("/ingest", json=payload)
     assert r.status_code == 200
-    assert r.get_json()["status"] == "duplicate"
+    # New batch response: accepted=1 (duplicate counts as accepted, not rejected)
+    body = r.get_json()
+    assert body["accepted"] == 1
+    assert body["rejected"] == 0
     csvs = list(data_dir.glob("field/*.csv"))
     with open(csvs[0]) as f:
         rows = list(csv.DictReader(f))
@@ -187,9 +190,10 @@ def test_invalid_ppv_rejected(client):
     r = _post_sample(c, overrides={"ppv": 999.9, "timestamp": "2026-03-03T12:00:00Z"})
     assert r.status_code == 400
     body = r.get_json()
-    assert body.get("error") == "out_of_range"
-    assert body.get("field") == "ppv"
-    assert body.get("value") == 999.9
+    # New batch response shape: accepted=0, rejected=1, errors=[...]
+    assert body.get("accepted") == 0
+    assert body.get("rejected") == 1
+    assert any("out_of_range" in e and "ppv" in e for e in body.get("errors", []))
 
 
 def test_invalid_freq_rejected(client):
@@ -198,28 +202,29 @@ def test_invalid_freq_rejected(client):
     r = _post_sample(c, overrides={"freq": 99999, "timestamp": "2026-03-03T13:00:00Z"})
     assert r.status_code == 400
     body = r.get_json()
-    assert body.get("error") == "out_of_range"
-    assert body.get("field") == "freq"
+    # New batch response shape: accepted=0, rejected=1, errors=[...]
+    assert body.get("accepted") == 0
+    assert body.get("rejected") == 1
+    assert any("out_of_range" in e and "freq" in e for e in body.get("errors", []))
 
 
 def test_rate_limiting(client):
-    """Send 11 requests from same device_id rapidly — at least one must return 429."""
+    """Send 11 requests from same device_id rapidly — at least one must be rate-limited.
+
+    With the new batch ingest, a rate-limited single-sample POST returns 400 (all rejected)
+    with a 'rate_limited' error in the errors list.
+    """
     c, _ = client
-    statuses = []
+    rate_limited_count = 0
     for i in range(11):
-        # Use unique timestamps to avoid dedup, but same device_id
         payload = {**BASE_PAYLOAD, "device_id": "rate-test-dev", "timestamp": f"2026-03-03T14:00:{i:02d}Z"}
         r = c.post("/ingest", json=payload)
-        statuses.append(r.status_code)
-    assert 429 in statuses, f"Expected at least one 429, got: {statuses}"
-    # Verify the 429 response body is correct
-    for i, status in enumerate(statuses):
-        if status == 429:
-            payload = {**BASE_PAYLOAD, "device_id": "rate-test-dev", "timestamp": f"2026-03-03T14:00:{i:02d}Z"}
-            # Re-issue just to confirm structure (already have statuses list)
-            break
-    # At least confirm 429 appeared
-    assert statuses.count(429) >= 1
+        body = r.get_json() or {}
+        if r.status_code == 400 and any(
+            "rate_limited" in e for e in body.get("errors", [])
+        ):
+            rate_limited_count += 1
+    assert rate_limited_count >= 1, "Expected at least one rate-limited rejection"
 
 
 # ---------------------------------------------------------------------------
@@ -670,3 +675,139 @@ def test_metrics_endpoint_per_device_counts(client):
     # Should report 3 samples for dev-x and 5 for dev-y
     assert 'ancientvision_samples_by_device{device_id="dev-x"} 3' in text
     assert 'ancientvision_samples_by_device{device_id="dev-y"} 5' in text
+
+
+# ---------------------------------------------------------------------------
+# New tests: batch /ingest, /device/<id>/summary, /summary
+# ---------------------------------------------------------------------------
+
+def test_ingest_endpoint_single(client):
+    """Test /ingest with a single sample object (backward-compatible behaviour)."""
+    c, data_dir = client
+    # Single sample as a plain JSON object
+    r = c.post("/ingest", json={**BASE_PAYLOAD, "timestamp": "2026-03-04T08:00:00Z"})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["accepted"] == 1
+    assert body["rejected"] == 0
+    assert "errors" not in body
+
+    # Confirm CSV was written
+    csvs = list(data_dir.glob("field/*.csv"))
+    assert len(csvs) == 1
+    with open(csvs[0]) as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert rows[0]["device_id"] == BASE_PAYLOAD["device_id"]
+
+
+def test_ingest_endpoint_batch(client):
+    """Test /ingest with a batch array of samples."""
+    c, data_dir = client
+
+    good_a = {**BASE_PAYLOAD, "timestamp": "2026-03-04T09:00:00Z", "device_id": "batch-dev"}
+    good_b = {**BASE_PAYLOAD, "timestamp": "2026-03-04T09:00:01Z", "device_id": "batch-dev"}
+    # Invalid sample: ppv out of range
+    bad = {**BASE_PAYLOAD, "timestamp": "2026-03-04T09:00:02Z", "device_id": "batch-dev",
+           "ppv": 999.9}
+
+    r = c.post("/ingest", json=[good_a, good_b, bad])
+    # Partial success → 207
+    assert r.status_code == 207
+    body = r.get_json()
+    assert body["accepted"] == 2
+    assert body["rejected"] == 1
+    assert len(body["errors"]) == 1
+    assert "out_of_range" in body["errors"][0]
+
+    # Confirm exactly 2 rows in CSV
+    csvs = list(data_dir.glob("field/*.csv"))
+    assert len(csvs) == 1
+    with open(csvs[0]) as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 2
+
+    # All-rejected batch → 400
+    r2 = c.post("/ingest", json=[{"device_id": "x"}])
+    assert r2.status_code == 400
+    body2 = r2.get_json()
+    assert body2["accepted"] == 0
+    assert body2["rejected"] == 1
+
+    # All-accepted batch → 200
+    ok_a = {**BASE_PAYLOAD, "timestamp": "2026-03-04T10:00:00Z", "device_id": "ok-dev"}
+    ok_b = {**BASE_PAYLOAD, "timestamp": "2026-03-04T10:00:01Z", "device_id": "ok-dev"}
+    r3 = c.post("/ingest", json=[ok_a, ok_b])
+    assert r3.status_code == 200
+    body3 = r3.get_json()
+    assert body3["accepted"] == 2
+    assert body3["rejected"] == 0
+    assert "errors" not in body3
+
+
+def test_device_summary_endpoint(client):
+    """Test /device/<device_id>/summary returns correct per-device stats."""
+    c, _ = client
+    # Post 3 samples for "summary-dev", 1 with a different label and higher ppv
+    _post_sample(c, overrides={"device_id": "summary-dev", "timestamp": "2026-03-04T08:00:00Z",
+                                "ppv": 0.10, "label": "normal"})
+    _post_sample(c, overrides={"device_id": "summary-dev", "timestamp": "2026-03-04T08:00:01Z",
+                                "ppv": 0.42, "label": "anomaly"})
+    _post_sample(c, overrides={"device_id": "summary-dev", "timestamp": "2026-03-04T08:00:02Z",
+                                "ppv": 0.05, "label": "normal"})
+
+    r = c.get("/device/summary-dev/summary")
+    assert r.status_code == 200
+    body = r.get_json()
+
+    assert body["device_id"] == "summary-dev"
+    assert body["total_samples"] == 3
+    assert body["first_seen"] is not None
+    assert body["last_seen"] is not None
+    assert body["first_seen"] <= body["last_seen"]
+    assert body["session_count"] >= 1
+    assert body["class_distribution"]["normal"] == 2
+    assert body["class_distribution"]["anomaly"] == 1
+    assert body["peak_ppv"] == pytest.approx(0.42, abs=1e-4)
+    assert 0.0 < body["mean_ppv"] < 0.42
+
+    # Unknown device → 404
+    r2 = c.get("/device/nonexistent-dev/summary")
+    assert r2.status_code == 404
+
+
+def test_summary_endpoint(client):
+    """Test /summary returns aggregated stats across all devices."""
+    c, _ = client
+    # Post samples from two distinct devices
+    _post_sample(c, overrides={"device_id": "sum-dev-a", "timestamp": "2026-03-04T08:00:00Z",
+                                "label": "normal"})
+    _post_sample(c, overrides={"device_id": "sum-dev-a", "timestamp": "2026-03-04T08:00:01Z",
+                                "label": "anomaly"})
+    _post_sample(c, overrides={"device_id": "sum-dev-b", "timestamp": "2026-03-04T08:00:02Z",
+                                "label": "normal"})
+
+    r = c.get("/summary")
+    assert r.status_code == 200
+    body = r.get_json()
+
+    assert body["total_samples"] == 3
+    assert body["total_devices"] == 2
+    assert body["first_seen"] is not None
+    assert body["last_seen"] is not None
+    assert "class_distribution" in body
+    assert body["class_distribution"]["normal"] == 2
+    assert body["class_distribution"]["anomaly"] == 1
+    assert "top_devices" in body
+    assert len(body["top_devices"]) <= 3
+    # top_devices entries must have device_id and sample_count
+    for entry in body["top_devices"]:
+        assert "device_id" in entry
+        assert "sample_count" in entry
+    assert "ready_for_training" in body
+    assert isinstance(body["ready_for_training"], bool)
+    assert "trigger_threshold" in body
+    # 3 samples is below default threshold of 100, so not ready
+    assert body["ready_for_training"] is False
+    # last_retrain_trigger may be None if no trigger file exists
+    assert "last_retrain_trigger" in body

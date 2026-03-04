@@ -172,61 +172,113 @@ def create_app():
     def health():
         return jsonify({"status": "ok", "samples": _read_count()})
 
-    @app.route("/ingest", methods=["POST"])
-    def ingest():
-        # Check request size limit (10 KB max)
-        if request.content_length and request.content_length > 10240:
-            jlog("warning", "ingest_rejected", reason="payload_too_large",
-                 size_bytes=request.content_length)
-            return jsonify({"error": "payload too large"}), 413
-
-        data = request.get_json(silent=True) or {}
-
-        # Check required fields
-        missing = [f for f in REQUIRED_FIELDS if f not in data]
-        if missing:
-            jlog("warning", "ingest_rejected", reason="missing_fields", missing=missing)
-            return jsonify({"error": f"missing fields: {missing}"}), 400
-
-        # Rate limiting per device_id
-        device_id = data.get("device_id", "")
+    def _check_rate_limit(device_id: str) -> bool:
+        """Check and update rate limit for device_id. Returns True if allowed, False if limited."""
         now_ts = time.monotonic()
         rps_limit = _config["rate_limit_rps"]
         with _rate_lock:
             window = _rate_windows.get(device_id, [])
-            # Keep only timestamps within the last 1 second
             window = [t for t in window if now_ts - t < 1.0]
             if len(window) >= rps_limit:
                 _rate_windows[device_id] = window
-                jlog("warning", "ingest_rejected", reason="rate_limited", device_id=device_id)
-                global _rate_limit_hits
-                with _rate_limit_hits_lock:
-                    _rate_limit_hits += 1
-                return jsonify({"error": "rate_limited", "device_id": device_id}), 429, {"Retry-After": "1"}
+                return False
             window.append(now_ts)
             _rate_windows[device_id] = window
+        return True
 
-        # Numeric range validation
+    def _validate_sample(data: dict) -> str | None:
+        """Validate a single sample dict. Returns None if valid, or an error string."""
+        missing = [f for f in REQUIRED_FIELDS if f not in data]
+        if missing:
+            return f"missing fields: {missing}"
         for field, (lo, hi) in FIELD_RANGES.items():
             if field in data:
                 try:
                     val = float(data[field])
                 except (TypeError, ValueError):
-                    jlog("warning", "ingest_out_of_range", field=field, value=data[field])
-                    return jsonify({"error": "out_of_range", "field": field, "value": data[field]}), 400
+                    return f"out_of_range: {field}={data[field]}"
                 if not (lo <= val <= hi):
-                    jlog("warning", "ingest_out_of_range", field=field, value=val)
-                    return jsonify({"error": "out_of_range", "field": field, "value": val}), 400
+                    return f"out_of_range: {field}={val}"
+        return None
 
-        status = _write_sample(data)
-        if status == "duplicate":
-            jlog("info", "ingest_duplicate", device_id=device_id, timestamp=data.get("timestamp"))
+    @app.route("/ingest", methods=["POST"])
+    def ingest():
+        """Batch ingest endpoint for phone session sync.
+        Accepts either a single sample or an array of samples.
+        """
+        # Check request size limit (50 KB max for batches)
+        if request.content_length and request.content_length > 51200:
+            jlog("warning", "ingest_rejected", reason="payload_too_large",
+                 size_bytes=request.content_length)
+            return jsonify({"error": "payload too large"}), 413
+
+        body = request.get_json(silent=True)
+        if body is None:
+            return jsonify({"error": "invalid JSON"}), 400
+
+        # Normalise: wrap single object in a list
+        if isinstance(body, dict):
+            samples = [body]
+        elif isinstance(body, list):
+            samples = body
         else:
-            jlog("info", "ingest_ok", device_id=device_id, timestamp=data.get("timestamp"),
-                 label=data.get("label"))
+            return jsonify({"error": "body must be a JSON object or array"}), 400
+
+        if not samples:
+            return jsonify({"error": "empty batch"}), 400
+
+        accepted = 0
+        rejected = 0
+        errors: list[str] = []
+        cache_invalidated = False
+
+        for idx, data in enumerate(samples):
+            if not isinstance(data, dict):
+                rejected += 1
+                errors.append(f"[{idx}] not an object")
+                continue
+
+            # Validation
+            err = _validate_sample(data)
+            if err:
+                rejected += 1
+                errors.append(f"[{idx}] {err}")
+                jlog("warning", "ingest_rejected", reason="validation", index=idx, error=err)
+                continue
+
+            # Rate limiting per device_id
+            device_id = data.get("device_id", "")
+            if not _check_rate_limit(device_id):
+                rejected += 1
+                errors.append(f"[{idx}] rate_limited: {device_id}")
+                jlog("warning", "ingest_rejected", reason="rate_limited", device_id=device_id, index=idx)
+                global _rate_limit_hits
+                with _rate_limit_hits_lock:
+                    _rate_limit_hits += 1
+                continue
+
+            status = _write_sample(data)
+            if status == "duplicate":
+                jlog("info", "ingest_duplicate", device_id=device_id,
+                     timestamp=data.get("timestamp"))
+            else:
+                jlog("info", "ingest_ok", device_id=device_id,
+                     timestamp=data.get("timestamp"), label=data.get("label"))
+                cache_invalidated = True
+            accepted += 1
+
+        if cache_invalidated:
             _invalidate_stats_cache()
 
-        return jsonify({"status": status})
+        response_body = {"accepted": accepted, "rejected": rejected}
+        if errors:
+            response_body["errors"] = errors
+
+        if accepted == 0:
+            return jsonify(response_body), 400
+        if rejected > 0:
+            return jsonify(response_body), 207
+        return jsonify(response_body)
 
     @app.route("/stats")
     def stats():
@@ -345,6 +397,140 @@ def create_app():
                 pass
         sorted_devices = sorted(device_set)
         return jsonify({"devices": sorted_devices, "count": len(sorted_devices)})
+
+    # --- Per-device summary endpoint ---
+
+    @app.route("/device/<device_id>/summary", methods=["GET"])
+    def device_summary(device_id: str):
+        """Return per-device statistics summary."""
+        # Validate device_id
+        if "/" in device_id or "\\" in device_id or len(device_id) > 50:
+            return jsonify({"error": "invalid device_id"}), 400
+
+        total_samples = 0
+        first_seen: str | None = None
+        last_seen: str | None = None
+        sessions: set = set()
+        class_dist: dict = {}
+        peak_ppv = 0.0
+        ppv_sum = 0.0
+        ppv_count = 0
+
+        for csv_path in sorted(field_dir.glob("*.csv")):
+            try:
+                with open(csv_path, newline="") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        if row.get("device_id") != device_id:
+                            continue
+                        total_samples += 1
+                        ts_str = row.get("timestamp", "")
+                        if ts_str:
+                            if first_seen is None or ts_str < first_seen:
+                                first_seen = ts_str
+                            if last_seen is None or ts_str > last_seen:
+                                last_seen = ts_str
+                            # Session = date portion of timestamp
+                            date_part = ts_str[:10]
+                            sessions.add(date_part)
+                        lbl = row.get("label", "")
+                        if lbl:
+                            class_dist[lbl] = class_dist.get(lbl, 0) + 1
+                        try:
+                            ppv_val = float(row.get("ppv", 0) or 0)
+                            if ppv_val > peak_ppv:
+                                peak_ppv = ppv_val
+                            ppv_sum += ppv_val
+                            ppv_count += 1
+                        except (ValueError, TypeError):
+                            pass
+            except Exception as exc:
+                jlog("warning", "device_summary_read_error", file=csv_path.name, error=str(exc))
+
+        if total_samples == 0:
+            return jsonify({"error": "device not found"}), 404
+
+        mean_ppv = round(ppv_sum / ppv_count, 6) if ppv_count > 0 else 0.0
+
+        jlog("info", "device_summary_ok", device_id=device_id, total_samples=total_samples)
+        return jsonify({
+            "device_id": device_id,
+            "total_samples": total_samples,
+            "first_seen": first_seen,
+            "last_seen": last_seen,
+            "session_count": len(sessions),
+            "class_distribution": class_dist,
+            "peak_ppv": round(peak_ppv, 6),
+            "mean_ppv": mean_ppv,
+        })
+
+    # --- Overall summary endpoint ---
+
+    @app.route("/summary", methods=["GET"])
+    def summary():
+        """Return overall collection summary aggregated across all devices."""
+        total_samples = 0
+        first_seen: str | None = None
+        last_seen: str | None = None
+        all_devices: set = set()
+        class_dist: dict = {}
+        device_counts: dict = {}
+
+        for csv_path in sorted(field_dir.glob("*.csv")):
+            try:
+                with open(csv_path, newline="") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        total_samples += 1
+                        dev = row.get("device_id", "")
+                        if dev:
+                            all_devices.add(dev)
+                            device_counts[dev] = device_counts.get(dev, 0) + 1
+                        ts_str = row.get("timestamp", "")
+                        if ts_str:
+                            if first_seen is None or ts_str < first_seen:
+                                first_seen = ts_str
+                            if last_seen is None or ts_str > last_seen:
+                                last_seen = ts_str
+                        lbl = row.get("label", "")
+                        if lbl:
+                            class_dist[lbl] = class_dist.get(lbl, 0) + 1
+            except Exception as exc:
+                jlog("warning", "summary_read_error", file=csv_path.name, error=str(exc))
+
+        # Top 3 most active devices
+        top_devices = sorted(device_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+        top_devices_list = [{"device_id": d, "sample_count": n} for d, n in top_devices]
+
+        # Training readiness
+        trigger_threshold = _config["trigger_threshold"]
+        ready_for_training = total_samples >= trigger_threshold
+
+        # Last retrain trigger time
+        retrain_trigger_path = field_dir.parent / ".retrain_trigger"
+        last_retrain_trigger: str | None = None
+        if retrain_trigger_path.exists():
+            try:
+                mtime = retrain_trigger_path.stat().st_mtime
+                last_retrain_trigger = datetime.fromtimestamp(
+                    mtime, tz=timezone.utc
+                ).isoformat()
+            except Exception:
+                pass
+
+        jlog("info", "summary_ok", total_samples=total_samples,
+             total_devices=len(all_devices))
+        return jsonify({
+            "total_samples": total_samples,
+            "total_devices": len(all_devices),
+            "first_seen": first_seen,
+            "last_seen": last_seen,
+            "class_distribution": class_dist,
+            "top_devices": top_devices_list,
+            "ready_for_training": ready_for_training,
+            "trigger_threshold": trigger_threshold,
+            "last_retrain_trigger": last_retrain_trigger,
+        })
 
     # --- Task 1: /label endpoint ---
 
