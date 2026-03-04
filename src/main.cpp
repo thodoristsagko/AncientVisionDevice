@@ -168,7 +168,8 @@ BiquadFilter lpFilterZ = { 0.29289f, 0.58579f, 0.29289f, 0.0f, 0.17157f, 0,0,0,0
 #define FW_VERSION "5.1.0"
 
 // ===================== RTC PERSISTENT STATE =====================
-RTC_DATA_ATTR uint32_t g_bootCount = 0;  // Survives deep sleep, incremented in setup()
+RTC_DATA_ATTR uint32_t g_bootCount = 0;   // Survives deep sleep, incremented in setup()
+RTC_DATA_ATTR uint32_t g_wdtResets = 0;   // Watchdog reset counter (survives soft resets, cleared on power-on)
 
 // ===================== SESSION COUNTERS =====================
 uint32_t g_seq = 0;            // BLE packet sequence number, incremented each send
@@ -265,6 +266,13 @@ int rawMoisture = 0;
 float batteryVoltage = 0.0;  // Battery voltage (V)
 int batteryPercent = 100;    // Battery percentage (0-100%)
 bool batteryCharging = false; // Charging status
+
+// Battery EMA smoothing
+static float g_batPctEma = -1.0f;      // -1 = uninitialized; exponential moving average of batteryPercent
+static const float BAT_EMA_ALPHA = 0.1f; // Smoothing factor: 0.1 = slow response, stable readings
+
+// MCU internal temperature
+static float g_mcuTemp = 0.0f;         // Internal ESP32 die temperature (°C)
 
 // Low power mode
 bool lowPowerMode = false;
