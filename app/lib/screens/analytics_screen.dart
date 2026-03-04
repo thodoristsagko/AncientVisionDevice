@@ -50,6 +50,14 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
   int _inferenceCount = 0;
   double _inferenceAvgMs = 0.0;
 
+  // PPV statistics (P157: Enhanced vibration analytics)
+  double _meanPpv = 0.0;
+  double _stdDevPpv = 0.0;
+  double _peakPpv = 0.0;
+  int _totalReadings = 0;
+  double _alertRate = 0.0;
+  Duration? _lastSessionDuration;
+
   @override
   void initState() {
     super.initState();
@@ -101,6 +109,17 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
     _inferenceCount = timing.count;
     _inferenceAvgMs = timing.avgMs;
 
+    // P157: Calculate PPV statistics from findings
+    _calculatePpvStatistics();
+
+    // P157: Calculate alert rate (ANOMALY or CRITICAL as % of total readings)
+    _calculateAlertRate(alertHistory);
+
+    // P157: Get last session duration
+    if (_recentSessions.isNotEmpty) {
+      _lastSessionDuration = _recentSessions.first.duration;
+    }
+
     if (mounted) {
       setState(() => _isLoading = false);
       _animationController.forward();
@@ -122,6 +141,63 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
       final material = finding['material'] as String? ?? 'Unknown';
       _materialCounts[material] = (_materialCounts[material] ?? 0) + 1;
     }
+  }
+
+  /// P157: Calculate PPV statistics from findings
+  /// Computes mean, std dev, peak PPV, and total reading count.
+  void _calculatePpvStatistics() {
+    if (_allFindings.isEmpty) {
+      _meanPpv = 0.0;
+      _stdDevPpv = 0.0;
+      _peakPpv = 0.0;
+      _totalReadings = 0;
+      return;
+    }
+
+    // Extract PPV values from findings
+    final ppvValues = <double>[];
+    for (final finding in _allFindings) {
+      if (finding['ppv'] != null) {
+        final ppv = (finding['ppv'] as num?)?.toDouble() ?? 0.0;
+        if (ppv > 0) {
+          ppvValues.add(ppv);
+        }
+      }
+    }
+
+    if (ppvValues.isEmpty) {
+      _meanPpv = 0.0;
+      _stdDevPpv = 0.0;
+      _peakPpv = 0.0;
+      _totalReadings = 0;
+      return;
+    }
+
+    _totalReadings = ppvValues.length;
+
+    // Calculate mean
+    _meanPpv = ppvValues.fold(0.0, (a, b) => a + b) / ppvValues.length;
+
+    // Calculate peak
+    _peakPpv = ppvValues.fold(0.0, (a, b) => a > b ? a : b);
+
+    // Calculate standard deviation
+    final variance = ppvValues.fold(0.0, (sum, val) => sum + ((val - _meanPpv) * (val - _meanPpv))) / ppvValues.length;
+    _stdDevPpv = math.sqrt(variance);
+  }
+
+  /// P157: Calculate alert rate as percentage of readings that triggered ANOMALY/CRITICAL.
+  void _calculateAlertRate(List<AlertData> alertHistory) {
+    if (_totalReadings == 0) {
+      _alertRate = 0.0;
+      return;
+    }
+
+    final anomalyCount = alertHistory
+        .where((e) => e.level == 'ANOMALY' || e.level == 'CRITICAL')
+        .length;
+
+    _alertRate = _totalReadings > 0 ? (anomalyCount / _totalReadings) * 100 : 0.0;
   }
 
   /// Get filtered stats based on selected period
@@ -486,6 +562,10 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
                           _buildQuickStatsRow(),
                           const SizedBox(height: 24),
 
+                          // P157: Vibration Statistics Card (PPV, Alert Rate, Session Duration)
+                          _buildVibrationStatsCard(),
+                          const SizedBox(height: 24),
+
                           // Weekly Activity Chart
                           _buildSectionHeader('Activity Overview', Icons.show_chart),
                           const SizedBox(height: 12),
@@ -643,6 +723,133 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
         ],
       ),
     );
+  }
+
+  /// P157: Vibration Statistics Card
+  /// Displays PPV mean, std dev, peak, total readings, alert rate, and last session duration.
+  Widget _buildVibrationStatsCard() {
+    final meanLabel = _totalReadings > 0
+        ? '${_meanPpv.toStringAsFixed(3)} mm/s'
+        : 'N/A';
+    final stdDevLabel = _totalReadings > 0
+        ? '${_stdDevPpv.toStringAsFixed(3)} mm/s'
+        : 'N/A';
+    final peakLabel = _peakPpv > 0
+        ? '${_peakPpv.toStringAsFixed(3)} mm/s'
+        : 'N/A';
+    final readingLabel = '$_totalReadings';
+    final alertRateLabel = '${_alertRate.toStringAsFixed(1)}%';
+    final durationLabel = _lastSessionDuration != null
+        ? _formatDuration(_lastSessionDuration!)
+        : 'N/A';
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(20),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withAlpha(30)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.show_chart, color: Color(0xFF00BCD4), size: 18),
+              SizedBox(width: 8),
+              Text(
+                'Vibration Statistics',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 15,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // 2x3 grid of stats
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildStatItem('Mean PPV', meanLabel),
+                    const SizedBox(height: 8),
+                    _buildStatItem('Peak PPV', peakLabel),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildStatItem('Std Dev', stdDevLabel),
+                    const SizedBox(height: 8),
+                    _buildStatItem('Total readings', readingLabel),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // Alert rate and session duration (full width)
+          Row(
+            children: [
+              Expanded(
+                child: _buildStatItem('Alert rate (ANOMALY/CRITICAL)', alertRateLabel),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: _buildStatItem('Last session duration', durationLabel),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Helper widget for a single statistic item (label + value).
+  Widget _buildStatItem(String label, String value) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            color: Colors.white.withAlpha(140),
+            fontSize: 11,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 14,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Format duration as "Xm Ys" or "Xh Ym".
+  String _formatDuration(Duration d) {
+    final hours = d.inHours;
+    final minutes = d.inMinutes % 60;
+    final seconds = d.inSeconds % 60;
+
+    if (hours > 0) {
+      return '${hours}h ${minutes}m';
+    } else if (minutes > 0) {
+      return '${minutes}m ${seconds}s';
+    } else {
+      return '${seconds}s';
+    }
   }
 
   Widget _buildKV(String key, String value) {
