@@ -68,6 +68,8 @@ class ConnectivityMonitorService extends ChangeNotifier {
 
   DateTime? _lastNetworkConnectTime;
 
+  int _bleReconnectionCount = 0;
+
   // -------------------------------------------------------------------------
   // Public getters
   // -------------------------------------------------------------------------
@@ -94,6 +96,21 @@ class ConnectivityMonitorService extends ChangeNotifier {
     return DateTime.now().difference(_bleDisconnectTime!);
   }
 
+  /// How long BLE has been disconnected, or null if BLE is currently connected.
+  ///
+  /// Unlike [bleOfflineDuration], returns null (not Duration.zero) when BLE is
+  /// connected, making it unambiguous to distinguish "connected" from "offline
+  /// for 0 seconds".
+  Duration? get bleDurationOffline {
+    if (_bleConnected || _bleDisconnectTime == null) return null;
+    return DateTime.now().difference(_bleDisconnectTime!);
+  }
+
+  /// How many times BLE has reconnected during this app session.
+  ///
+  /// Increments each time [updateBleStatus] transitions from false to true.
+  int get bleReconnectionCount => _bleReconnectionCount;
+
   /// Combined health status derived from individual connection states.
   CombinedHealthStatus get healthStatus {
     if (_networkConnected == false && _bleConnected == false) {
@@ -108,6 +125,50 @@ class ConnectivityMonitorService extends ChangeNotifier {
     }
     if (_bleConnected) return CombinedHealthStatus.bleOnlyConnected;
     return CombinedHealthStatus.networkOnlyConnected;
+  }
+
+  /// A numeric health score from 0.0 (worst) to 1.0 (best).
+  ///
+  /// Scoring rules:
+  /// - 1.0: Both connected AND BLE has reconnected fewer than 3 times.
+  /// - 0.7: BLE connected, network down.
+  /// - 0.5: Network connected, BLE disconnected.
+  /// - 0.2: Both down AND BLE was last seen fewer than 5 minutes ago.
+  /// - 0.0: Both down (or BLE disconnected for >= 5 minutes).
+  double get healthScore {
+    final status = healthStatus;
+    switch (status) {
+      case CombinedHealthStatus.fullyConnected:
+        return _bleReconnectionCount < 3 ? 1.0 : 0.7;
+      case CombinedHealthStatus.bleOnlyConnected:
+        return 0.7;
+      case CombinedHealthStatus.networkOnlyConnected:
+        return 0.5;
+      case CombinedHealthStatus.fullyDisconnected:
+        final offline = bleDurationOffline;
+        if (offline != null && offline < const Duration(minutes: 5)) {
+          return 0.2;
+        }
+        return 0.0;
+      case CombinedHealthStatus.unknown:
+        return 0.0;
+    }
+  }
+
+  /// A human-readable description of the current connectivity health.
+  String get healthDescription {
+    switch (healthStatus) {
+      case CombinedHealthStatus.fullyConnected:
+        return 'Fully operational';
+      case CombinedHealthStatus.bleOnlyConnected:
+        return 'Offline mode \u2014 data not syncing';
+      case CombinedHealthStatus.networkOnlyConnected:
+        return 'BLE disconnected \u2014 waiting for sensor';
+      case CombinedHealthStatus.fullyDisconnected:
+        return 'No connectivity';
+      case CombinedHealthStatus.unknown:
+        return 'No connectivity';
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -150,9 +211,16 @@ class ConnectivityMonitorService extends ChangeNotifier {
     if (connected) {
       _lastBleConnectTime = DateTime.now();
       _bleDisconnectTime = null;
+
+      // Increment reconnection count on every false→true transition, but NOT
+      // on the very first connection (that is the initial connect, not a
+      // reconnection).
+      _incrementReconnectIfNeeded();
+
       debugPrint(
         '[ConnectivityMonitorService] BLE connected'
-        '${rssi != null ? " (RSSI $rssi dBm)" : ""}.',
+        '${rssi != null ? " (RSSI $rssi dBm)" : ""}. '
+        'Reconnections this session: $_bleReconnectionCount.',
       );
     } else {
       _bleDisconnectTime = DateTime.now();
@@ -169,6 +237,20 @@ class ConnectivityMonitorService extends ChangeNotifier {
   // -------------------------------------------------------------------------
   // Internal helpers
   // -------------------------------------------------------------------------
+
+  /// Whether BLE has ever connected (used to distinguish first-connect from
+  /// subsequent reconnections).
+  bool _bleHasEverConnected = false;
+
+  /// Increment [_bleReconnectionCount] on BLE false→true transitions, but NOT
+  /// on the very first connection.
+  void _incrementReconnectIfNeeded() {
+    if (_bleHasEverConnected) {
+      _bleReconnectionCount++;
+    } else {
+      _bleHasEverConnected = true;
+    }
+  }
 
   void _onNetworkStatusChanged() {
     final connected = NetworkStatusService.instance.isConnected;
