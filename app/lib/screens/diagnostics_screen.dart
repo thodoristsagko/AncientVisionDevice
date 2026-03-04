@@ -6,9 +6,11 @@ import '../services/connectivity_monitor_service.dart';
 import '../services/critical_event_log_service.dart';
 import '../services/inference_timing_service.dart';
 import '../services/network_status_service.dart';
+import '../services/precursor_classifier_service.dart';
 import '../services/vibration_anomaly_service.dart';
 import '../services/device_memory_service.dart';
 import '../utils/ble_packet_tracker.dart';
+import '../widgets/model_info_card.dart';
 
 /// DiagnosticsScreen — read-only system diagnostic information panel.
 ///
@@ -55,6 +57,10 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
   String? _modelFingerprint;
   int? _modelFileSizeBytes;
   bool _isLoading = true;
+
+  // ── Precursor classifier state ────────────────────────────────────────────
+  bool _precursorLoaded = false;
+  String? _precursorLastError;
 
   // ── Firmware fields read from SharedPreferences ──────────────────────────
   String? _fwVersion;
@@ -141,10 +147,16 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
         _fwUptime = fwUptime;
         _appStartTime = appStartTime;
         _isLoading = false;
+
         final anomalyService = VibrationAnomalyService();
         _modelFingerprint = anomalyService.isInitialized
             ? anomalyService.modelFingerprint
             : null;
+
+        // Precursor classifier — read isLoaded / lastError from singleton.
+        final precursor = PrecursorClassifierService();
+        _precursorLoaded = precursor.isLoaded;
+        _precursorLastError = precursor.lastError;
       });
     }
   }
@@ -308,34 +320,88 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
     final timing = InferenceTimingService.instance;
     final anomalyService = VibrationAnomalyService();
 
-    final lastMs = timing.count > 0
-        ? '${timing.maxMs.toStringAsFixed(1)} ms'
-        : 'N/A';
-    final avgMs = timing.count > 0
-        ? '${timing.avgMs.toStringAsFixed(1)} ms'
-        : 'N/A';
-    final fingerprint = _modelFingerprint ?? 'Not loaded';
-
-    return _DiagCard(
-      title: 'ML Model',
-      icon: Icons.memory,
-      iconColor: const Color(0xFF9C27B0),
-      rows: [
-        _DiagRow('Model file size', _formatBytes(_modelFileSizeBytes)),
-        _DiagRow('Model fingerprint', fingerprint),
-        _DiagRow('Model version',
-            anomalyService.isInitialized ? anomalyService.modelVersion : 'N/A'),
-        _DiagRow('Model type',
-            anomalyService.isInitialized ? anomalyService.modelType : 'N/A'),
-        _DiagRow('Avg inference time', avgMs),
-        _DiagRow('Last inference time', lastMs),
-        _DiagRow(
-          'Min / Max inference',
-          timing.count > 0
-              ? '${timing.minMs.toStringAsFixed(1)} ms / ${timing.maxMs.toStringAsFixed(1)} ms'
-              : 'N/A',
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Section heading
+        Padding(
+          padding: const EdgeInsets.only(left: 4, bottom: 8),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF9C27B0).withAlpha(40),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.memory,
+                    color: Color(0xFF9C27B0), size: 18),
+              ),
+              const SizedBox(width: 10),
+              const Text(
+                'ML Models',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15,
+                ),
+              ),
+            ],
+          ),
         ),
-        _DiagRow('Total inferences', '${timing.count}'),
+        // ── Autoencoder / anomaly model card ────────────────────────────────
+        ModelInfoCard(
+          modelName: 'Vibration Anomaly (Autoencoder)',
+          version: anomalyService.isInitialized
+              ? anomalyService.modelVersion
+              : '',
+          inputDim: 17,
+          fingerprint: _modelFingerprint ?? '',
+          isLoaded: anomalyService.isInitialized,
+          avgInferenceMs: timing.count > 0 ? timing.avgMs : null,
+          lastError: anomalyService.isInitialized ? null : 'Model not loaded',
+        ),
+        const SizedBox(height: 10),
+        // ── Precursor classifier card ────────────────────────────────────────
+        ModelInfoCard(
+          modelName: 'Precursor Classifier',
+          version: '',
+          inputDim: 17,
+          fingerprint: '',
+          isLoaded: _precursorLoaded,
+          avgInferenceMs: null,
+          lastError: _precursorLastError,
+        ),
+        const SizedBox(height: 10),
+        // ── Raw timing stats card (existing detail rows) ─────────────────────
+        _DiagCard(
+          title: 'Inference Timing',
+          icon: Icons.timer_outlined,
+          iconColor: const Color(0xFF9C27B0),
+          rows: [
+            _DiagRow('Model file size', _formatBytes(_modelFileSizeBytes)),
+            _DiagRow(
+              'Avg inference',
+              timing.count > 0
+                  ? '${timing.avgMs.toStringAsFixed(1)} ms'
+                  : 'N/A',
+            ),
+            _DiagRow(
+              'Last inference',
+              timing.count > 0
+                  ? '${timing.maxMs.toStringAsFixed(1)} ms'
+                  : 'N/A',
+            ),
+            _DiagRow(
+              'Min / Max',
+              timing.count > 0
+                  ? '${timing.minMs.toStringAsFixed(1)} ms / '
+                      '${timing.maxMs.toStringAsFixed(1)} ms'
+                  : 'N/A',
+            ),
+            _DiagRow('Total inferences', '${timing.count}'),
+          ],
+        ),
       ],
     );
   }

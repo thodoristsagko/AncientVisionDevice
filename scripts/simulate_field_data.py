@@ -9,15 +9,19 @@ Usage
 -----
     python scripts/simulate_field_data.py --count 100 --mode mixed
     python scripts/simulate_field_data.py --host 192.168.1.10 --port 8765 --mode imminent_failure
+    python scripts/simulate_field_data.py --count 50 --delay 0.5 --n-devices 3
+    python scripts/simulate_field_data.py --scenario scenario.json --burst 20
 """
 import argparse
+import json
 import math
 import random
 import sys
+import time
 import urllib.error
 import urllib.request
-import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Sample generation
@@ -207,46 +211,181 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host",      default="localhost",  help="Collect service hostname")
     p.add_argument("--port",      type=int, default=8765, help="Collect service port")
     p.add_argument("--count",     type=int, default=50,   help="Number of samples to send")
-    p.add_argument("--device-id", default="sim-001",     help="Device ID string")
+    p.add_argument("--device-id", default="sim-001",     help="Device ID string (ignored if --n-devices > 1)")
     p.add_argument(
         "--mode",
         choices=["normal", "soil_creep", "crack_propagation", "imminent_failure", "mixed"],
         default="mixed",
-        help="Vibration pattern to simulate",
+        help="Vibration pattern to simulate (ignored if --scenario is set)",
+    )
+    p.add_argument(
+        "--delay",
+        type=float,
+        default=0.1,
+        help="Delay in seconds between samples (default: 0.1s). Use 0 for back-to-back.",
+    )
+    p.add_argument(
+        "--n-devices",
+        type=int,
+        default=1,
+        help="Number of simultaneous devices to simulate (default: 1)",
+    )
+    p.add_argument(
+        "--burst",
+        type=int,
+        default=0,
+        help="Burst mode: send N samples as fast as possible, then pause. 0 = disabled (default)",
+    )
+    p.add_argument(
+        "--scenario",
+        type=str,
+        help="YAML/JSON file with scenario events (overrides --mode and --count)",
     )
     return p
+
+
+def _load_scenario(filepath: str) -> list:
+    """Load scenario file (JSON/YAML) and return list of event dicts.
+
+    Expected format:
+    {
+      "events": [
+        {"mode": "normal", "duration": 30, "ppv": 0.05},
+        {"mode": "soil_creep", "duration": 15, "ppv": 0.15},
+        ...
+      ]
+    }
+
+    Returns list of (mode, duration_samples, count) tuples.
+    """
+    path = Path(filepath)
+    if not path.exists():
+        print(f"Error: scenario file not found: {filepath}", file=sys.stderr)
+        sys.exit(1)
+
+    content = path.read_text()
+
+    # Try JSON first
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        # Try YAML
+        try:
+            import yaml
+            data = yaml.safe_load(content)
+        except ImportError:
+            print("Error: YAML format requires 'pyyaml' (use JSON for this test)", file=sys.stderr)
+            sys.exit(1)
+
+    if "events" not in data:
+        print("Error: scenario file must have 'events' key", file=sys.stderr)
+        sys.exit(1)
+
+    events = []
+    for event in data["events"]:
+        mode = event.get("mode", "normal")
+        duration = event.get("duration", 10)
+        if mode not in LABELS and mode != "mixed":
+            print(f"Error: invalid mode '{mode}' in scenario", file=sys.stderr)
+            sys.exit(1)
+        events.append((mode, duration))
+
+    return events
+
+
+def _print_progress_bar(current: int, total: int, sent: int, failed: int) -> None:
+    """Print an in-place progress bar."""
+    if total == 0:
+        return
+    filled = int(50 * current / total)
+    bar = "=" * filled + ">" + " " * (50 - filled - 1) if filled < 50 else "=" * 50
+    pct = int(100 * current / total)
+    sys.stdout.write(f"\r[{bar}] {current}/{total} ({pct}%)  sent={sent} failed={failed}")
+    sys.stdout.flush()
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
 
-    host      = args.host
-    port      = args.port
-    count     = args.count
-    device_id = args.device_id
-    mode      = args.mode
+    host = args.host
+    port = args.port
+    delay = args.delay
+    n_devices = args.n_devices
+    burst = args.burst
+    scenario_file = args.scenario
+
+    # Parse scenario if provided
+    if scenario_file:
+        events = _load_scenario(scenario_file)
+        total_samples = sum(duration for _, duration in events)
+        print(f"Loaded scenario with {len(events)} events, {total_samples} total samples")
+    else:
+        count = args.count
+        mode = args.mode
+        events = [(mode, count)]
+        total_samples = count
 
     # Start timestamp: now, UTC, second-precision
     t0 = datetime.now(timezone.utc).replace(microsecond=0)
 
-    sent   = 0
+    sent = 0
     failed = 0
+    sample_index = 0
+    wall_time_start = time.time()
 
-    for i in range(count):
-        ts = t0 + timedelta(seconds=i)
-        sample = generate_sample(device_id, ts, mode, index=i, total=count)
-        ok = send_sample(host, port, sample)
-        if ok:
-            sent += 1
-        else:
-            failed += 1
+    # If n_devices > 1, generate multiple device IDs
+    if n_devices > 1:
+        device_ids = [f"sim-{i:03d}" for i in range(n_devices)]
+    else:
+        device_ids = [args.device_id]
 
-        # Progress every 10 samples
-        completed = i + 1
-        if completed % 10 == 0:
-            print(f"Sent {completed}/{count}...")
+    burst_count = 0
 
-    print(f"Done: {sent} sent, {failed} failed")
+    for mode, duration in events:
+        for i in range(duration):
+            # Round-robin through devices if multi-device
+            dev_idx = (sample_index % len(device_ids)) if n_devices > 1 else 0
+            device_id = device_ids[dev_idx]
+
+            ts = t0 + timedelta(seconds=sample_index)
+            sample = generate_sample(device_id, ts, mode, index=i, total=duration)
+            ok = send_sample(host, port, sample)
+            if ok:
+                sent += 1
+            else:
+                failed += 1
+
+            sample_index += 1
+            burst_count += 1
+
+            # Update progress bar
+            _print_progress_bar(sample_index, total_samples, sent, failed)
+
+            # Burst mode: send N samples fast, then delay
+            if burst > 0 and burst_count >= burst:
+                time.sleep(delay)
+                burst_count = 0
+            elif delay > 0:
+                # Normal delay between samples
+                time.sleep(delay)
+
+    # Final summary
+    wall_time_elapsed = time.time() - wall_time_start
+    print()
+    print()
+    print("=" * 70)
+    print(f"Summary:")
+    print(f"  Total sent:      {sent}")
+    print(f"  Total failed:    {failed}")
+    print(f"  Total samples:   {total_samples}")
+    if n_devices > 1:
+        print(f"  Devices:         {n_devices}")
+    print(f"  Wall time:       {wall_time_elapsed:.1f}s")
+    print(f"  Avg rate:        {total_samples / wall_time_elapsed:.1f} samples/sec")
+    if scenario_file:
+        print(f"  Scenario:        {scenario_file}")
+    print("=" * 70)
+
     return 0 if failed == 0 else 1
 
 
