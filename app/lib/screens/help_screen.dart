@@ -220,7 +220,7 @@ class _HelpScreenState extends State<HelpScreen> with SingleTickerProviderStateM
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text('AncientVision', style: AppTextStyles.h3),
-                    Text('Version 1.0.0', style: AppTextStyles.subtitleSmall),
+                    Text('Version 5.1.0', style: AppTextStyles.subtitleSmall),
                   ],
                 ),
               ),
@@ -529,7 +529,7 @@ class _HelpScreenState extends State<HelpScreen> with SingleTickerProviderStateM
           const SizedBox(height: AppSpacing.lg),
           const Center(
             child: Text(
-              'AncientVision v1.0.0 — Team Thodoris / FLL 2025-2026',
+              'AncientVision v5.1.0 — Team Thodoris / FLL 2025-2026',
               style: AppTextStyles.caption,
               textAlign: TextAlign.center,
             ),

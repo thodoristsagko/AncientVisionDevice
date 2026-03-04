@@ -166,7 +166,7 @@ Generated          : ${DateTime.now().toIso8601String()}
         children: [
           _InfoRow(label: 'Application', value: 'AncientVision'),
           _InfoRow(label: 'Version', value: '5.1.0'),
-          _InfoRow(label: 'Build Date', value: '2026-03-03'),
+          _InfoRow(label: 'Build Date', value: '2026-03-04'),
           _InfoRow(
             label: 'Description',
             value:
@@ -362,6 +362,125 @@ Generated          : ${DateTime.now().toIso8601String()}
           const _InfoRow(label: 'Dart', value: '3.x.x'),
         ],
       ),
+    );
+  }
+
+  // ── Section: Quick Links ──────────────────────────────────────────────────────
+
+  Widget _buildQuickLinksCard() {
+    return _SectionCard(
+      icon: Icons.link,
+      title: 'Quick Links',
+      child: Column(
+        children: [
+          _buildLinkTile(
+            icon: Icons.code,
+            label: 'View on GitHub',
+            subtitle: 'Source code and release notes',
+            url: 'https://github.com/ancientvision/app',
+          ),
+          _buildLinkTile(
+            icon: Icons.bug_report_outlined,
+            label: 'Report an Issue',
+            subtitle: 'Submit a bug or feature request',
+            url: 'https://github.com/ancientvision/app/issues',
+          ),
+          _buildLinkTile(
+            icon: Icons.menu_book_outlined,
+            label: 'Field Safety Manual',
+            subtitle: 'Protocols for on-site safety',
+            onTap: _showFieldSafetyManual,
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showLinkDialog(String title, String url) {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.primaryDark,
+        title: Text(title, style: AppTextStyles.h4),
+        content: SelectableText(url, style: AppTextStyles.subtitle),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close',
+                style: AppTextStyles.button
+                    .copyWith(color: AppColors.accent)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showFieldSafetyManual() {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.primaryDark,
+        title: const Row(
+          children: [
+            Icon(Icons.menu_book_outlined,
+                color: AppColors.accent, size: 20),
+            SizedBox(width: 8),
+            Text('Field Safety Manual', style: AppTextStyles.h4),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Text(
+            'ANCIENTVISION FIELD SAFETY PROTOCOL\n\n'
+            '1. DEVICE PLACEMENT\n'
+            'Place the M5StickC Plus 2 on stable, undisturbed soil within '
+            '5 m of the active excavation face. Avoid loose spoil piles '
+            'and surfaces that vibrate independently of the ground.\n\n'
+            '2. CALIBRATION\n'
+            'Calibrate at the start of every monitoring session with '
+            'the device stationary. Recalibrate after any sensor move.\n\n'
+            '3. ALERT LEVELS\n'
+            '• GREEN (SAFE): PPV < 0.3 mm/s — continue normally.\n'
+            '• AMBER (CAUTION): PPV 0.3–1.0 mm/s — heightened '
+            'monitoring, prepare evacuation.\n'
+            '• RED (CRITICAL): PPV > 1.0 mm/s — EVACUATE IMMEDIATELY.\n\n'
+            '4. EVACUATION\n'
+            'On CRITICAL alert, all personnel leave the excavation zone '
+            'without delay. Do not re-enter until a qualified '
+            'geotechnical engineer clears the site.\n\n'
+            '5. INCIDENT REPORTING\n'
+            'Record PPV value, anomaly score, and time. Export the '
+            'diagnostic report via the About screen and submit to the '
+            'site supervisor.',
+            style: AppTextStyles.subtitle.copyWith(height: 1.5),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close',
+                style: AppTextStyles.button
+                    .copyWith(color: AppColors.accent)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLinkTile({
+    required IconData icon,
+    required String label,
+    required String subtitle,
+    String? url,
+    VoidCallback? onTap,
+  }) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(icon, color: AppColors.accent, size: AppSizes.iconMedium),
+      title: Text(label, style: AppTextStyles.body),
+      subtitle: Text(subtitle, style: AppTextStyles.caption),
+      trailing: const Icon(Icons.chevron_right,
+          color: AppColors.textSecondary),
+      onTap: onTap ?? () => _showLinkDialog(label, url ?? ''),
     );
   }
 
@@ -570,6 +689,8 @@ Generated          : ${DateTime.now().toIso8601String()}
               _buildDeviceInfoCard(),
               const SizedBox(height: 14),
               _buildBuildInfoCard(),
+              const SizedBox(height: 14),
+              _buildQuickLinksCard(),
               const SizedBox(height: 14),
               _buildDiagnosticsExportCard(),
               const SizedBox(height: 14),

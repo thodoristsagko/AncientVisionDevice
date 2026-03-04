@@ -561,6 +561,28 @@ Use the share button to send exports via email, cloud storage, or other apps.
               'Note the PPV value, anomaly score, and time of the alert for the incident report.',
       category: HelpCategory.fieldwork,
     ),
+    FAQItem(
+      question: 'When should I evacuate?',
+      answer: 'Evacuate immediately when the app shows a RED (CRITICAL) alert, which means PPV has exceeded 1.0 mm/s '
+              'or the ML precursor classifier has detected imminent-failure signatures for 15 or more consecutive seconds.\n\n'
+              'Also evacuate if you observe any of these physical signs regardless of app status:\n'
+              '• Visible soil cracking near the excavation face\n'
+              '• Audible cracking or settling sounds\n'
+              '• Small debris or soil falling from exposed sections\n'
+              '• Water seepage or sudden change in soil colour\n\n'
+              'Never wait for a second alert. Alert the site supervisor and do not re-enter until a '
+              'geotechnical professional confirms the area is safe.',
+      category: HelpCategory.fieldwork,
+    ),
+    FAQItem(
+      question: 'How long does calibration take?',
+      answer: 'Calibration takes 30 seconds. During that time the device must remain completely motionless on a '
+              'flat, stable surface away from vibration sources such as machinery, traffic, or foot traffic.\n\n'
+              'The app will show a progress bar and confirm when calibration is complete. '
+              'If the device moves during calibration, tap Recalibrate to restart.\n\n'
+              'Tip: calibrate at the start of each monitoring session and after moving the device to a new location.',
+      category: HelpCategory.fieldwork,
+    ),
     // --- General FAQs ---
     FAQItem(
       question: 'Does the app work without internet?',
