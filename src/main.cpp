@@ -834,12 +834,23 @@ void setup() {
   {
     esp_reset_reason_t reason = esp_reset_reason();
     switch (reason) {
-      case ESP_RST_POWERON:  Serial.println("Reset: power-on"); break;
+      case ESP_RST_POWERON:  Serial.println("Reset: power-on");
+                             g_wdtResets = 0;  // Clear WDT counter on true power-cycle
+                             break;
       case ESP_RST_SW:       Serial.println("Reset: software"); break;
       case ESP_RST_PANIC:    Serial.println("Reset: panic/crash"); break;
-      case ESP_RST_INT_WDT:  Serial.println("Reset: interrupt watchdog"); break;
-      case ESP_RST_TASK_WDT: Serial.println("Reset: task watchdog"); break;
-      case ESP_RST_WDT:      Serial.println("Reset: other watchdog"); break;
+      case ESP_RST_INT_WDT:  Serial.println("Reset: interrupt watchdog");
+                             g_wdtResets++;
+                             Serial.printf("WDT reset count: %lu\n", (unsigned long)g_wdtResets);
+                             break;
+      case ESP_RST_TASK_WDT: Serial.println("Reset: task watchdog");
+                             g_wdtResets++;
+                             Serial.printf("WDT reset count: %lu\n", (unsigned long)g_wdtResets);
+                             break;
+      case ESP_RST_WDT:      Serial.println("Reset: other watchdog");
+                             g_wdtResets++;
+                             Serial.printf("WDT reset count: %lu\n", (unsigned long)g_wdtResets);
+                             break;
       default:               Serial.printf("Reset: reason=%d\n", (int)reason); break;
     }
   }
@@ -1693,10 +1704,24 @@ void readBattery() {
 
   batteryPercent = constrain(batteryPercent, 0, 100);
 
+  // Apply EMA smoothing to reduce jitter in battery percentage readings
+  float rawBatPct = (float)batteryPercent;
+  if (g_batPctEma < 0.0f) {
+    g_batPctEma = rawBatPct;  // Initialize on first reading
+  } else {
+    g_batPctEma = BAT_EMA_ALPHA * rawBatPct + (1.0f - BAT_EMA_ALPHA) * g_batPctEma;
+  }
+  batteryPercent = (int)(g_batPctEma + 0.5f);  // Round to nearest integer for display
+
   // P102: Use power management chip API for reliable charging detection.
   // M5.Power.isCharging() queries the AXP192/AXP2101 PMIC charging status bit.
   // Fall back to voltage heuristic (>4.2V) if the API returns indeterminate.
   batteryCharging = M5.Power.isCharging();
+
+  // Read ESP32 internal die temperature (typically 30-70°C under load)
+#ifdef CONFIG_IDF_TARGET_ESP32
+  g_mcuTemp = temperatureRead();
+#endif
 }
 
 // ===================== DISPLAY (P208: Compact 4-line layout) =====================

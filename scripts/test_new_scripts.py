@@ -297,8 +297,14 @@ class TestDeviceCalibrationCheckNoisy:
 
         import device_calibration_check as dcc
 
+        # Use --idle-ppv 0.05 so all 150 rows count as idle (both 0.0 and 0.02
+        # are below 0.05), giving enough samples and forcing noise detection.
         with pytest.raises(SystemExit) as exc_info:
-            dcc.main(["--data-dir", str(tmp_path), "--min-samples", "100"])
+            dcc.main([
+                "--data-dir", str(tmp_path),
+                "--min-samples", "100",
+                "--idle-ppv", "0.05",
+            ])
         assert exc_info.value.code == 1
 
     def test_noisy_device_status_is_recalibrate(self, tmp_path):
