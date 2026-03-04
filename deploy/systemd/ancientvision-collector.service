@@ -1,0 +1,47 @@
+[Unit]
+Description=AncientVision Data Collector
+Documentation=https://github.com/thodoris-0/AncientVisionDevice/blob/master/docs/deployment.md
+After=network.target docker.service
+Requires=docker.service
+ConditionFileNotEmpty=/opt/ancientvision/docker-compose.collect.yml
+
+[Service]
+Type=simple
+User=ancientvision
+Group=docker
+WorkingDirectory=/opt/ancientvision
+
+# Pre-flight checks
+ExecStartPre=/usr/bin/docker compose -f docker-compose.collect.yml config --quiet
+ExecStartPre=/bin/bash -c 'test -d ./data || mkdir -p ./data'
+
+# Main service
+ExecStart=/usr/bin/docker compose -f docker-compose.collect.yml up
+ExecStop=/usr/bin/docker compose -f docker-compose.collect.yml down
+
+# Recovery policy
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Resource limits
+MemoryLimit=1G
+CPUQuota=50%
+CPUAccounting=true
+MemoryAccounting=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ancientvision-collector
+
+# Timeout for graceful shutdown
+TimeoutStopSec=60
+
+# Environment
+Environment="COMPOSE_PROJECT_NAME=ancientvision"
+EnvironmentFile=-/opt/ancientvision/.env
+
+[Install]
+WantedBy=multi-user.target

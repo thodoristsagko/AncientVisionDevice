@@ -1,0 +1,39 @@
+[Unit]
+Description=AncientVision ML Model Trainer
+Documentation=https://github.com/thodoris-0/AncientVisionDevice/blob/master/docs/ml-architecture.md
+After=network.target docker.service ancientvision-collector.service
+Requires=docker.service
+ConditionFileNotEmpty=/opt/ancientvision/docker-compose.train.yml
+
+[Service]
+Type=oneshot
+User=ancientvision
+Group=docker
+WorkingDirectory=/opt/ancientvision
+
+# Pre-flight checks
+ExecStartPre=/usr/bin/docker compose -f docker-compose.train.yml config --quiet
+
+# Main service: runs trainer once, exits
+ExecStart=/usr/bin/docker compose -f docker-compose.train.yml run --rm trainer
+
+# Resource limits (training is CPU-intensive)
+MemoryLimit=4G
+CPUQuota=200%
+CPUAccounting=true
+MemoryAccounting=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ancientvision-trainer
+
+# Timeout: allow 2 hours for training
+TimeoutStartSec=7200
+
+# Environment
+Environment="COMPOSE_PROJECT_NAME=ancientvision"
+EnvironmentFile=-/opt/ancientvision/.env
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,46 @@
+[Unit]
+Description=AncientVision Monitoring Stack
+Documentation=https://github.com/thodoris-0/AncientVisionDevice/blob/master/docs/deployment.md
+After=network.target docker.service
+Requires=docker.service
+ConditionFileNotEmpty=/opt/ancientvision/docker-compose.monitoring.yml
+
+[Service]
+Type=simple
+User=ancientvision
+Group=docker
+WorkingDirectory=/opt/ancientvision
+
+# Pre-flight checks
+ExecStartPre=/usr/bin/docker compose -f docker-compose.monitoring.yml config --quiet
+
+# Main service
+ExecStart=/usr/bin/docker compose -f docker-compose.monitoring.yml up
+ExecStop=/usr/bin/docker compose -f docker-compose.monitoring.yml down
+
+# Recovery policy
+Restart=on-failure
+RestartSec=15
+StartLimitInterval=600
+StartLimitBurst=3
+
+# Resource limits
+MemoryLimit=512M
+CPUQuota=50%
+CPUAccounting=true
+MemoryAccounting=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ancientvision-monitor
+
+# Timeout for graceful shutdown
+TimeoutStopSec=30
+
+# Environment
+Environment="COMPOSE_PROJECT_NAME=ancientvision"
+EnvironmentFile=-/opt/ancientvision/.env
+
+[Install]
+WantedBy=multi-user.target
