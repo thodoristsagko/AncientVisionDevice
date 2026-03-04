@@ -55,6 +55,9 @@ class VibrationDspService {
   _CacheKey? _lastCacheKey;
   DspResult? _lastCachedResult;
 
+  // Signal quality tracking
+  int _clipCount = 0;
+
   // PPV noise floor calibration (same approach as firmware)
   double _ppvNoiseFloor = 0.0;
   bool _ppvCalibrated = false;
@@ -144,6 +147,15 @@ class VibrationDspService {
     final cacheKey = _CacheKey.from(accelX, accelY, accelZ);
     if (_lastCachedResult != null && _lastCacheKey == cacheKey) {
       return _lastCachedResult!;
+    }
+
+    // Count clipped samples (|value| > 15.3 g ≈ 150 m/s²) on any axis.
+    // The IMU range is ±16 g; samples above ~95% of FS are treated as saturated.
+    _clipCount = 0;
+    for (int i = 0; i < windowSize; i++) {
+      if (accelX[i].abs() > 15.0 || accelY[i].abs() > 15.0 || accelZ[i].abs() > 15.0) {
+        _clipCount++;
+      }
     }
 
     // 1. Compute magnitude signal
@@ -533,6 +545,49 @@ class VibrationDspService {
     return [peakVelX, peakVelY, peakVelZ].reduce((a, b) => a > b ? a : b);
   }
 
+  /// Signal quality score in the range 0.0–1.0.
+  ///
+  /// 1.0 = clean, non-saturated signal with non-Gaussian content (kurtosis > 1).
+  /// 0.0 = heavily clipped or no result available.
+  ///
+  /// Clipping (any sample ≥ 15 g, ~95% of the ±16 g FS range) is penalised
+  /// heavily because saturated samples corrupt FFT and kurtosis estimates.
+  /// When the signal is clean the score is boosted by excess kurtosis: a flat
+  /// Gaussian noise floor (kurtosis ≈ 0) scores 0.5 while a highly impulsive
+  /// signal (kurtosis ≥ 9) scores 1.0.
+  double get signalQuality {
+    if (_lastCachedResult == null) return 0.0;
+    if (_clipCount > 0) {
+      // Each clipped sample degrades quality; cap at 0.5 ceiling.
+      return (1.0 - (_clipCount / windowSize)).clamp(0.0, 1.0) * 0.5;
+    }
+    // Reward non-trivial signal via excess kurtosis (kurtosis > 1 → non-flat).
+    final kScore = ((_lastCachedResult!.kurtosis - 1.0) / 9.0).clamp(0.0, 1.0);
+    return 0.5 + kScore * 0.5;
+  }
+
+  /// True when more than 10 samples in the most recent window were saturated.
+  ///
+  /// At that point kurtosis and spectral estimates are unreliable and the
+  /// caller should discard the [DspResult] and alert the user.
+  bool get isSignalSaturated => _clipCount > 10;
+
+  /// Estimated signal-to-noise ratio in dB, derived from the ratio of RMS
+  /// amplitude to an approximated noise floor.
+  ///
+  /// The "noise floor" is approximated as `rms / kurtosis` — low kurtosis
+  /// signals are closer to Gaussian noise, so the effective SNR is low.
+  /// Range is 0–40 dB. Returns 0 when no result is available.
+  double get snrDb {
+    if (_lastCachedResult == null) return 0.0;
+    final signal = _lastCachedResult!.rms;
+    if (signal <= 0) return 0.0;
+    final k = _lastCachedResult!.kurtosis.clamp(1.0, 10.0);
+    // noise ≈ rms / k; ratio = signal / noise = k
+    final ratio = k;
+    return (20.0 * log(ratio) / ln10).clamp(0.0, 40.0);
+  }
+
   /// Reset running accumulators (e.g. when reconnecting)
   void reset() {
     ariasIntensity = 0.0;
@@ -544,6 +599,7 @@ class VibrationDspService {
     _calibrationSum = 0.0;
     _lastCacheKey = null;
     _lastCachedResult = null;
+    _clipCount = 0;
   }
 
   /// Clean up resources
@@ -608,6 +664,21 @@ class DspResult {
     this.mfRatio = 0.0,
     this.hfRatio = 0.0,
   });
+
+  /// Human-readable quality label based on excess kurtosis and RMS energy.
+  ///
+  /// | Label     | Condition                              |
+  /// |-----------|----------------------------------------|
+  /// | Excellent | kurtosis > 5 and rms > 0.01            |
+  /// | Good      | kurtosis > 2                           |
+  /// | Fair      | kurtosis > 1.5                         |
+  /// | Poor      | otherwise (flat / near-zero signal)    |
+  String get qualityLabel {
+    if (kurtosis > 5.0 && rms > 0.01) return 'Excellent';
+    if (kurtosis > 2.0) return 'Good';
+    if (kurtosis > 1.5) return 'Fair';
+    return 'Poor';
+  }
 
   /// Convert to feature map for anomaly detection pipeline.
   Map<String, double> toFeatureMap({
