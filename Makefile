@@ -7,7 +7,8 @@
         test simulate backup logs clean report drift validate-config quality-check \
         label replay schedule playback sync annotate analyze apk quantize benchmark load-test \
         validate-data e2e status health augment online-learn tune onnx \
-        live-dashboard ab-test augmentation-report
+        live-dashboard ab-test augmentation-report \
+        serve-model session-report calibration-check
 
 # ---------------------------------------------------------------------------
 # Help
@@ -64,6 +65,10 @@ help:
 	@echo "  live-dashboard        Live curses terminal dashboard (polls collector API)"
 	@echo "  ab-test               A/B compare two .tflite models (set MODEL_A= MODEL_B=)"
 	@echo "  augmentation-report   Class distribution + augmentation recommendations"
+	@echo ""
+	@echo "  serve-model           Start lightweight HTTP model inference server (port 8766)"
+	@echo "  session-report        Generate Markdown report from a session CSV (set SESSION_CSV=)"
+	@echo "  calibration-check     Verify device calibration quality from field CSVs"
 	@echo ""
 
 # ---------------------------------------------------------------------------
@@ -357,3 +362,34 @@ ab-test:
 augmentation-report:
 	@echo "==> Generating data augmentation report..."
 	python scripts/data_augmentation_report.py --data-dir ./data/field
+
+# ---------------------------------------------------------------------------
+# Model inference server / session report / calibration check
+# ---------------------------------------------------------------------------
+
+serve-model:
+	@echo "==> Starting model inference server on port 8766..."
+	python scripts/model_serve.py --assets-dir app/assets/ml
+
+session-report:
+	@if [ -z "$(SESSION_CSV)" ]; then \
+		echo ""; \
+		echo "Usage:  make session-report SESSION_CSV=path/to/session.csv"; \
+		echo ""; \
+		echo "Options (optional):"; \
+		echo "  OUTPUT=report.md        Output file (default: stdout)"; \
+		echo "  FORMAT=md|html          Output format (default: md)"; \
+		echo "  SITE_NAME='Paros Dig'   Site name label in report"; \
+		echo ""; \
+		exit 1; \
+	fi
+	@echo "==> Generating session report from: $(SESSION_CSV)"
+	python scripts/session_report.py \
+		--session-csv "$(SESSION_CSV)" \
+		$(if $(OUTPUT),--output "$(OUTPUT)",) \
+		$(if $(FORMAT),--format "$(FORMAT)",) \
+		$(if $(SITE_NAME),--site-name "$(SITE_NAME)",)
+
+calibration-check:
+	@echo "==> Checking device calibration quality from ./data/field..."
+	python scripts/device_calibration_check.py --data-dir ./data/field
