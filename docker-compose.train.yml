@@ -18,10 +18,16 @@ services:
       - DATA_DIR=/workspace/data
       - TRIGGER_THRESHOLD=100
       - POLL_INTERVAL=60
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -f /workspace/data/.watcher_status.json && find /workspace/data/.watcher_status.json -mmin -3 | grep -q ."]
+      interval: 60s
+      timeout: 5s
+      retries: 2
+      start_period: 30s
     deploy:
       resources:
         limits:
-          cpus: '0.25'
+          cpus: '0.30'
           memory: 128M
         reservations:
           cpus: '0.05'
@@ -50,8 +56,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.0'
-          memory: 1G
+          cpus: '2.0'
+          memory: 2G
         reservations:
           cpus: '0.50'
           memory: 512M
