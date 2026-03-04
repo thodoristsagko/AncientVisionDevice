@@ -56,6 +56,33 @@ String _typeLabel(String type) {
   }
 }
 
+/// Smart relative timestamp — replaces the simpler timeAgo from NotificationItem.
+String _formatTimestamp(DateTime timestamp) {
+  final now = DateTime.now();
+  final diff = now.difference(timestamp);
+
+  if (diff.inSeconds < 60) return 'Just now';
+  if (diff.inMinutes < 60) {
+    final m = diff.inMinutes;
+    return '$m minute${m == 1 ? '' : 's'} ago';
+  }
+  if (diff.inHours < 24) {
+    final h = diff.inHours;
+    return '$h hour${h == 1 ? '' : 's'} ago';
+  }
+
+  // Older than 24h — show "MMM d, HH:mm" using manual month abbreviation
+  // (no intl/date_format dependency needed)
+  const months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  final month = months[timestamp.month - 1];
+  final hour = timestamp.hour.toString().padLeft(2, '0');
+  final minute = timestamp.minute.toString().padLeft(2, '0');
+  return '$month ${timestamp.day}, $hour:$minute';
+}
+
 // ---------------------------------------------------------------------------
 // Screen
 // ---------------------------------------------------------------------------
@@ -71,6 +98,12 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   List<NotificationItem> _notifications = [];
   bool _isLoading = true;
   bool _notificationsEnabled = true;
+
+  /// Filter selection: 'all' | 'critical' | 'warning' | 'info' | 'success'
+  String _selectedFilter = 'all';
+
+  /// Timestamps (ISO-8601 strings) of items marked as read this session.
+  final Set<String> _readKeys = {};
 
   // Colour constants (matching the teal/Material theme)
   static const _bgColor = Color(0xFF1C2523);
@@ -137,9 +170,76 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
 
     if (confirmed == true) {
       await NotificationService().clearNotificationHistory();
-      if (mounted) setState(() => _notifications = []);
+      if (mounted) {
+        setState(() {
+          _notifications = [];
+          _readKeys.clear();
+        });
+      }
     }
   }
+
+  /// Mark every visible (filtered) notification as read in local UI state.
+  void _markAllRead() {
+    final filtered = _filteredNotifications;
+    if (filtered.isEmpty) return;
+
+    setState(() {
+      for (final n in filtered) {
+        _readKeys.add(n.timestamp.toIso8601String());
+      }
+    });
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('All marked as read'),
+        duration: Duration(seconds: 2),
+        backgroundColor: Color(0xFF388E3C),
+      ),
+    );
+  }
+
+  /// Remove a single notification from the in-memory list.
+  ///
+  /// The backing SharedPreferences store is left intact; the item will
+  /// reappear on next cold-start.  Full persistence of individual removal
+  /// would require a removeNotification API on NotificationService which
+  /// is not currently exposed — this session-scoped approach is sufficient
+  /// for the swipe-to-dismiss UX requirement.
+  void _deleteNotification(NotificationItem item) {
+    setState(() {
+      _notifications.remove(item);
+      _readKeys.remove(item.timestamp.toIso8601String());
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Filtering
+  // ---------------------------------------------------------------------------
+
+  /// Returns true when a notification's type matches the active filter.
+  bool _matchesFilter(NotificationItem n) {
+    switch (_selectedFilter) {
+      case 'critical':
+        return n.type == 'critical';
+      case 'warning':
+        return n.type == 'warning' || n.type == 'error';
+      case 'info':
+        return n.type != 'critical' &&
+            n.type != 'warning' &&
+            n.type != 'error' &&
+            n.type != 'success' &&
+            n.type != 'achievement';
+      case 'success':
+        return n.type == 'success' || n.type == 'achievement';
+      default: // 'all'
+        return true;
+    }
+  }
+
+  List<NotificationItem> get _filteredNotifications =>
+      _notifications.where(_matchesFilter).toList();
 
   // --------------------------------------------------------------------------
   // Build
@@ -147,6 +247,11 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final filtered = _filteredNotifications;
+    final hasAnyUnread = filtered.any(
+      (n) => !_readKeys.contains(n.timestamp.toIso8601String()),
+    );
+
     return Scaffold(
       backgroundColor: _bgColor,
       appBar: AppBar(
@@ -154,6 +259,14 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         title: const Text('Notifications', style: TextStyle(color: Colors.white)),
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
+          // Mark all read
+          if (filtered.isNotEmpty && hasAnyUnread)
+            IconButton(
+              tooltip: 'Mark all as read',
+              icon: const Icon(Icons.done_all),
+              onPressed: _markAllRead,
+            ),
+          // Clear all
           if (_notifications.isNotEmpty)
             IconButton(
               tooltip: 'Clear all notifications',
@@ -166,6 +279,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         children: [
           _buildToggleRow(),
           _buildSummaryBanner(),
+          _buildFilterChips(),
           Expanded(child: _buildNotificationList()),
         ],
       ),
@@ -257,53 +371,239 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     );
   }
 
-  // Main notification list (or loading / empty state)
+  // ---------------------------------------------------------------------------
+  // Filter chips row
+  // ---------------------------------------------------------------------------
+
+  static const _filters = [
+    ('all', 'All', Icons.list_rounded),
+    ('critical', 'Critical', Icons.crisis_alert),
+    ('warning', 'Warning', Icons.warning_amber_rounded),
+    ('info', 'Info', Icons.info_outline),
+    ('success', 'Success', Icons.check_circle_outline),
+  ];
+
+  Widget _buildFilterChips() {
+    return Container(
+      height: 44,
+      margin: const EdgeInsets.only(top: 8),
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        children: _filters.map((f) {
+          final key = f.$1;
+          final label = f.$2;
+          final icon = f.$3;
+          final selected = _selectedFilter == key;
+
+          return Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: FilterChip(
+              selected: selected,
+              avatar: Icon(
+                icon,
+                size: 16,
+                color: selected ? Colors.black87 : Colors.white54,
+              ),
+              label: Text(
+                label,
+                style: TextStyle(
+                  color: selected ? Colors.black87 : Colors.white70,
+                  fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+                  fontSize: 12,
+                ),
+              ),
+              selectedColor: _accent,
+              backgroundColor: Colors.white.withAlpha(18),
+              checkmarkColor: Colors.black87,
+              side: BorderSide(
+                color: selected ? _accent : Colors.white.withAlpha(40),
+              ),
+              onSelected: (_) => setState(() => _selectedFilter = key),
+              showCheckmark: false,
+              visualDensity: VisualDensity.compact,
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Notification list
+  // ---------------------------------------------------------------------------
+
   Widget _buildNotificationList() {
     if (_isLoading) {
       return const Center(child: CircularProgressIndicator(color: _accent));
     }
 
-    if (_notifications.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.notifications_off_outlined, size: 64, color: Colors.white.withAlpha(60)),
-            const SizedBox(height: 16),
-            const Text(
-              'No notifications yet',
-              style: TextStyle(color: Colors.white54, fontSize: 16),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Safety alerts, BLE events and processing results\nwill appear here.',
-              style: TextStyle(color: Colors.white30, fontSize: 13),
-              textAlign: TextAlign.center,
-            ),
-          ],
-        ),
-      );
+    final filtered = _filteredNotifications;
+
+    if (filtered.isEmpty) {
+      return _buildEmptyState();
     }
 
     return ListView.builder(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      itemCount: _notifications.length,
-      itemBuilder: (context, index) => _buildNotificationTile(_notifications[index]),
+      itemCount: filtered.length,
+      itemBuilder: (context, index) {
+        final notification = filtered[index];
+        return _buildDismissibleTile(notification);
+      },
     );
   }
 
-  Widget _buildNotificationTile(NotificationItem notification) {
+  // ---------------------------------------------------------------------------
+  // Empty state
+  // ---------------------------------------------------------------------------
+
+  Widget _buildEmptyState() {
+    final IconData icon;
+    final String headline;
+    final String sub;
+
+    if (_notifications.isEmpty) {
+      // Truly empty list
+      icon = Icons.check_circle_outline;
+      headline = "You're all caught up!";
+      sub = 'Safety alerts, BLE events and processing results\nwill appear here.';
+    } else {
+      // List is non-empty but filter matches nothing
+      switch (_selectedFilter) {
+        case 'critical':
+          icon = Icons.crisis_alert;
+          headline = 'No critical notifications';
+          sub = 'Critical safety alerts will appear here.';
+        case 'warning':
+          icon = Icons.warning_amber_rounded;
+          headline = 'No warning notifications';
+          sub = 'Warnings and errors will appear here.';
+        case 'success':
+          icon = Icons.check_circle_outline;
+          headline = 'No success notifications';
+          sub = 'Completed operations will appear here.';
+        case 'info':
+          icon = Icons.info_outline;
+          headline = 'No info notifications';
+          sub = 'Informational events will appear here.';
+        default:
+          icon = Icons.notifications_off_outlined;
+          headline = 'No notifications';
+          sub = 'Nothing to show.';
+      }
+    }
+
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 64, color: Colors.white.withAlpha(60)),
+          const SizedBox(height: 16),
+          Text(
+            headline,
+            style: const TextStyle(color: Colors.white54, fontSize: 16),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            sub,
+            style: const TextStyle(color: Colors.white30, fontSize: 13),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Dismissible tile
+  // ---------------------------------------------------------------------------
+
+  Widget _buildDismissibleTile(NotificationItem notification) {
+    final key = notification.timestamp.toIso8601String();
+
+    return Dismissible(
+      key: ValueKey(key),
+      // Swipe right → mark as read (green background)
+      background: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFF388E3C),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.only(left: 20),
+        child: const Icon(Icons.check, color: Colors.white, size: 28),
+      ),
+      // Swipe left → delete (red background)
+      secondaryBackground: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFFD32F2F),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 20),
+        child: const Icon(Icons.delete_outline, color: Colors.white, size: 28),
+      ),
+      confirmDismiss: (direction) async {
+        if (direction == DismissDirection.startToEnd) {
+          // Mark as read — do not remove tile from list
+          setState(() => _readKeys.add(key));
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Marked as read'),
+                duration: Duration(seconds: 2),
+              ),
+            );
+          }
+          return false; // cancel the dismissal — tile stays in place
+        }
+        // Left swipe → delete: allow dismissal
+        return true;
+      },
+      onDismissed: (direction) {
+        // Only reaches here for left swipe (delete), since right swipe
+        // returns false from confirmDismiss above.
+        _deleteNotification(notification);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text('Notification deleted'),
+              duration: const Duration(seconds: 3),
+              action: SnackBarAction(
+                label: 'Undo',
+                textColor: _accent,
+                onPressed: _loadNotifications,
+              ),
+            ),
+          );
+        }
+      },
+      child: _buildNotificationTile(notification, key),
+    );
+  }
+
+  Widget _buildNotificationTile(NotificationItem notification, String key) {
     final color = _typeColor(notification.type);
     final icon = _typeIcon(notification.type);
     final label = _typeLabel(notification.type);
     final isCritical = notification.type == 'critical';
+    final isRead = _readKeys.contains(key);
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       decoration: BoxDecoration(
-        color: color.withAlpha(isCritical ? 20 : 13),
+        color: isRead
+            ? Colors.white.withAlpha(8)
+            : color.withAlpha(isCritical ? 20 : 13),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withAlpha(isCritical ? 120 : 60)),
+        border: Border.all(
+          color: isRead
+              ? Colors.white.withAlpha(20)
+              : color.withAlpha(isCritical ? 120 : 60),
+        ),
       ),
       child: ListTile(
         contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
@@ -311,10 +611,10 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           width: 40,
           height: 40,
           decoration: BoxDecoration(
-            color: color.withAlpha(40),
+            color: isRead ? Colors.white.withAlpha(15) : color.withAlpha(40),
             borderRadius: BorderRadius.circular(8),
           ),
-          child: Icon(icon, color: color, size: 20),
+          child: Icon(icon, color: isRead ? Colors.white38 : color, size: 20),
         ),
         title: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
@@ -323,8 +623,8 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
               child: Text(
                 notification.title,
                 style: TextStyle(
-                  color: Colors.white,
-                  fontWeight: isCritical ? FontWeight.bold : FontWeight.w600,
+                  color: isRead ? Colors.white38 : Colors.white,
+                  fontWeight: isCritical && !isRead ? FontWeight.bold : FontWeight.w600,
                   fontSize: 14,
                 ),
               ),
@@ -334,14 +634,30 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
               decoration: BoxDecoration(
-                color: color.withAlpha(40),
+                color: isRead ? Colors.white.withAlpha(15) : color.withAlpha(40),
                 borderRadius: BorderRadius.circular(6),
               ),
               child: Text(
                 label,
-                style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold),
+                style: TextStyle(
+                  color: isRead ? Colors.white30 : color,
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
             ),
+            // Unread dot
+            if (!isRead) ...[
+              const SizedBox(width: 6),
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: color,
+                  shape: BoxShape.circle,
+                ),
+              ),
+            ],
           ],
         ),
         subtitle: Column(
@@ -350,11 +666,14 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
             const SizedBox(height: 4),
             Text(
               notification.body,
-              style: const TextStyle(color: Colors.white60, fontSize: 13),
+              style: TextStyle(
+                color: isRead ? Colors.white30 : Colors.white60,
+                fontSize: 13,
+              ),
             ),
             const SizedBox(height: 4),
             Text(
-              notification.timeAgo,
+              _formatTimestamp(notification.timestamp),
               style: const TextStyle(color: Colors.white38, fontSize: 11),
             ),
           ],
