@@ -42,6 +42,17 @@ const String _kScanTimeoutSecondsKey = 'scanTimeoutSeconds';
 const String _kAutoUploadKey = 'autoUpload';
 const String _kCollectorUrlKey = 'collectorUrl';
 
+// Safety threshold prefs keys
+const String _kPpvWarningThresholdKey = 'ppv_warning_threshold';
+const String _kPpvCriticalThresholdKey = 'ppv_critical_threshold';
+
+// Data & Privacy prefs keys
+const String _kAutoUploadCloudKey = 'auto_upload';
+const String _kRetainSessionDataKey = 'retain_session_data';
+
+// Heartbeat prefs key
+const String _kHeartbeatIntervalSecondsKey = 'heartbeat_interval_seconds';
+
 /// Settings Screen - Simplified for essential features
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -90,6 +101,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // Data management settings
   int _dataRetentionDays = 30;
   String _exportFormat = 'csv';
+
+  // Safety threshold settings
+  double _ppvWarningThreshold = 0.3;
+  double _ppvCriticalThreshold = 1.0;
+
+  // Data & Privacy settings
+  bool _autoUploadCloud = false;
+  bool _retainSessionData = true;
+
+  // Heartbeat interval
+  int _heartbeatIntervalSeconds = 30;
 
   @override
   void initState() {
@@ -142,6 +164,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // Data management settings
     _dataRetentionDays = prefs.getInt(_kDataRetentionDaysKey) ?? 30;
     _exportFormat = prefs.getString(_kExportFormatKey) ?? 'csv';
+
+    // Safety threshold settings
+    _ppvWarningThreshold = prefs.getDouble(_kPpvWarningThresholdKey) ?? 0.3;
+    _ppvCriticalThreshold = prefs.getDouble(_kPpvCriticalThresholdKey) ?? 1.0;
+
+    // Data & Privacy settings
+    _autoUploadCloud = prefs.getBool(_kAutoUploadCloudKey) ?? false;
+    _retainSessionData = prefs.getBool(_kRetainSessionDataKey) ?? true;
+
+    // Heartbeat interval
+    _heartbeatIntervalSeconds = prefs.getInt(_kHeartbeatIntervalSecondsKey) ?? 30;
   }
 
   Future<void> _saveVibmonSettings() async {
@@ -267,6 +300,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ]),
                     const SizedBox(height: AppSpacing.xxl),
 
+                    // === SAFETY THRESHOLDS ===
+                    _buildSection('Safety Thresholds', Icons.warning_amber_rounded, [
+                      _buildPpvWarningThresholdTile(),
+                      const Divider(height: 1, color: Colors.white12),
+                      _buildPpvCriticalThresholdTile(),
+                    ]),
+                    const SizedBox(height: AppSpacing.xxl),
+
                     // === NOTIFICATIONS ===
                     _buildSection('Notifications', Icons.notifications_active, [
                       _buildNotificationsEnabledTile(),
@@ -286,6 +327,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       _buildAutoConnectTile(),
                       const Divider(height: 1, color: Colors.white12),
                       _buildScanTimeoutTile(),
+                      const Divider(height: 1, color: Colors.white12),
+                      _buildHeartbeatIntervalTile(),
                     ]),
                     const SizedBox(height: AppSpacing.xxl),
 
@@ -319,6 +362,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
                     // === DATA & PRIVACY ===
                     _buildSection('Data & Privacy', Icons.privacy_tip, [
+                      _buildAutoUploadCloudTile(),
+                      const Divider(height: 1, color: Colors.white12),
+                      _buildRetainSessionDataTile(),
+                      const Divider(height: 1, color: Colors.white12),
                       _buildExportSettingsTile(),
                       const Divider(height: 1, color: Colors.white12),
                       _buildClearSessionHistoryTile(),
@@ -1275,6 +1322,97 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  // =========================================================================
+  // SAFETY THRESHOLD TILES
+  // =========================================================================
+
+  Widget _buildPpvWarningThresholdTile() {
+    return ListTile(
+      leading: const Icon(Icons.warning_amber_rounded, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('Warning PPV threshold', style: AppTextStyles.body),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '${_ppvWarningThreshold.toStringAsFixed(2)} mm/s  (range 0.10 – 2.00)',
+            style: AppTextStyles.subtitleSmall,
+          ),
+          Slider(
+            value: _ppvWarningThreshold.clamp(0.1, 2.0),
+            min: 0.1,
+            max: 2.0,
+            divisions: 19,
+            activeColor: const Color(0xFFFF9800),
+            inactiveColor: AppColors.cardBorder,
+            onChanged: (value) async {
+              setState(() => _ppvWarningThreshold = value);
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setDouble(_kPpvWarningThresholdKey, value);
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPpvCriticalThresholdTile() {
+    return ListTile(
+      leading: const Icon(Icons.crisis_alert, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('Critical PPV threshold', style: AppTextStyles.body),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '${_ppvCriticalThreshold.toStringAsFixed(2)} mm/s  (range 0.50 – 5.00)',
+            style: AppTextStyles.subtitleSmall,
+          ),
+          Slider(
+            value: _ppvCriticalThreshold.clamp(0.5, 5.0),
+            min: 0.5,
+            max: 5.0,
+            divisions: 45,
+            activeColor: AppColors.error,
+            inactiveColor: AppColors.cardBorder,
+            onChanged: (value) async {
+              setState(() => _ppvCriticalThreshold = value);
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setDouble(_kPpvCriticalThresholdKey, value);
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  // =========================================================================
+  // HEARTBEAT INTERVAL TILE
+  // =========================================================================
+
+  Widget _buildHeartbeatIntervalTile() {
+    const options = [5, 15, 30, 60];
+    return ListTile(
+      leading: const Icon(Icons.favorite_border, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('Heartbeat interval', style: AppTextStyles.body),
+      subtitle: const Text('How often the device sends a keepalive ping', style: AppTextStyles.subtitleSmall),
+      trailing: DropdownButton<int>(
+        value: options.contains(_heartbeatIntervalSeconds) ? _heartbeatIntervalSeconds : 30,
+        dropdownColor: AppColors.primaryDark,
+        underline: const SizedBox.shrink(),
+        style: AppTextStyles.body,
+        items: options
+            .map((s) => DropdownMenuItem(value: s, child: Text('${s}s')))
+            .toList(),
+        onChanged: (value) async {
+          if (value != null) {
+            setState(() => _heartbeatIntervalSeconds = value);
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setInt(_kHeartbeatIntervalSecondsKey, value);
+          }
+        },
+      ),
+    );
+  }
+
   Widget _buildAlertCooldownTile() {
     const options = [1, 5, 10, 30];
     return ListTile(
@@ -1303,6 +1441,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // =========================================================================
   // DATA & PRIVACY TILES
   // =========================================================================
+
+  Widget _buildAutoUploadCloudTile() {
+    return SwitchListTile(
+      secondary: const Icon(Icons.cloud_upload, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('Auto-upload to cloud', style: AppTextStyles.body),
+      subtitle: const Text('Automatically sync session data to cloud when connected', style: AppTextStyles.subtitleSmall),
+      value: _autoUploadCloud,
+      activeColor: AppColors.accent,
+      onChanged: (value) async {
+        setState(() => _autoUploadCloud = value);
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool(_kAutoUploadCloudKey, value);
+      },
+    );
+  }
+
+  Widget _buildRetainSessionDataTile() {
+    return SwitchListTile(
+      secondary: const Icon(Icons.storage, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('Keep data after session ends', style: AppTextStyles.body),
+      subtitle: const Text('Retain vibration recordings on device after the session closes', style: AppTextStyles.subtitleSmall),
+      value: _retainSessionData,
+      activeColor: AppColors.accent,
+      onChanged: (value) async {
+        setState(() => _retainSessionData = value);
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool(_kRetainSessionDataKey, value);
+      },
+    );
+  }
 
   Widget _buildExportSettingsTile() {
     return ListTile(
@@ -1625,6 +1793,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
               await prefs.setString(_kCollectorUrlKey, 'http://192.168.1.100:8765');
               await prefs.setInt(_kDataRetentionDaysKey, 30);
               await prefs.setString(_kExportFormatKey, 'csv');
+              await prefs.setDouble(_kPpvWarningThresholdKey, 0.3);
+              await prefs.setDouble(_kPpvCriticalThresholdKey, 1.0);
+              await prefs.setBool(_kAutoUploadCloudKey, false);
+              await prefs.setBool(_kRetainSessionDataKey, true);
+              await prefs.setInt(_kHeartbeatIntervalSecondsKey, 30);
               if (mounted) {
                 setState(() {
                   _notificationsEnabled = true;
@@ -1638,6 +1811,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   _collectorUrl = 'http://192.168.1.100:8765';
                   _dataRetentionDays = 30;
                   _exportFormat = 'csv';
+                  _ppvWarningThreshold = 0.3;
+                  _ppvCriticalThreshold = 1.0;
+                  _autoUploadCloud = false;
+                  _retainSessionData = true;
+                  _heartbeatIntervalSeconds = 30;
                 });
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text('Settings reset to defaults', style: AppTextStyles.body)),

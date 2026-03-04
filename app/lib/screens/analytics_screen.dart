@@ -29,6 +29,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
   List<DailyStats> _weeklyStats = [];
   List<DailyStats> _monthlyStats = [];
   List<Map<String, dynamic>> _allFindings = [];
+  // ignore: prefer_final_fields
   int _selectedPeriod = 0; // 0: Week, 1: Month, 2: All Time
   late AnimationController _animationController;
   late Animation<double> _fadeAnimation;
@@ -57,6 +58,24 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
   int _totalReadings = 0;
   double _alertRate = 0.0;
   Duration? _lastSessionDuration;
+
+  // Date range filter: 0=Today, 1=Last 7 days, 2=Last 30 days, 3=Custom
+  // ignore: prefer_final_fields
+  int _dateRangeIndex = 1;
+  DateTimeRange? _customRange;
+
+  // Events by hour (24 buckets, index 0=midnight)
+  // ignore: unused_field
+  List<int> _eventsByHour = List.filled(24, 0);
+
+  // DIN 4150-3 compliance stats
+  // Warning threshold: 3.0 mm/s (residential), Critical: 5.0 mm/s
+  static const double _dinWarningThreshold = 3.0;
+  static const double _dinCriticalThreshold = 5.0;
+  // ignore: unused_field
+  int _dinWarningCount = 0;
+  // ignore: unused_field
+  int _dinCriticalCount = 0;
 
   @override
   void initState() {
@@ -119,6 +138,12 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
     if (_recentSessions.isNotEmpty) {
       _lastSessionDuration = _recentSessions.first.duration;
     }
+
+    // Events by hour
+    _calculateEventsByHour(alertHistory);
+
+    // DIN 4150-3 compliance counts
+    _calculateDinCompliance(alertHistory);
 
     if (mounted) {
       setState(() => _isLoading = false);
@@ -198,6 +223,92 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
         .length;
 
     _alertRate = _totalReadings > 0 ? (anomalyCount / _totalReadings) * 100 : 0.0;
+  }
+
+  /// Returns the date range for the currently selected filter.
+  DateTimeRange get _activeDateRange {
+    final now = DateTime.now();
+    switch (_dateRangeIndex) {
+      case 0: // Today
+        return DateTimeRange(
+          start: DateTime(now.year, now.month, now.day),
+          end: now,
+        );
+      case 1: // Last 7 days
+        return DateTimeRange(
+          start: now.subtract(const Duration(days: 7)),
+          end: now,
+        );
+      case 2: // Last 30 days
+        return DateTimeRange(
+          start: now.subtract(const Duration(days: 30)),
+          end: now,
+        );
+      case 3: // Custom
+        return _customRange ??
+            DateTimeRange(
+              start: now.subtract(const Duration(days: 7)),
+              end: now,
+            );
+      default:
+        return DateTimeRange(
+          start: now.subtract(const Duration(days: 7)),
+          end: now,
+        );
+    }
+  }
+
+  /// Events bucketed by hour (0–23) within the active date range.
+  void _calculateEventsByHour(List<AlertData> alertHistory) {
+    final range = _activeDateRange;
+    final buckets = List.filled(24, 0);
+    for (final e in alertHistory) {
+      if (e.timestamp.isAfter(range.start) &&
+          e.timestamp.isBefore(range.end)) {
+        buckets[e.timestamp.hour]++;
+      }
+    }
+    _eventsByHour = buckets;
+  }
+
+  /// Count alerts above DIN 4150-3 warning and critical thresholds.
+  void _calculateDinCompliance(List<AlertData> alertHistory) {
+    final range = _activeDateRange;
+    int warning = 0;
+    int critical = 0;
+    for (final e in alertHistory) {
+      if (!e.timestamp.isAfter(range.start) ||
+          !e.timestamp.isBefore(range.end)) {
+        continue;
+      }
+      if (e.ppv >= _dinCriticalThreshold) {
+        critical++;
+      } else if (e.ppv >= _dinWarningThreshold) {
+        warning++;
+      }
+    }
+    _dinWarningCount = warning;
+    _dinCriticalCount = critical;
+  }
+
+  /// Returns a short label for the selected date range.
+  // ignore: unused_element
+  String get _dateRangeLabel {
+    switch (_dateRangeIndex) {
+      case 0:
+        return 'Today';
+      case 1:
+        return 'Last 7 Days';
+      case 2:
+        return 'Last 30 Days';
+      case 3:
+        if (_customRange != null) {
+          return '${_fmtDate(_customRange!.start)} – ${_fmtDate(_customRange!.end)}';
+        }
+        return 'Custom';
+      default:
+        return 'Last 7 Days';
+    }
   }
 
   /// Get filtered stats based on selected period
@@ -973,42 +1084,91 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
   }
 
   Widget _buildPeriodFilter() {
-    final periods = ['This Week', 'This Month', 'All Time'];
-    return Container(
-      padding: const EdgeInsets.all(4),
-      decoration: BoxDecoration(
-        color: Colors.white.withAlpha(15),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Row(
-        children: List.generate(periods.length, (index) {
-          final isSelected = _selectedPeriod == index;
-          return Expanded(
-            child: GestureDetector(
-              onTap: () => setState(() => _selectedPeriod = index),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                decoration: BoxDecoration(
-                  color: isSelected
-                      ? const Color(0xFFFFC107)
-                      : Colors.transparent,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Text(
-                  periods[index],
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: isSelected ? Colors.black : Colors.white70,
-                    fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                    fontSize: 13,
+    final periods = ['Today', '7 Days', '30 Days', 'Custom'];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          padding: const EdgeInsets.all(4),
+          decoration: BoxDecoration(
+            color: Colors.white.withAlpha(15),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            children: List.generate(periods.length, (index) {
+              final isSelected = _dateRangeIndex == index;
+              return Expanded(
+                child: GestureDetector(
+                  onTap: () async {
+                    if (index == 3) {
+                      // Custom date range picker
+                      final picked = await showDateRangePicker(
+                        context: context,
+                        firstDate: DateTime(2024),
+                        lastDate: DateTime.now(),
+                        initialDateRange: _customRange ??
+                            DateTimeRange(
+                              start: DateTime.now().subtract(const Duration(days: 7)),
+                              end: DateTime.now(),
+                            ),
+                        builder: (ctx, child) => Theme(
+                          data: ThemeData.dark().copyWith(
+                            colorScheme: const ColorScheme.dark(
+                              primary: Color(0xFFFFC107),
+                              onPrimary: Colors.black,
+                              surface: Color(0xFF1C2523),
+                            ),
+                          ),
+                          child: child!,
+                        ),
+                      );
+                      if (picked != null && mounted) {
+                        setState(() {
+                          _customRange = picked;
+                          _dateRangeIndex = 3;
+                        });
+                      }
+                    } else {
+                      setState(() => _dateRangeIndex = index);
+                    }
+                  },
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    decoration: BoxDecoration(
+                      color: isSelected
+                          ? const Color(0xFFFFC107)
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      periods[index],
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: isSelected ? Colors.black : Colors.white70,
+                        fontWeight:
+                            isSelected ? FontWeight.bold : FontWeight.normal,
+                        fontSize: 12,
+                      ),
+                    ),
                   ),
                 ),
+              );
+            }),
+          ),
+        ),
+        if (_dateRangeIndex == 3 && _customRange != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              '${_fmtDate(_customRange!.start)} – ${_fmtDate(_customRange!.end)}',
+              style: const TextStyle(
+                color: Color(0xFFFFC107),
+                fontSize: 12,
               ),
             ),
-          );
-        }),
-      ),
+          ),
+      ],
     );
   }
 

@@ -121,8 +121,9 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   /// Timestamps (ISO-8601 strings) of items marked as read this session.
   final Set<String> _readKeys = {};
 
-  /// Unread count captured before clearing the badge (shown in AppBar).
-  int _unreadCountOnOpen = 0;
+  /// Live unread count — items in [_notifications] whose key is not in [_readKeys].
+  int get _liveUnreadCount =>
+      _notifications.where((n) => !_readKeys.contains(n.timestamp.toIso8601String())).length;
 
   // Colour constants (matching the teal/Material theme)
   static const _bgColor = Color(0xFF1C2523);
@@ -137,14 +138,9 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     _captureAndClearUnreadCount();
   }
 
-  /// Reads the current unread badge count, stores it for display, then
-  /// resets it — so the AppBar can show "(N unread)" on this visit.
+  /// Clear the persisted unread badge count when the screen is opened.
   Future<void> _captureAndClearUnreadCount() async {
-    final count = await NotificationService().getUnreadCount();
     await NotificationService().clearUnreadCount();
-    if (mounted) {
-      setState(() => _unreadCountOnOpen = count);
-    }
   }
 
   Future<void> _loadNotifications() async {
@@ -287,34 +283,48 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Notifications', style: TextStyle(color: Colors.white)),
-            if (_unreadCountOnOpen > 0)
-              Text(
-                '$_unreadCountOnOpen unread',
-                style: const TextStyle(
-                  color: Colors.white60,
-                  fontSize: 12,
-                  fontWeight: FontWeight.normal,
-                ),
-              ),
+            Text(
+              _liveUnreadCount > 0
+                  ? 'Notifications ($_liveUnreadCount unread)'
+                  : 'Notifications',
+              style: const TextStyle(color: Colors.white),
+            ),
           ],
         ),
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
-          // Mark all read
-          if (filtered.isNotEmpty && hasAnyUnread)
-            IconButton(
-              tooltip: 'Mark all as read',
-              icon: const Icon(Icons.done_all),
-              onPressed: _markAllRead,
-            ),
-          // Clear all
-          if (_notifications.isNotEmpty)
-            IconButton(
-              tooltip: 'Clear all notifications',
-              icon: const Icon(Icons.delete_sweep_outlined),
-              onPressed: _clearHistory,
-            ),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert, color: Colors.white),
+            color: _appBarColor,
+            onSelected: (value) {
+              if (value == 'mark_all_read') _markAllRead();
+              if (value == 'clear_all') _clearHistory();
+            },
+            itemBuilder: (ctx) => [
+              if (filtered.isNotEmpty && hasAnyUnread)
+                const PopupMenuItem(
+                  value: 'mark_all_read',
+                  child: Row(
+                    children: [
+                      Icon(Icons.done_all, color: Colors.white70, size: 20),
+                      SizedBox(width: 12),
+                      Text('Mark all as read', style: TextStyle(color: Colors.white)),
+                    ],
+                  ),
+                ),
+              if (_notifications.isNotEmpty)
+                const PopupMenuItem(
+                  value: 'clear_all',
+                  child: Row(
+                    children: [
+                      Icon(Icons.delete_sweep_outlined, color: Colors.white70, size: 20),
+                      SizedBox(width: 12),
+                      Text('Clear all notifications', style: TextStyle(color: Colors.white)),
+                    ],
+                  ),
+                ),
+            ],
+          ),
         ],
       ),
       body: Column(
@@ -671,7 +681,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: const Text('Notification deleted'),
-              duration: const Duration(seconds: 3),
+              duration: const Duration(seconds: 5),
               action: SnackBarAction(
                 label: 'Undo',
                 textColor: _accent,
