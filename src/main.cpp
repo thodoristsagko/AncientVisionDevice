@@ -1823,23 +1823,28 @@ void sendBLEData() {
   // Send simplified IMU JSON (only firmware-computed features)
   // Buffer sized for: existing fields + fw(5) + seq(10) + evtMs(10) + boots(10) + evts(10)
   //                 + cal(1) + gain(2) + chg(1) + tmp(6) + up(10) + dbg(1) + ts(12) + led(1)
-  //                 + alert_ms(10) + overhead
-  char imuData[400];
+  //                 + alert_ms(10) + bat_low(1) + mcu_tmp(5) + wdt_resets(5) + overhead
+  char imuData[450];
   uint32_t evtMs = g_evtActive ? (uint32_t)(millis() - g_evtStartMs) : 0u;
   uint32_t alertMs = (uint32_t)(millis() - g_alertStartMs);  // How long current alert level has been active
   uint32_t uptimeSec = millis() / 1000u;  // P146: device uptime in seconds
   uint32_t tsNow = (uint32_t)getCurrentEpoch(); // P199: wall-clock unix timestamp (0 if not set)
+  bool batLow = (g_batPctEma >= 0.0f) ? (g_batPctEma < 20.0f) : (batteryPercent < 20);
   int imuLen = snprintf(imuData, sizeof(imuData),
     "{\"ppv\":%.1f,\"stalta\":%.2f,\"rms\":%.4f,\"peak\":%.4f,\"crest\":%.1f,\"temp\":%.1f,\"mag\":%.4f"
     ",\"fw\":\"" FW_VERSION "\",\"seq\":%lu,\"evtMs\":%lu,\"boots\":%lu,\"evts\":%lu"
     ",\"cal\":%d,\"gain\":%d,\"chg\":%d"
-    ",\"tmp\":%.1f,\"up\":%lu,\"dbg\":%d,\"ts\":%lu,\"led\":%d,\"alert_ms\":%lu}",
+    ",\"tmp\":%.1f,\"up\":%lu,\"dbg\":%d,\"ts\":%lu,\"led\":%d,\"alert_ms\":%lu"
+    ",\"bat_low\":%d,\"mcu_tmp\":%.1f,\"wdt_resets\":%lu}",
     vibrationPPV, staLtaRatio, vibrationRMS, vibrationPeak, crestFactor, imuTemp, vibrationMagnitude,
     (unsigned long)g_seq, (unsigned long)evtMs, (unsigned long)g_bootCount, (unsigned long)g_sessionEvts,
     g_calibrating ? 1 : 0, g_highGainMode ? 16 : 4, batteryCharging ? 1 : 0,
     imuTemp, (unsigned long)uptimeSec, g_debugMode ? 1 : 0, (unsigned long)tsNow,
     g_ledState ? 1 : 0,    // P229: current LED state
-    (unsigned long)alertMs);  // How long current alert level has been active (supports P59 escalation)
+    (unsigned long)alertMs,  // How long current alert level has been active (supports P59 escalation)
+    batLow ? 1 : 0,          // Low battery warning (<20%)
+    g_mcuTemp,               // ESP32 internal die temperature
+    (unsigned long)g_wdtResets);  // Watchdog reset counter since last power-on
   // P147: Motion threshold filter — only notify if PPV changed > 0.02 mm/s
   //       or more than 5 seconds have elapsed since last notification.
   //       The characteristic value is always updated so a phone read() gets
