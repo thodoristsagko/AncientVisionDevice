@@ -48,7 +48,7 @@ dependencies:
   flutter_background_service: ^5.0.5  # Background service to keep app running
   flutter_background_service_android: ^6.2.2  # Android-specific background service
   fl_chart: ^0.66.0  # Charts for analytics visualization
-  connectivity_plus: ^5.0.2  # Network connectivity monitoring for offline indicator
+  connectivity_plus: ^6.0.0  # Network connectivity monitoring for offline indicator
   # AI & Machine Learning
   google_mlkit_image_labeling: ^0.12.0  # On-device AI image classification
   google_mlkit_object_detection: ^0.13.0  # Object detection for artifacts
