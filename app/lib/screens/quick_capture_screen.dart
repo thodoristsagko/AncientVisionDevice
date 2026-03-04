@@ -105,6 +105,7 @@ class _QuickCaptureScreenState extends State<QuickCaptureScreen> {
 
   // Capture counter
   int _captureCount = 0;
+  static const int _maxPhotos = 10;
 
   // Vibration snapshot captured at photo-take time
   _VibrationSnapshot? _vibrationSnapshot;
@@ -515,11 +516,27 @@ class _QuickCaptureScreenState extends State<QuickCaptureScreen> {
             ),
             Column(
               children: [
-                Text(
-                  'QUICK CAPTURE',
-                  style: AppTextStyles.h4.copyWith(
-                    color: Colors.white,
-                    letterSpacing: 2,
+                RichText(
+                  text: TextSpan(
+                    children: [
+                      TextSpan(
+                        text: 'QUICK CAPTURE',
+                        style: AppTextStyles.h4.copyWith(
+                          color: Colors.white,
+                          letterSpacing: 2,
+                        ),
+                      ),
+                      if (_captureCount > 0)
+                        TextSpan(
+                          text: ' ($_captureCount/$_maxPhotos)',
+                          style: AppTextStyles.caption.copyWith(
+                            color: _captureCount >= _maxPhotos
+                                ? AppColors.warning
+                                : Colors.white70,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                    ],
                   ),
                 ),
                 if (_hasGps)
@@ -528,6 +545,23 @@ class _QuickCaptureScreenState extends State<QuickCaptureScreen> {
                     children: [
                       const Icon(Icons.gps_fixed, color: AppColors.success, size: 12),
                       const SizedBox(width: 4),
+                      // GPS accuracy indicator dot
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: _gpsAccuracyColor(),
+                          boxShadow: [
+                            BoxShadow(
+                              color: _gpsAccuracyColor().withAlpha(100),
+                              blurRadius: 2,
+                              spreadRadius: 1,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 6),
                       Text(
                         _gpsCoordShort,
                         style: AppTextStyles.caption.copyWith(
@@ -730,41 +764,70 @@ class _QuickCaptureScreenState extends State<QuickCaptureScreen> {
               ),
             ),
 
-            // Capture button
-            GestureDetector(
-              onTap: _isCapturing ? null : _capturePhoto,
-              child: Container(
-                width: 80,
-                height: 80,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white, width: 4),
-                  color: _isCapturing ? Colors.grey : Colors.transparent,
-                ),
-                child: Center(
+            // Capture button (disabled when max photos reached)
+            Column(
+              children: [
+                GestureDetector(
+                  onTap: (_isCapturing || _captureCount >= _maxPhotos)
+                      ? null
+                      : _capturePhoto,
                   child: Container(
-                    width: 64,
-                    height: 64,
-                    decoration: const BoxDecoration(
+                    width: 80,
+                    height: 80,
+                    decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: Colors.white,
+                      border: Border.all(
+                        color: (_captureCount >= _maxPhotos)
+                            ? Colors.white.withAlpha(100)
+                            : Colors.white,
+                        width: 4,
+                      ),
+                      color: _isCapturing
+                          ? Colors.grey
+                          : _captureCount >= _maxPhotos
+                              ? Colors.grey.withAlpha(80)
+                              : Colors.transparent,
                     ),
-                    child: _isCapturing
-                        ? const Padding(
-                            padding: EdgeInsets.all(16),
-                            child: CircularProgressIndicator(
-                              strokeWidth: 3,
-                              color: AppColors.accent,
-                            ),
-                          )
-                        : const Icon(
-                            Icons.camera_alt,
-                            color: AppColors.accent,
-                            size: 32,
-                          ),
+                    child: Center(
+                      child: Container(
+                        width: 64,
+                        height: 64,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: (_captureCount >= _maxPhotos)
+                              ? Colors.grey.withAlpha(150)
+                              : Colors.white,
+                        ),
+                        child: _isCapturing
+                            ? const Padding(
+                                padding: EdgeInsets.all(16),
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 3,
+                                  color: AppColors.accent,
+                                ),
+                              )
+                            : Icon(
+                                Icons.camera_alt,
+                                color: (_captureCount >= _maxPhotos)
+                                    ? Colors.white54
+                                    : AppColors.accent,
+                                size: 32,
+                              ),
+                      ),
+                    ),
                   ),
                 ),
-              ),
+                if (_captureCount >= _maxPhotos) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'Max photos reached',
+                    style: AppTextStyles.caption.copyWith(
+                      color: AppColors.warning,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ],
             ),
           ],
         ),
