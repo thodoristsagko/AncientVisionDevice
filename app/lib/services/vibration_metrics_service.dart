@@ -147,12 +147,17 @@ const double _kStaLtaThreshold = 3.0;
 /// - **Trending** — 10-sample rolling average per metric; [trends] returns
 ///   "up", "down", or "stable" based on whether the current value has changed
 ///   by more than 5 % relative to that average.
+/// - **PPV trend slope** — [ppvTrend] is the least-squares slope of PPV over
+///   the last 20 samples (mm/s per second). Positive = increasing.
 /// - **Sustained exceedance** — [exceedanceDurations] tracks how long each
 ///   metric has *continuously* exceeded its threshold.
 /// - **Rate of change** — [ppvRateOfChange] is the least-squares slope of PPV
 ///   over the last 10 samples (mm/s per second).
-/// - **Session statistics** — [sessionPeakPpv], [sessionMeanPpv],
-///   [exceedanceCount]; reset with [resetSessionStats].
+/// - **Session statistics** — [sessionStats] map with min/max/mean/std/total;
+///   also [sessionPeakPpv], [sessionMeanPpv], [exceedanceCount]; reset with
+///   [resetSession] / [resetSessionStats].
+/// - **Peak detection** — [latestPeak] is the most recently detected local
+///   maximum in the PPV time series.
 /// - **Export summary** — [summary] bundles all key metrics into one map.
 ///
 /// Call [recordSample] once per incoming BLE/DSP update to advance the
@@ -165,6 +170,9 @@ class VibrationMetricsService {
   // Rolling window size for trend and rate-of-change computations.
   static const int _kWindowSize = 10;
 
+  // Window size for the dedicated PPV trend buffer (linear regression slope).
+  static const int _kTrendWindowSize = 20;
+
   // Per-metric circular history buffers (capacity = _kWindowSize).
   final List<double> _ppvHistory = [];
   final List<double> _rmsHistory = [];
@@ -174,6 +182,10 @@ class VibrationMetricsService {
   // sample in _ppvHistory. Used for slope computation.
   final List<double> _ppvTimestamps = [];
 
+  // 20-sample PPV trend buffer (with matching timestamps) for [ppvTrend].
+  final List<double> _ppvTrendHistory = [];
+  final List<double> _ppvTrendTimestamps = [];
+
   // Exceedance-start timestamps; null means metric is currently within limits.
   DateTime? _ppvExceedanceStart;
   DateTime? _rmsExceedanceStart;
@@ -181,10 +193,15 @@ class VibrationMetricsService {
 
   // Session statistics.
   double _sessionPeakPpv = 0;
+  double _sessionMinPpv = double.infinity;
   double _sessionSumPpv = 0;
+  double _sessionSumSqPpv = 0; // for std_ppv computation
   int _sessionSampleCount = 0;
   int _exceedanceCount = 0;
   bool _ppvWasExceeded = false; // edge detector for exceedanceCount
+
+  // Most recently detected local-maximum PPV value (peak detection).
+  double? _latestPeak;
 
   // ---------------------------------------------------------------------------
   // Public API — stateful layer
@@ -210,11 +227,32 @@ class VibrationMetricsService {
     _addToWindow(_staLtaHistory, staLta);
     _addToWindow(_ppvTimestamps, nowSec);
 
+    // --- 20-sample PPV trend buffer ---
+    _ppvTrendHistory.add(ppv);
+    _ppvTrendTimestamps.add(nowSec);
+    if (_ppvTrendHistory.length > _kTrendWindowSize) {
+      _ppvTrendHistory.removeAt(0);
+      _ppvTrendTimestamps.removeAt(0);
+    }
+
     // --- Session statistics ---
     if (ppv > _sessionPeakPpv) _sessionPeakPpv = ppv;
+    if (ppv < _sessionMinPpv) _sessionMinPpv = ppv;
     _sessionSumPpv += ppv;
+    _sessionSumSqPpv += ppv * ppv;
     _sessionSampleCount++;
 
+    // --- Local maximum (peak) detection ---
+    // A value is a peak if it exceeds both its predecessor and the new value.
+    // We detect peaks one step late (when current < prev and prev > preprev).
+    if (_ppvHistory.length >= 3) {
+      final prev2 = _ppvHistory[_ppvHistory.length - 3];
+      final prevVal = _ppvHistory[_ppvHistory.length - 2];
+      final currVal = _ppvHistory[_ppvHistory.length - 1];
+      if (prevVal > prev2 && prevVal > currVal) {
+        _latestPeak = prevVal;
+      }
+    }
     // PPV exceedance edge detection (count each new exceedance episode).
     final ppvExceeded = ppv >= _kPpvThreshold;
     if (ppvExceeded && !_ppvWasExceeded) _exceedanceCount++;
@@ -275,6 +313,16 @@ class VibrationMetricsService {
     return _leastSquaresSlope(_ppvTimestamps, _ppvHistory);
   }
 
+  /// Least-squares slope of PPV over the last 20 samples in mm/s per second.
+  ///
+  /// Uses a larger window than [ppvRateOfChange] to capture slower trends.
+  /// Positive = PPV is trending upward; negative = trending downward.
+  /// Returns 0.0 if fewer than 2 samples have been recorded.
+  double get ppvTrend {
+    if (_ppvTrendHistory.length < 2) return 0.0;
+    return _leastSquaresSlope(_ppvTrendTimestamps, _ppvTrendHistory);
+  }
+
   // --- Session statistics ---
 
   /// Maximum PPV seen since the last [resetSessionStats] call, in mm/s.
@@ -288,16 +336,71 @@ class VibrationMetricsService {
   /// since the last [resetSessionStats] call.
   int get exceedanceCount => _exceedanceCount;
 
-  /// Reset session statistics (peak, mean, exceedance count).
+  /// Comprehensive session statistics as a map.
+  ///
+  /// Keys:
+  /// - `min_ppv`      — minimum PPV recorded in this session (mm/s).
+  /// - `max_ppv`      — maximum PPV recorded in this session (mm/s).
+  /// - `mean_ppv`     — arithmetic mean PPV (mm/s).
+  /// - `std_ppv`      — sample standard deviation of PPV (mm/s).
+  /// - `total_readings` — total number of [recordSample] calls this session.
+  ///
+  /// All values are 0.0 if no samples have been recorded yet.
+  Map<String, double> get sessionStats {
+    if (_sessionSampleCount == 0) {
+      return {
+        'min_ppv': 0.0,
+        'max_ppv': 0.0,
+        'mean_ppv': 0.0,
+        'std_ppv': 0.0,
+        'total_readings': 0.0,
+      };
+    }
+    final mean = _sessionSumPpv / _sessionSampleCount;
+    // Sample variance: (sum(x^2) - n*mean^2) / (n-1)
+    double variance = 0.0;
+    if (_sessionSampleCount > 1) {
+      variance = (_sessionSumSqPpv - _sessionSampleCount * mean * mean) /
+          (_sessionSampleCount - 1);
+      if (variance < 0.0) variance = 0.0; // guard floating-point rounding
+    }
+    return {
+      'min_ppv': _sessionMinPpv.isInfinite ? 0.0 : _sessionMinPpv,
+      'max_ppv': _sessionPeakPpv,
+      'mean_ppv': mean,
+      'std_ppv': sqrt(variance),
+      'total_readings': _sessionSampleCount.toDouble(),
+    };
+  }
+
+  /// The most recently detected local maximum (peak) PPV value in mm/s.
+  ///
+  /// A value is considered a peak if it exceeds both its predecessor and the
+  /// subsequent sample in the rolling PPV history. Returns null until at least
+  /// one peak has been detected since the last [resetSessionStats] call.
+  double? get latestPeak => _latestPeak;
+
+  /// Reset session statistics (peak, min, mean, std, exceedance count, peak
+  /// detection state).
   ///
   /// Does NOT clear the rolling history windows used for trending and slope.
+  /// Alias: [resetSession] delegates to this method.
   void resetSessionStats() {
     _sessionPeakPpv = 0;
+    _sessionMinPpv = double.infinity;
     _sessionSumPpv = 0;
+    _sessionSumSqPpv = 0;
     _sessionSampleCount = 0;
     _exceedanceCount = 0;
     _ppvWasExceeded = false;
+    _latestPeak = null;
   }
+
+  /// Reset session statistics. Delegates to [resetSessionStats].
+  ///
+  /// Provided as a convenience alias so callers do not need to know which
+  /// reset method to call.
+  void resetSession() => resetSessionStats();
 
   /// Export all key metrics as a JSON-compatible map for logging or upload.
   ///
@@ -306,6 +409,7 @@ class VibrationMetricsService {
   Map<String, dynamic> get summary {
     final exc = exceedanceDurations;
     final tr = trends;
+    final stats = sessionStats;
     return {
       'ppv': _ppvHistory.isNotEmpty ? _ppvHistory.last : 0.0,
       'rms': _rmsHistory.isNotEmpty ? _rmsHistory.last : 0.0,
@@ -313,12 +417,16 @@ class VibrationMetricsService {
       'ppvTrend': tr['ppv'],
       'rmsTrend': tr['rms'],
       'staLtaTrend': tr['staLta'],
+      'ppvTrendSlope': ppvTrend,
       'ppvExceedanceSec': exc['ppv']!.inSeconds,
       'rmsExceedanceSec': exc['rms']!.inSeconds,
       'staLtaExceedanceSec': exc['staLta']!.inSeconds,
       'ppvRateOfChange': ppvRateOfChange,
       'sessionPeakPpv': _sessionPeakPpv,
-      'sessionMeanPpv': sessionMeanPpv,
+      'sessionMinPpv': stats['min_ppv'],
+      'sessionMeanPpv': stats['mean_ppv'],
+      'sessionStdPpv': stats['std_ppv'],
+      'latestPeak': _latestPeak,
       'exceedanceCount': _exceedanceCount,
       'sampleCount': _sessionSampleCount,
       'ppvThreshold': _kPpvThreshold,
