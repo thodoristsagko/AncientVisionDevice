@@ -52,6 +52,10 @@ class MlAnomalyService {
 
   // Score history circular buffer (last 100 scores)
   static const int _scoreHistorySize = 100;
+
+  /// Public constant: capacity of the score history buffer.
+  static const int scoreHistoryCapacity = _scoreHistorySize;
+
   final CircularBuffer<double> _scoreHistory =
       CircularBuffer<double>(_scoreHistorySize);
 

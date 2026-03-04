@@ -2,9 +2,11 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../services/background_service.dart';
 import '../services/connectivity_monitor_service.dart';
 import '../services/critical_event_log_service.dart';
 import '../services/inference_timing_service.dart';
+import '../services/ml_anomaly_service.dart';
 import '../services/network_status_service.dart';
 import '../services/precursor_classifier_service.dart';
 import '../services/vibration_anomaly_service.dart';
@@ -71,6 +73,14 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
   double? _fwTmp;   // °C
   int? _fwUptime;   // seconds
 
+  // ── Memory pressure: ML score-history buffer fill levels ──────────────────
+  int _scoreHistoryLen = 0;
+  int _scoreHistoryCapacity = 0;
+  int _mlCalibrationSamples = 0;
+
+  // ── Last 5 entries from BackgroundServiceManager status history ───────────
+  List<String> _recentStatusHistory = [];
+
   // ── System / app fields ──────────────────────────────────────────────────
   DateTime? _appStartTime;
 
@@ -134,32 +144,42 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
       // SharedPreferences unavailable — leave everything null.
     }
 
-    if (mounted) {
-      setState(() {
-        _lastDeviceName = lastDevice;
-        _modelFileSizeBytes = fileSize;
-        _fwVersion = fwVersion;
-        _fwSeq = fwSeq;
-        _fwBoots = fwBoots;
-        _fwGain = fwGain;
-        _fwCal = fwCal;
-        _fwTmp = fwTmp;
-        _fwUptime = fwUptime;
-        _appStartTime = appStartTime;
-        _isLoading = false;
+    if (!mounted) return;
+    setState(() {
+      _lastDeviceName = lastDevice;
+      _modelFileSizeBytes = fileSize;
+      _fwVersion = fwVersion;
+      _fwSeq = fwSeq;
+      _fwBoots = fwBoots;
+      _fwGain = fwGain;
+      _fwCal = fwCal;
+      _fwTmp = fwTmp;
+      _fwUptime = fwUptime;
+      _appStartTime = appStartTime;
+      _isLoading = false;
 
-        final anomalyService = VibrationAnomalyService();
-        _modelFingerprint = anomalyService.isInitialized
-            ? anomalyService.modelFingerprint
-            : null;
+      final anomalyService = VibrationAnomalyService();
+      _modelFingerprint = anomalyService.isInitialized
+          ? anomalyService.modelFingerprint
+          : null;
 
-        // Precursor classifier — read isLoaded / lastError from singleton.
-        final precursor = PrecursorClassifierService();
-        _precursorLoaded = precursor.isLoaded;
-        _precursorLastError = precursor.lastError;
+      // Precursor classifier — read isLoaded / lastError from singleton.
+      final precursor = PrecursorClassifierService();
+      _precursorLoaded = precursor.isLoaded;
+      _precursorLastError = precursor.lastError;
 
-      });
-    }
+      // Memory pressure: ML autoencoder score-history buffer fill level.
+      final mlService = anomalyService.mlService;
+      _scoreHistoryLen = mlService.scoreHistory.length;
+      _scoreHistoryCapacity = MlAnomalyService.scoreHistoryCapacity;
+      _mlCalibrationSamples = mlService.calibrationSampleCount;
+
+      // Last 5 entries from BackgroundServiceManager status history.
+      final allHistory = BackgroundServiceManager().statusHistory;
+      _recentStatusHistory = allHistory.length <= 5
+          ? List<String>.from(allHistory)
+          : allHistory.sublist(allHistory.length - 5);
+    });
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -231,13 +251,19 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
                 children: [
                   _buildBleSection(),
                   const SizedBox(height: 16),
+                  _buildBlePacketStatsSection(),
+                  const SizedBox(height: 16),
                   _buildFirmwareSection(),
                   const SizedBox(height: 16),
                   _buildMlSection(),
                   const SizedBox(height: 16),
+                  _buildMemoryPressureSection(),
+                  const SizedBox(height: 16),
                   _buildSessionSection(),
                   const SizedBox(height: 16),
                   _buildSystemSection(),
+                  const SizedBox(height: 16),
+                  _buildRecentErrorsSection(),
                   const SizedBox(height: 24),
                   _buildExportButton(),
                   const SizedBox(height: 12),
@@ -276,6 +302,85 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
           d?.lastRssi != null ? '${d!.lastRssi} dBm' : 'N/A',
         ),
       ],
+    );
+  }
+
+  /// BLE Packet Stats — dedicated card with total/dropped/drop-rate summary.
+  ///
+  /// The drop-rate badge is colour-coded: green < 1%, amber 1–5%, red >= 5%.
+  /// When no tracker is available (device not connected) shows placeholders.
+  Widget _buildBlePacketStatsSection() {
+    final tracker = widget.data?.packetTracker;
+
+    final totalLabel =
+        tracker != null ? '${tracker.totalPackets}' : 'N/A — not connected';
+    final droppedLabel =
+        tracker != null ? '${tracker.missedPackets}' : 'N/A';
+    final dropRateText = tracker != null
+        ? '${(tracker.missRate * 100).toStringAsFixed(2)} %'
+        : 'N/A';
+
+    // Colour for the drop-rate badge based on severity.
+    Color dropRateColor = const Color(0xFF4CAF50); // green — healthy
+    if (tracker != null) {
+      final rate = tracker.missRate;
+      if (rate >= 0.05) {
+        dropRateColor = const Color(0xFFF44336); // red — >5% loss
+      } else if (rate >= 0.01) {
+        dropRateColor = const Color(0xFFFFC107); // amber — 1–5% loss
+      }
+    }
+
+    return _DiagCardWithExtra(
+      title: 'BLE Packet Stats',
+      icon: Icons.analytics_outlined,
+      iconColor: const Color(0xFF29B6F6),
+      rows: [
+        _DiagRow('Total received', totalLabel),
+        _DiagRow('Dropped packets', droppedLabel),
+      ],
+      extra: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 160,
+              child: Text(
+                'Drop rate',
+                style: TextStyle(
+                  color: Colors.white.withAlpha(160),
+                  fontSize: 13,
+                ),
+              ),
+            ),
+            tracker != null
+                ? Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: dropRateColor.withAlpha(40),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: dropRateColor, width: 1),
+                    ),
+                    child: Text(
+                      dropRateText,
+                      style: TextStyle(
+                        color: dropRateColor,
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  )
+                : Text(
+                    dropRateText,
+                    style: TextStyle(
+                      color: Colors.white.withAlpha(160),
+                      fontSize: 13,
+                    ),
+                  ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -407,6 +512,124 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
     );
   }
 
+  /// Memory Pressure — shows how full the key in-memory buffers are.
+  ///
+  /// A full score-history buffer (100/100) is expected during normal
+  /// operation. Calibration samples only accumulate during the initial
+  /// 600-sample window and reset to 0 once calibration completes.
+  Widget _buildMemoryPressureSection() {
+    final fillLabel = _scoreHistoryCapacity > 0
+        ? '$_scoreHistoryLen / $_scoreHistoryCapacity'
+        : 'N/A';
+    final fillPct = _scoreHistoryCapacity > 0
+        ? _scoreHistoryLen / _scoreHistoryCapacity
+        : 0.0;
+
+    return Card(
+      color: const Color(0xFF1C2523),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ListTile(
+            leading: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF66BB6A).withAlpha(40),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.storage_outlined,
+                  color: Color(0xFF66BB6A), size: 20),
+            ),
+            title: const Text(
+              'Memory Pressure',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 15,
+              ),
+            ),
+          ),
+          Divider(color: Colors.white.withAlpha(30), height: 1),
+          Padding(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Score history fill bar
+                Row(
+                  children: [
+                    SizedBox(
+                      width: 160,
+                      child: Text(
+                        'Score history',
+                        style: TextStyle(
+                          color: Colors.white.withAlpha(160),
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      fillLabel,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: fillPct,
+                    backgroundColor: Colors.white12,
+                    valueColor: AlwaysStoppedAnimation<Color>(
+                      fillPct > 0.9
+                          ? const Color(0xFF4CAF50)
+                          : const Color(0xFF66BB6A),
+                    ),
+                    minHeight: 6,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                // Calibration sample count
+                Row(
+                  children: [
+                    SizedBox(
+                      width: 160,
+                      child: Text(
+                        'Calibration samples',
+                        style: TextStyle(
+                          color: Colors.white.withAlpha(160),
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: Text(
+                        _mlCalibrationSamples > 0
+                            ? '$_mlCalibrationSamples'
+                            : 'Done or not started',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildSessionSection() {
     final d = widget.data;
     Duration? sessionDuration;
@@ -503,6 +726,74 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
         _DiagRow('Network status', networkLabel),
         _DiagRow('BLE offline duration', bleOfflineLabel),
       ],
+    );
+  }
+
+  /// Last 5 Service Events — pulled from BackgroundServiceManager.statusHistory.
+  ///
+  /// Shows the most recent service lifecycle events (start/stop/errors) in
+  /// reverse-chronological order. Each entry has an ISO timestamp prefix.
+  Widget _buildRecentErrorsSection() {
+    return Card(
+      color: const Color(0xFF1C2523),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ListTile(
+            leading: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFEF5350).withAlpha(40),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.error_outline,
+                  color: Color(0xFFEF5350), size: 20),
+            ),
+            title: const Text(
+              'Last 5 Service Events',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 15,
+              ),
+            ),
+          ),
+          Divider(color: Colors.white.withAlpha(30), height: 1),
+          Padding(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: _recentStatusHistory.isEmpty
+                ? Text(
+                    'No service events recorded yet.',
+                    style: TextStyle(
+                      color: Colors.white.withAlpha(120),
+                      fontSize: 13,
+                    ),
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: _recentStatusHistory.reversed
+                        .map(
+                          (entry) => Padding(
+                            padding:
+                                const EdgeInsets.symmetric(vertical: 4),
+                            child: Text(
+                              entry,
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12,
+                                fontFamily: 'monospace',
+                              ),
+                            ),
+                          ),
+                        )
+                        .toList(),
+                  ),
+          ),
+          const SizedBox(height: 4),
+        ],
+      ),
     );
   }
 
@@ -680,6 +971,96 @@ class _DiagCard extends StatelessWidget {
                 fontSize: 13,
                 fontWeight: FontWeight.w500,
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Variant of [_DiagCard] that accepts an optional [extra] widget rendered
+/// after the key-value rows (used for coloured drop-rate badge etc.).
+class _DiagCardWithExtra extends StatelessWidget {
+  final String title;
+  final IconData icon;
+  final Color iconColor;
+  final List<_DiagRow> rows;
+  final Widget extra;
+
+  const _DiagCardWithExtra({
+    required this.title,
+    required this.icon,
+    required this.iconColor,
+    required this.rows,
+    required this.extra,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      color: const Color(0xFF1C2523),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ListTile(
+            leading: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: iconColor.withAlpha(40),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(icon, color: iconColor, size: 20),
+            ),
+            title: Text(
+              title,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 15,
+              ),
+            ),
+          ),
+          Divider(color: Colors.white.withAlpha(30), height: 1),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ...rows.map(
+                  (row) => Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 5),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SizedBox(
+                          width: 160,
+                          child: Text(
+                            row.key,
+                            style: TextStyle(
+                              color: Colors.white.withAlpha(160),
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                        Expanded(
+                          child: Text(
+                            row.value,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                extra,
+              ],
             ),
           ),
         ],
