@@ -3,17 +3,26 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fl_chart/fl_chart.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../widgets/dashboard_home_widgets.dart';
 import '../services/auth_service.dart';
 import '../services/local_storage_service.dart';
 import '../services/notification_service.dart';
 import '../services/site_service.dart';
+import '../services/session_history_service.dart';
+import '../services/vibration_anomaly_service.dart';
 import 'notifications_screen.dart';
 import 'qr_scanner_screen.dart';
 import 'analytics_screen.dart';
+import 'calibration_wizard_screen.dart';
+import 'session_history_screen.dart';
 
 class DashboardHomeView extends StatefulWidget {
-  const DashboardHomeView({super.key});
+  /// Called when the view wants to switch the main navigation tab.
+  /// Tab indices: 0=Home, 1=Findings, 2=Tools, 3=Monitor, 4=History
+  final ValueChanged<int>? onNavigate;
+
+  const DashboardHomeView({super.key, this.onNavigate});
 
   @override
   State<DashboardHomeView> createState() => DashboardHomeViewState();
@@ -34,6 +43,14 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
   bool _statsLoading = true;
   String _activeSite = '';
 
+  // --- Quick stats (vibration / sessions) ---
+  int _sessionsToday = 0;
+  double _peakPpvToday = 0.0;
+  List<SessionRecord> _recentSessions = [];
+  String _mlStatus = 'Not loaded';
+  String _lastSync = 'Never';
+  bool _sessionStatsLoading = true;
+
   @override
   void initState() {
     super.initState();
@@ -45,7 +62,83 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
     SiteService().getActiveSite().then((s) {
       if (mounted) setState(() => _activeSite = s);
     });
+    _loadSessionStats();
+    _loadSystemStatus();
   }
+
+  // ---------------------------------------------------------------------------
+  // Session / vibration quick stats
+  // ---------------------------------------------------------------------------
+
+  Future<void> _loadSessionStats() async {
+    try {
+      final sessions = await SessionHistoryService.instance.getSessions();
+      final now = DateTime.now();
+      final startOfDay = DateTime(now.year, now.month, now.day);
+
+      final todaySessions = sessions
+          .where((s) => !s.start.isBefore(startOfDay))
+          .toList();
+
+      double peakPpv = 0.0;
+      for (final s in todaySessions) {
+        if (s.peakPpv > peakPpv) peakPpv = s.peakPpv;
+      }
+
+      if (mounted) {
+        setState(() {
+          _sessionsToday = todaySessions.length;
+          _peakPpvToday = peakPpv;
+          _recentSessions = sessions.take(3).toList();
+          _sessionStatsLoading = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('_loadSessionStats error: $e');
+      if (mounted) setState(() => _sessionStatsLoading = false);
+    }
+  }
+
+  Future<void> _loadSystemStatus() async {
+    try {
+      // ML model status
+      final anomalyService = VibrationAnomalyService.instance;
+      final mlStatus = anomalyService.isInitialized
+          ? 'Loaded (${anomalyService.modeLabel})'
+          : 'Not loaded';
+
+      // Last sync time
+      final prefs = await SharedPreferences.getInstance();
+      final lastSyncMs = prefs.getInt('last_sync_time');
+      String lastSync = 'Never';
+      if (lastSyncMs != null) {
+        final dt = DateTime.fromMillisecondsSinceEpoch(lastSyncMs);
+        final diff = DateTime.now().difference(dt);
+        if (diff.inMinutes < 1) {
+          lastSync = 'Just now';
+        } else if (diff.inHours < 1) {
+          lastSync = '${diff.inMinutes}m ago';
+        } else if (diff.inDays < 1) {
+          lastSync = '${diff.inHours}h ago';
+        } else {
+          lastSync = '${diff.inDays}d ago';
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _mlStatus = mlStatus;
+          _lastSync = lastSync;
+        });
+      }
+    } catch (e) {
+      debugPrint('_loadSystemStatus error: $e');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Existing loaders (unchanged)
+  // ---------------------------------------------------------------------------
 
   Future<void> _loadStats() async {
     try {
@@ -173,6 +266,10 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Widgets
+  // ---------------------------------------------------------------------------
+
   Widget _statChip(String label, int value, Color color) {
     return TweenAnimationBuilder<double>(
       tween: Tween<double>(begin: 0, end: value.toDouble()),
@@ -192,12 +289,413 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
     );
   }
 
+  // --- Quick stats row (sessions / PPV / ML status) -------------------------
+
+  Widget _buildQuickStatsRow() {
+    final anomalyService = VibrationAnomalyService.instance;
+    final bool isConnected = anomalyService.isInitialized;
+
+    // Derive current anomaly label from ML mode label — simplified badge
+    String statusLabel = 'SAFE';
+    Color statusColor = const Color(0xFF4CAF50);
+    if (!isConnected) {
+      statusLabel = 'NO DEVICE';
+      statusColor = Colors.white38;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 0, 0, 16),
+      child: Row(
+        children: [
+          // Sessions today
+          Expanded(
+            child: _quickStatCard(
+              icon: Icons.sensors_rounded,
+              label: 'Sessions Today',
+              value: _sessionStatsLoading ? '...' : '$_sessionsToday',
+              color: const Color(0xFF2196F3),
+            ),
+          ),
+          const SizedBox(width: 10),
+          // Peak PPV today
+          Expanded(
+            child: _quickStatCard(
+              icon: Icons.speed_rounded,
+              label: 'Peak PPV',
+              value: _sessionStatsLoading
+                  ? '...'
+                  : '${_peakPpvToday.toStringAsFixed(2)} mm/s',
+              color: const Color(0xFFFFC107),
+            ),
+          ),
+          const SizedBox(width: 10),
+          // Status badge
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+              decoration: BoxDecoration(
+                color: statusColor.withAlpha(30),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: statusColor.withAlpha(80)),
+              ),
+              child: Column(
+                children: [
+                  Icon(Icons.shield_outlined, color: statusColor, size: 18),
+                  const SizedBox(height: 4),
+                  Text(
+                    statusLabel,
+                    style: TextStyle(
+                      color: statusColor,
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 2),
+                  const Text(
+                    'Status',
+                    style: TextStyle(color: Colors.white38, fontSize: 10),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _quickStatCard({
+    required IconData icon,
+    required String label,
+    required String value,
+    required Color color,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(18),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withAlpha(20)),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: color, size: 18),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: TextStyle(
+              color: color,
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+            ),
+            textAlign: TextAlign.center,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 2),
+          Text(
+            label,
+            style: const TextStyle(color: Colors.white38, fontSize: 10),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    );
+  }
+
+  // --- Recent sessions card --------------------------------------------------
+
+  Widget _buildRecentSessionsCard() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(18),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withAlpha(26)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+            child: Row(
+              children: [
+                const Text(
+                  'Recent Sessions',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const Spacer(),
+                GestureDetector(
+                  onTap: () {
+                    if (widget.onNavigate != null) {
+                      widget.onNavigate!(4); // History tab
+                    } else {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => const SessionHistoryScreen()),
+                      );
+                    }
+                  },
+                  child: const Text(
+                    'See all',
+                    style: TextStyle(color: Color(0xFFFFC107), fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (_sessionStatsLoading)
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Center(
+                child: CircularProgressIndicator(
+                  color: Color(0xFFFFC107),
+                  strokeWidth: 2,
+                ),
+              ),
+            )
+          else if (_recentSessions.isEmpty)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 4, 16, 16),
+              child: Text(
+                'No sessions recorded yet. Start monitoring to begin.',
+                style: TextStyle(color: Colors.white38, fontSize: 12),
+              ),
+            )
+          else
+            ..._recentSessions.map((s) => _sessionListTile(s)),
+          const SizedBox(height: 4),
+        ],
+      ),
+    );
+  }
+
+  Widget _sessionListTile(SessionRecord s) {
+    final timeStr = _formatTime(s.start);
+    final ppvColor = s.peakPpv > 0.3
+        ? const Color(0xFFF44336)
+        : s.peakPpv > 0.1
+            ? const Color(0xFFFFC107)
+            : const Color(0xFF4CAF50);
+
+    return ListTile(
+      dense: true,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
+      leading: Icon(Icons.sensors_rounded, color: ppvColor, size: 20),
+      title: Text(
+        s.deviceName.isNotEmpty ? s.deviceName : 'AncientVision',
+        style: const TextStyle(color: Colors.white, fontSize: 13),
+      ),
+      subtitle: Text(
+        timeStr,
+        style: const TextStyle(color: Colors.white38, fontSize: 11),
+      ),
+      trailing: Text(
+        '${s.peakPpv.toStringAsFixed(3)} mm/s',
+        style: TextStyle(
+          color: ppvColor,
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+
+  String _formatTime(DateTime dt) {
+    final now = DateTime.now();
+    final diff = now.difference(dt);
+    if (diff.inMinutes < 1) return 'Just now';
+    if (diff.inHours < 1) return '${diff.inMinutes}m ago';
+    if (diff.inDays < 1) return '${diff.inHours}h ago';
+    return '${dt.day}/${dt.month} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  // --- Quick action buttons --------------------------------------------------
+
+  Widget _buildQuickActions() {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Quick Actions',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              _quickActionButton(
+                icon: Icons.sensors_rounded,
+                label: 'Monitor',
+                color: const Color(0xFF4CAF50),
+                onTap: () {
+                  if (widget.onNavigate != null) {
+                    widget.onNavigate!(3); // Safety/Monitor tab
+                  }
+                },
+              ),
+              _quickActionButton(
+                icon: Icons.history_rounded,
+                label: 'History',
+                color: const Color(0xFF2196F3),
+                onTap: () {
+                  if (widget.onNavigate != null) {
+                    widget.onNavigate!(4);
+                  } else {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const SessionHistoryScreen()),
+                    );
+                  }
+                },
+              ),
+              _quickActionButton(
+                icon: Icons.tune_rounded,
+                label: 'Calibrate',
+                color: const Color(0xFFFFC107),
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const CalibrationWizardScreen(),
+                    ),
+                  );
+                },
+              ),
+              _quickActionButton(
+                icon: Icons.ios_share_rounded,
+                label: 'Export',
+                color: const Color(0xFF9C27B0),
+                onTap: () {
+                  if (widget.onNavigate != null) {
+                    widget.onNavigate!(2); // Tools tab
+                  }
+                },
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _quickActionButton({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return OutlinedButton.icon(
+      onPressed: onTap,
+      icon: Icon(icon, size: 16, color: color),
+      label: Text(label, style: TextStyle(color: color, fontSize: 12)),
+      style: OutlinedButton.styleFrom(
+        side: BorderSide(color: color.withAlpha(120)),
+        backgroundColor: color.withAlpha(20),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+    );
+  }
+
+  // --- System status card ---------------------------------------------------
+
+  Widget _buildSystemStatusCard() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(14),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withAlpha(20)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'System Status',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 12),
+          _statusRow(
+            icon: Icons.memory_rounded,
+            label: 'ML Model',
+            value: _mlStatus,
+            valueColor: _mlStatus.startsWith('Loaded')
+                ? const Color(0xFF4CAF50)
+                : Colors.white38,
+          ),
+          const SizedBox(height: 8),
+          _statusRow(
+            icon: Icons.cloud_sync_rounded,
+            label: 'Last Sync',
+            value: _lastSync,
+            valueColor: Colors.white70,
+          ),
+          const SizedBox(height: 8),
+          _statusRow(
+            icon: Icons.storage_rounded,
+            label: 'Data Files',
+            value: 'N/A (mobile)',
+            valueColor: Colors.white38,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statusRow({
+    required IconData icon,
+    required String label,
+    required String value,
+    required Color valueColor,
+  }) {
+    return Row(
+      children: [
+        Icon(icon, color: Colors.white38, size: 16),
+        const SizedBox(width: 8),
+        Text(
+          label,
+          style: const TextStyle(color: Colors.white54, fontSize: 12),
+        ),
+        const Spacer(),
+        Text(
+          value,
+          style: TextStyle(
+            color: valueColor,
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
+    );
+  }
+
+  // --- Findings stats card (existing) ---------------------------------------
+
   Widget _buildStatsCard(BuildContext context) {
     return GestureDetector(
       onTap: () => Navigator.push(context,
           MaterialPageRoute(builder: (_) => const AnalyticsScreen())),
       child: Container(
-        margin: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+        margin: const EdgeInsets.fromLTRB(0, 0, 0, 16),
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: Colors.white.withAlpha(18),
@@ -377,13 +875,22 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
                   ),
                 ),
 
+              // QUICK STATS ROW (sessions / PPV / status)
+              _buildQuickStatsRow(),
+
               // STATS
               CombinedStatCard(totalFindings: '$_totalFindings', todayFindings: '$_todayFindings'),
               const SizedBox(height: 12),
 
               // SENSOR STATUS
               const ActiveDevicesCard(),
-              const SizedBox(height: 20),
+              const SizedBox(height: 16),
+
+              // RECENT SESSIONS
+              _buildRecentSessionsCard(),
+
+              // QUICK ACTIONS
+              _buildQuickActions(),
 
               // RECENT FINDINGS
               LastFindingsCard(findings: _lastFindings),
@@ -391,6 +898,9 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
 
               // FINDINGS STATS CARD
               _buildStatsCard(context),
+
+              // SYSTEM STATUS CARD
+              _buildSystemStatusCard(),
 
               const SizedBox(height: 80),
             ],

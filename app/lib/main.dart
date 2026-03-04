@@ -279,7 +279,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return IndexedStack(
       index: _currentIndex,
       children: [
-        const DashboardHomeView(),
+        DashboardHomeView(onNavigate: (i) => setState(() => _currentIndex = i)),
         FindingsView(key: _findingsKey),
         const ToolsView(),
         SafetyView(
