@@ -37,6 +37,10 @@ import '../../widgets/ppv_trend_chart.dart';
 import '../../widgets/anomaly_level_badge.dart';
 import '../../services/local_notification_service.dart';
 import '../../services/network_status_service.dart';
+import '../../services/session_history_service.dart';
+import '../../services/critical_event_log_service.dart';
+import '../../services/session_sync_service.dart';
+import '../../widgets/battery_indicator.dart';
 
 const String _bleSensorServiceUUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 
@@ -202,6 +206,12 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
   // P46: Session peak tracking
   double _sessionPeakPpv = 0.0;
   double _sessionPeakScore = 0.0;
+
+  // Session counters for auto-save on disconnect
+  int _sampleCount = 0;
+  int _anomalyEventCount = 0;
+  // Track previous anomaly level to detect CRITICAL transitions (P59 escalation)
+  bool _wasEscalatedCritical = false;
 
   // P47: All-clear timer (30s continuous normal before showing green confirmed)
   DateTime? _normalSince;
@@ -558,6 +568,46 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
     if (!mounted) return;
     final deviceName = _connectedDevice?.platformName ?? 'Sensor';
 
+    // Task 1: Auto-save session on disconnect if data was collected
+    if (_sampleCount > 0) {
+      final record = SessionRecord(
+        id: DateTime.now().toIso8601String(),
+        start: _sessionStart,
+        end: DateTime.now(),
+        peakPpv: _sessionPeakPpv,
+        peakScore: _sessionPeakScore,
+        sampleCount: _sampleCount,
+        anomalyEvents: _anomalyEventCount,
+        deviceName: deviceName,
+      );
+      SessionHistoryService.instance.saveSession(record);
+      debugPrint('[Session] Auto-saved: $_sampleCount samples, peakPPV=${_sessionPeakPpv.toStringAsFixed(2)}, anomalyEvents=$_anomalyEventCount');
+
+      // Task 3: Auto-sync session feature log to collector
+      final featureLog = _vibrationFeatureLog.toList();
+      if (featureLog.isNotEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Session uploading...'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+        SessionSyncService.instance.syncSession(featureLog).then((_) {
+          if (!mounted) return;
+          final success = SessionSyncService.instance.status == SyncStatus.done;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(success ? 'Session synced' : 'Sync failed'),
+              backgroundColor: success ? Colors.green : Colors.orange,
+              duration: const Duration(seconds: 3),
+            ),
+          );
+        });
+      }
+    }
+
     // Cancel all BLE subscriptions to prevent stale data / duplicates on reconnect
     for (final sub in _charSubscriptions) {
       sub.cancel();
@@ -734,8 +784,41 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
       if (!foundService) {
         debugPrint('>>> WARNING: Our sensor service was NOT found!');
       }
+
+      // Task 4: RTC time sync — send current unix timestamp to firmware CMD characteristic
+      // CMD char UUID: beb5483e-36e1-4688-b7f5-ea07361b26ad
+      await _sendRtcSync(services);
     } catch (e) {
       debugPrint('Service discovery error: $e');
+    }
+  }
+
+  /// Send TIME:<epoch> to the firmware CMD characteristic to sync RTC.
+  Future<void> _sendRtcSync(List<BluetoothService> services) async {
+    try {
+      BluetoothCharacteristic? cmdChar;
+      for (final service in services) {
+        for (final char in service.characteristics) {
+          final uuid = char.uuid.toString().toLowerCase();
+          if (uuid.endsWith('26ad') || uuid.contains('b26ad')) {
+            if (char.properties.write || char.properties.writeWithoutResponse) {
+              cmdChar = char;
+              break;
+            }
+          }
+        }
+        if (cmdChar != null) break;
+      }
+      if (cmdChar == null) {
+        debugPrint('>>> RTC sync: CMD characteristic not found');
+        return;
+      }
+      final epoch = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final cmd = 'TIME:$epoch';
+      await cmdChar.write(utf8.encode(cmd), withoutResponse: false);
+      debugPrint('>>> RTC synced to device: $cmd');
+    } catch (e) {
+      debugPrint('>>> RTC sync error (non-fatal): $e');
     }
   }
 
@@ -908,6 +991,9 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
 
           // P46: Session peak tracking
           if (_ppv > _sessionPeakPpv) _sessionPeakPpv = _ppv;
+
+          // Session sample counter (for auto-save on disconnect)
+          _sampleCount++;
 
           // PPV alarm: DIN 4150-3 heritage limit exceeded
           if (_effectivePpv > 3.0) {
@@ -1198,9 +1284,31 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
         // P191: OS-level notification on anomaly escalation / clear
         if (result.level == AnomalyLevel.anomaly && _lastLevel != AnomalyLevel.anomaly) {
           LocalNotificationService.instance.showCriticalAlert(ppv: _ppv);
+          // Task 2: Log GPS-tagged CRITICAL event on first transition to anomaly
+          _anomalyEventCount++;
+          final deviceId = _connectedDevice?.remoteId.str;
+          CriticalEventLogService.instance.logEvent(
+            ppv: _ppv,
+            anomalyScore: result.score,
+            deviceId: deviceId,
+          );
         } else if (result.level == AnomalyLevel.normal && _lastLevel == AnomalyLevel.anomaly) {
           LocalNotificationService.instance.cancelAll();
         }
+
+        // Task 2: Also log when P59 escalation transitions to CRITICAL (>15s sustained)
+        final isNowCritical = _anomalySince != null &&
+            DateTime.now().difference(_anomalySince!).inSeconds > 15;
+        if (isNowCritical && !_wasEscalatedCritical) {
+          _anomalyEventCount++;
+          final deviceId = _connectedDevice?.remoteId.str;
+          CriticalEventLogService.instance.logEvent(
+            ppv: _ppv,
+            anomalyScore: result.score,
+            deviceId: deviceId,
+          );
+        }
+        _wasEscalatedCritical = isNowCritical;
 
         _lastLevel = result.level;
 
@@ -1885,7 +1993,11 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
                           ],
                           if (isConnected) ...[
                             const SizedBox(width: 4),
-                            _buildBatteryChip(),
+                            BatteryIndicator(
+                              voltage: _batteryVoltage,
+                              isCharging: _batteryCharging,
+                              percentage: _batteryPercent.toDouble(),
+                            ),
                           ],
                         ],
                       ),
@@ -3016,29 +3128,4 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
     );
   }
 
-  /// Build battery indicator chip (v4.1)
-  Widget _buildBatteryChip() {
-    final Color batteryColor = _batteryCharging
-        ? const Color(0xFF4CAF50) // Green when charging
-        : _batteryPercent < 20
-            ? Colors.red // Red when low
-            : _batteryPercent < 50
-                ? Colors.orange // Orange when medium
-                : Colors.white; // White when good
-
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(
-          _batteryCharging ? Icons.battery_charging_full
-              : _batteryPercent > 50 ? Icons.battery_full
-              : _batteryPercent > 20 ? Icons.battery_3_bar
-              : Icons.battery_1_bar,
-          color: batteryColor, size: 16,
-        ),
-        const SizedBox(width: 2),
-        Text('$_batteryPercent%', style: TextStyle(color: batteryColor, fontSize: 11, fontWeight: FontWeight.w600)),
-      ],
-    );
-  }
 }
