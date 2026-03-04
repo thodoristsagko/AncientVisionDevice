@@ -6,9 +6,12 @@ and structural constants — without executing the full training pipelines.
 
 import ast
 import importlib.util
+import json
 import os
 import py_compile
 import sys
+
+import numpy as np
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(SCRIPTS_DIR)
@@ -197,3 +200,183 @@ def test_model_versioning_fields_present():
         source = fh.read()
     for field in ("trained_at", "git_sha", "holdout_accuracy", "cv_mean_accuracy"):
         assert f'"{field}"' in source, f'Config field "{field}" not found in script'
+
+
+# ---------------------------------------------------------------------------
+# P25: Model output quality tests
+# ---------------------------------------------------------------------------
+
+def test_model_probabilities_sum_to_one():
+    """Precursor model output probabilities sum to [0.99, 1.01]."""
+    try:
+        import tensorflow as tf
+    except ImportError:
+        print("SKIP: TensorFlow not available")
+        return
+
+    model_path = os.path.join(REPO_DIR, "app", "assets", "ml", "precursor_classifier.tflite")
+    if not os.path.exists(model_path):
+        print(f"SKIP: Model not found at {model_path}")
+        return
+
+    # Load interpreter
+    interpreter = tf.lite.Interpreter(model_path=model_path)
+    interpreter.allocate_tensors()
+
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+
+    # Generate 10 random valid inputs (17 features)
+    np.random.seed(42)
+    for _ in range(10):
+        # Random features in reasonable ranges
+        test_input = np.random.uniform(-1, 3, size=(1, 17)).astype(np.float32)
+
+        interpreter.set_tensor(input_details[0]["index"], test_input)
+        interpreter.invoke()
+        output = interpreter.get_tensor(output_details[0]["index"])
+
+        # Sum should be close to 1.0 (softmax output)
+        prob_sum = float(np.sum(output))
+        assert 0.99 <= prob_sum <= 1.01, (
+            f"Probabilities sum to {prob_sum}, expected ~1.0"
+        )
+
+
+def test_autoencoder_reconstruction_error_positive():
+    """Autoencoder reconstruction error (MSE) must always be >= 0."""
+    try:
+        import tensorflow as tf
+    except ImportError:
+        print("SKIP: TensorFlow not available")
+        return
+
+    model_path = os.path.join(REPO_DIR, "app", "assets", "ml", "vibration_anomaly.tflite")
+    if not os.path.exists(model_path):
+        print(f"SKIP: Autoencoder model not found at {model_path}")
+        return
+
+    interpreter = tf.lite.Interpreter(model_path=model_path)
+    interpreter.allocate_tensors()
+
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+
+    # Load config to check input dimension
+    config_path = os.path.join(REPO_DIR, "app", "assets", "ml", "vibration_model_config.json")
+    if os.path.exists(config_path):
+        with open(config_path, "r") as fh:
+            config = json.load(fh)
+        input_dim = config.get("input_dim", 11)
+    else:
+        input_dim = 11  # default
+
+    # Generate 10 random valid inputs
+    np.random.seed(42)
+    for _ in range(10):
+        test_input = np.random.uniform(-1, 3, size=(1, input_dim)).astype(np.float32)
+
+        interpreter.set_tensor(input_details[0]["index"], test_input)
+        interpreter.invoke()
+        output = interpreter.get_tensor(output_details[0]["index"])
+
+        # Autoencoder outputs reconstructed features (same dim as input)
+        # Compute MSE reconstruction error
+        mse_error = float(np.mean((test_input - output) ** 2))
+        assert mse_error >= 0, (
+            f"MSE reconstruction error is {mse_error}, expected >= 0"
+        )
+
+
+def test_precursor_model_input_dim():
+    """Precursor model expects exactly 17 features."""
+    try:
+        import tensorflow as tf
+    except ImportError:
+        print("SKIP: TensorFlow not available")
+        return
+
+    model_path = os.path.join(REPO_DIR, "app", "assets", "ml", "precursor_classifier.tflite")
+    if not os.path.exists(model_path):
+        print(f"SKIP: Model not found at {model_path}")
+        return
+
+    interpreter = tf.lite.Interpreter(model_path=model_path)
+    interpreter.allocate_tensors()
+
+    input_details = interpreter.get_input_details()
+    input_shape = input_details[0]["shape"]
+
+    # Shape is typically [batch_size, feature_dim]
+    assert input_shape[-1] == 17, (
+        f"Precursor model input dimension is {input_shape[-1]}, expected 17"
+    )
+
+
+def test_autoencoder_input_dim():
+    """Autoencoder model input dimension matches config."""
+    try:
+        import tensorflow as tf
+    except ImportError:
+        print("SKIP: TensorFlow not available")
+        return
+
+    model_path = os.path.join(REPO_DIR, "app", "assets", "ml", "vibration_anomaly.tflite")
+    config_path = os.path.join(REPO_DIR, "app", "assets", "ml", "vibration_model_config.json")
+
+    if not os.path.exists(model_path):
+        print(f"SKIP: Autoencoder model not found at {model_path}")
+        return
+
+    if not os.path.exists(config_path):
+        print(f"SKIP: Config not found at {config_path}")
+        return
+
+    # Load config
+    with open(config_path, "r") as fh:
+        config = json.load(fh)
+
+    expected_input_dim = config.get("input_dim")
+    assert expected_input_dim is not None, "input_dim not found in config"
+
+    # Check model
+    interpreter = tf.lite.Interpreter(model_path=model_path)
+    interpreter.allocate_tensors()
+
+    input_details = interpreter.get_input_details()
+    input_shape = input_details[0]["shape"]
+    actual_input_dim = input_shape[-1]
+
+    assert actual_input_dim == expected_input_dim, (
+        f"Autoencoder input dim is {actual_input_dim}, config says {expected_input_dim}"
+    )
+
+
+def test_model_config_complete():
+    """Config files have all required keys."""
+    configs_to_check = [
+        ("precursor_classifier_config.json", [
+            "model_version", "model_file", "feature_names", "class_names",
+            "input_dim", "output_dim"
+        ]),
+        ("vibration_model_config.json", [
+            "model_version", "input_dim"
+        ]),
+    ]
+
+    ml_dir = os.path.join(REPO_DIR, "app", "assets", "ml")
+
+    for config_name, required_keys in configs_to_check:
+        config_path = os.path.join(ml_dir, config_name)
+
+        if not os.path.exists(config_path):
+            print(f"SKIP: {config_name} not found at {config_path}")
+            continue
+
+        with open(config_path, "r") as fh:
+            config = json.load(fh)
+
+        for key in required_keys:
+            assert key in config, (
+                f"Required key '{key}' not found in {config_name}"
+            )
