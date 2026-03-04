@@ -1,3 +1,4 @@
+import csv
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ from watch import (
     write_trigger_with_retry,
     SampleRateMonitor,
     _log_json,
+    _check_data_quality,
 )
 
 
@@ -228,3 +230,55 @@ def test_log_json_includes_timestamp(caplog):
     record = caplog.records[0]
     log_json = json.loads(record.message)
     assert before <= log_json["ts"] <= after
+
+
+# ============================================================================
+# Tests for data quality gate
+# ============================================================================
+
+
+def _write_csv(path: Path, rows: list[dict]) -> None:
+    """Helper: write a CSV file with a header derived from the first row's keys."""
+    if not rows:
+        return
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def test_quality_gate_rejects_imbalanced_data(tmp_path):
+    """Quality gate rejects data with class imbalance > 10x."""
+    rows = []
+    # 300 samples for 'normal', 25 samples for 'anomaly' → 12:1 imbalance.
+    # Both classes exceed the 20-sample minimum so only the imbalance rule fires.
+    for i in range(300):
+        rows.append({"label": "normal", "ppv": str(0.1 + i * 0.001), "rms": "0.05", "freq": "10.0"})
+    for i in range(25):
+        rows.append({"label": "anomaly", "ppv": str(1.0 + i * 0.01), "rms": "0.5", "freq": "25.0"})
+
+    _write_csv(tmp_path / "data.csv", rows)
+
+    ok, reason = _check_data_quality(tmp_path)
+    assert ok is False
+    assert "imbalance" in reason
+
+
+def test_quality_gate_accepts_balanced_data(tmp_path):
+    """Quality gate accepts data with reasonable class balance."""
+    rows = []
+    # 50 samples each for 3 classes — perfectly balanced, well above 20 min
+    for cls in ("normal", "soil_creep", "crack_propagation"):
+        for i in range(50):
+            rows.append({
+                "label": cls,
+                "ppv": str(0.2 + i * 0.001),
+                "rms": "0.1",
+                "freq": "15.0",
+            })
+
+    _write_csv(tmp_path / "data.csv", rows)
+
+    ok, reason = _check_data_quality(tmp_path)
+    assert ok is True
+    assert reason == "OK"

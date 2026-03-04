@@ -14,7 +14,10 @@ Improvements
 - Structured JSON logging for key events.
 - Trigger cooldown (300s) to prevent thrashing.
 - Graceful shutdown handling with SIGTERM.
+- Data quality gate: validates class balance and CSV integrity before triggering retraining.
+- Anomaly spike detection: warns when recent anomaly-labeled samples exceed threshold.
 """
+import csv
 import json
 import logging
 import os
@@ -22,7 +25,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Setup logging
@@ -38,6 +41,7 @@ BACKOFF_BASE = int(os.environ.get("BACKOFF_BASE", "60"))   # seconds to wait aft
 TRIGGER_COOLDOWN_SECS = int(os.environ.get("TRIGGER_COOLDOWN_SECS", "300"))
 TRIGGER_WRITE_MAX_RETRIES = 3
 SAMPLE_RATE_HISTORY_SIZE = 600  # 10 minutes of 1-minute windows
+ANOMALY_SPIKE_THRESHOLD = int(os.environ.get("ANOMALY_SPIKE_THRESHOLD", "10"))
 
 
 def _read_int(path: Path, default: int = 0) -> int:
@@ -75,6 +79,99 @@ def should_trigger(data_dir: Path) -> bool:
 def reset_baseline(data_dir: Path) -> None:
     total = _read_int(data_dir / "field" / ".sample_count")
     (data_dir / ".baseline_count").write_text(str(total))
+
+
+# ---------------------------------------------------------------------------
+# Data quality gate
+# ---------------------------------------------------------------------------
+
+def _check_data_quality(data_dir: Path) -> tuple[bool, str]:
+    """
+    Check if training data is high enough quality to trigger retraining.
+
+    Returns: (is_good, reason_if_bad)
+
+    Quality checks:
+    1. Minimum samples per class: each class must have >= 20 samples
+    2. Maximum class imbalance: dominant class <= 10x minority class
+    3. CSV integrity: no rows with all-zero features
+    """
+    csv_files = list(data_dir.glob("*.csv"))
+    if not csv_files:
+        return False, "no CSV files found"
+
+    class_counts: dict[str, int] = {}
+    total_rows = 0
+    zero_rows = 0
+
+    for csv_file in csv_files:
+        try:
+            with open(csv_file) as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    label = row.get('label', row.get('anomaly_level', ''))
+                    if not label:
+                        continue
+                    class_counts[label] = class_counts.get(label, 0) + 1
+                    total_rows += 1
+                    # Check for all-zero features
+                    numeric_vals = [float(row.get(k, 0)) for k in ['ppv', 'rms', 'freq'] if k in row]
+                    if numeric_vals and all(v == 0 for v in numeric_vals):
+                        zero_rows += 1
+        except Exception:
+            continue
+
+    if not class_counts:
+        return False, "no labeled samples found"
+
+    # Check minimum per-class count
+    for cls, count in class_counts.items():
+        if count < 20:
+            return False, f"class '{cls}' has only {count} samples (need >= 20)"
+
+    # Check imbalance
+    if len(class_counts) > 1:
+        max_count = max(class_counts.values())
+        min_count = min(class_counts.values())
+        if max_count > 10 * min_count:
+            return False, f"class imbalance too high ({max_count} vs {min_count})"
+
+    # Check zero rows
+    if zero_rows > total_rows * 0.05:  # > 5% zero rows
+        return False, f"{zero_rows}/{total_rows} rows have all-zero features"
+
+    return True, "OK"
+
+
+# ---------------------------------------------------------------------------
+# Anomaly spike detection
+# ---------------------------------------------------------------------------
+
+def _check_anomaly_spike(data_dir: Path, lookback_minutes: int = 5) -> bool:
+    """Check if anomaly-labeled samples spiked recently (potential real event)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
+    anomaly_count = 0
+
+    for csv_file in data_dir.glob("*.csv"):
+        try:
+            with open(csv_file) as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    ts_str = row.get('timestamp', '')
+                    if not ts_str:
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+                        if ts >= cutoff:
+                            level = row.get('anomaly_level', row.get('label', ''))
+                            if level in ('anomaly', 'critical', 'imminent_failure', 'crack_propagation'):
+                                anomaly_count += 1
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+
+    return anomaly_count >= ANOMALY_SPIKE_THRESHOLD
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +419,41 @@ def main() -> None:
                     remaining_secs=remaining,
                 )
             else:
+                # Check anomaly spike — warn but don't block retraining trigger
+                if _check_anomaly_spike(data_dir):
+                    logging.warning(
+                        "Anomaly spike detected in the last 5 minutes — "
+                        "consider labelling samples before retraining."
+                    )
+                    _log_json(
+                        "anomaly_spike_detected",
+                        lookback_minutes=5,
+                        threshold=ANOMALY_SPIKE_THRESHOLD,
+                    )
+
+                # Data quality gate — only trigger retraining if data is clean
+                quality_ok, quality_reason = _check_data_quality(data_dir)
+                _log_json(
+                    "data_quality_check",
+                    passed=quality_ok,
+                    reason=quality_reason,
+                )
+                if not quality_ok:
+                    logging.warning(
+                        f"Data quality gate FAILED — skipping retraining: {quality_reason}"
+                    )
+                    _log_json(
+                        "trigger_skipped",
+                        reason="data_quality_gate",
+                        quality_reason=quality_reason,
+                    )
+                else:
+                    logging.info(f"Data quality gate passed: {quality_reason}")
+
+                if not quality_ok:
+                    time.sleep(POLL_INTERVAL)
+                    continue
+
                 # Write trigger file with exponential backoff retry
                 success = write_trigger_with_retry(trigger_file, TRIGGER_THRESHOLD, total)
                 if not success:
