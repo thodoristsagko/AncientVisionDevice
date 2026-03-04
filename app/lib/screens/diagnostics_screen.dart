@@ -544,7 +544,7 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
   Future<void> _exportCriticalEvents() async {
     try {
       final service = CriticalEventLogService.instance;
-      await service.exportAsCsv();
+      service.exportAsCsv();
 
       // Show a snackbar only if there were no events (exportAsCsv returns
       // silently when empty).

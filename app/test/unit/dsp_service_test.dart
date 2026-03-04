@@ -95,7 +95,7 @@ void main() {
     // -------------------------------------------------------------------------
     test('process dominantFreq is within valid range for a sinusoidal signal', () {
       const n = VibrationDspService.windowSize;
-      final nyquist = VibrationDspService.sampleRate / 2.0;
+      const nyquist = VibrationDspService.sampleRate / 2.0;
 
       // Build a 10 Hz sine wave on the X axis so FFT has a clear peak.
       final x = List<double>.generate(n, (i) {
