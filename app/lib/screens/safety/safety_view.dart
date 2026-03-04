@@ -2700,9 +2700,12 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
           if (_spectrogramBuffer.length > 2)
             const SizedBox(height: 12),
 
-          // Sensor History Graph Card (legacy moisture + vibration)
+          // Sensor History Graph Card (legacy moisture + vibration + PPV metrics)
           RepaintBoundary(
-            child: SensorHistoryGraphCard(sensorHistory: _sensorHistory.toList()),
+            child: SensorHistoryGraphCard(
+              sensorHistory: _sensorHistory.toList(),
+              ppvHistory: _ppvHistory.toList(),
+            ),
           ),
           const SizedBox(height: 100),
         ],
@@ -2724,6 +2727,7 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
               damageIndex: _vibrationMetrics.damageIndex,
               housnerSI: _housnerSI,
               isConnected: isConnected,
+              currentPpv: _ppv,
             ),
           if (_hasReceivedVibData)
             const SizedBox(height: 12),
