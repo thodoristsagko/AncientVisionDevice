@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
@@ -18,6 +19,13 @@ class PrecursorClassifierService {
   int _errorCount = 0;
   static const int _maxErrorCount = 3;
 
+  // ── Result state for the most recent successful inference ─────────────────
+  Map<String, double> _lastProbabilities = {};
+
+  // ── Result history — last 5 dominant classes ──────────────────────────────
+  static const int _historySize = 5;
+  final List<String> _patternHistory = [];
+
   bool get isLoaded => _isLoaded;
 
   /// Most recent inference error message, or null if last inference succeeded.
@@ -25,6 +33,40 @@ class PrecursorClassifierService {
 
   /// True if the last inference completed without error.
   bool get isHealthy => _lastInferenceSucceeded;
+
+  // ── New getters ───────────────────────────────────────────────────────────
+
+  /// Probabilities from the most recent inference mapped to class names.
+  /// Returns an empty map when no inference has been run yet.
+  Map<String, double> get classConfidences => Map.unmodifiable(_lastProbabilities);
+
+  /// The class name with the highest probability from the last inference,
+  /// or null if no inference has been run yet.
+  String? get dominantClass {
+    if (_lastProbabilities.isEmpty) return null;
+    return _lastProbabilities.entries
+        .reduce((a, b) => a.value >= b.value ? a : b)
+        .key;
+  }
+
+  /// Shannon entropy of the probability distribution from the last inference.
+  ///
+  /// A value close to 0 means the model is confident; a high value means the
+  /// model is uncertain (probability spread across multiple classes).
+  /// Returns 0.0 when no inference has been run yet.
+  double get uncertainty {
+    if (_lastProbabilities.isEmpty) return 0.0;
+    double entropy = 0.0;
+    for (final p in _lastProbabilities.values) {
+      if (p > 0) entropy -= p * math.log(p);
+    }
+    return entropy;
+  }
+
+  /// The last [_historySize] dominant-class names from recent inferences,
+  /// oldest first.  May contain fewer than [_historySize] entries if not
+  /// enough inferences have been run yet.
+  List<String> get recentPatterns => List.unmodifiable(_patternHistory);
 
   Future<bool> initialize() async {
     try {
@@ -90,15 +132,23 @@ class PrecursorClassifierService {
         if (probs[i] > maxProb) { maxProb = probs[i]; maxIdx = i; }
       }
 
-      // Inference succeeded — clear error state
+      // Inference succeeded — clear error state and persist result state.
       _lastInferenceSucceeded = true;
       _lastError = null;
       _errorCount = 0;
 
+      _lastProbabilities = Map.fromIterables(_classNames, probs);
+
+      // Update pattern history (fixed size, oldest entry evicted first).
+      _patternHistory.add(_classNames[maxIdx]);
+      if (_patternHistory.length > _historySize) {
+        _patternHistory.removeAt(0);
+      }
+
       return PrecursorResult(
         pattern: _classNames[maxIdx],
         confidence: maxProb.clamp(0.0, 1.0),
-        probabilities: Map.fromIterables(_classNames, probs),
+        probabilities: _lastProbabilities,
       );
     } catch (e) {
       _lastInferenceSucceeded = false;
@@ -140,6 +190,8 @@ class PrecursorClassifierService {
     _interpreter?.close();
     _interpreter = null;
     _isLoaded = false;
+    _lastProbabilities = {};
+    _patternHistory.clear();
   }
 }
 
