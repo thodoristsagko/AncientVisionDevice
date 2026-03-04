@@ -358,13 +358,19 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _save_csv(filepath: str, samples: list, feature_names: list) -> None:
-    """Save samples to CSV file with headers."""
+def _save_csv(filepath: str, samples: list) -> None:
+    """Save samples to CSV file with all fields."""
     path = Path(filepath)
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    if not samples:
+        return
+
+    # Use all keys from first sample
+    fieldnames = list(samples[0].keys())
+
     with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=feature_names)
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(samples)
     print(f"  Saved {len(samples)} samples to {filepath}")
@@ -434,7 +440,7 @@ def main(argv=None) -> int:
     # Save CSV if requested
     if csv_output:
         print(f"Saving CSV...")
-        _save_csv(csv_output, samples, FEATURE_NAMES)
+        _save_csv(csv_output, samples)
 
     # Verification mode
     if verify and not args.dry_run and sent > 0:
