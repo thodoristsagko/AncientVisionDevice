@@ -126,6 +126,7 @@ class VibrationDspService {
       lfRatio: response.dspResult.lfRatio,
       mfRatio: response.dspResult.mfRatio,
       hfRatio: response.dspResult.hfRatio,
+      temporalSymmetry: response.dspResult.temporalSymmetry,
     );
 
     return (dsp: dsp, ppv: calibratedPPV);
@@ -335,6 +336,11 @@ class VibrationDspService {
     final mfRatio = totalEnergy > 1e-20 ? mfEnergy / totalEnergy : 0.0;
     final hfRatio = totalEnergy > 1e-20 ? hfEnergy / totalEnergy : 0.0;
 
+    // 11. Temporal symmetry index
+    // Compares first half with reversed second half of the magnitude signal.
+    // 1.0 = symmetric continuous vibration; < 0.5 = asymmetric transient impact.
+    final temporalSymmetry = _computeTemporalSymmetry(magnitude);
+
     final result = DspResult(
       rms: rms,
       peak: peak,
@@ -354,6 +360,7 @@ class VibrationDspService {
       lfRatio: lfRatio,
       mfRatio: mfRatio,
       hfRatio: hfRatio,
+      temporalSymmetry: temporalSymmetry,
     );
 
     // Store in single-entry cache.
@@ -456,6 +463,26 @@ class VibrationDspService {
       energy2: energies.length > 1 ? energies[1] : 0.0,
       energy3: energies.length > 2 ? energies[2] : 0.0,
     );
+  }
+
+  /// Temporal symmetry index.
+  ///
+  /// Compares the first half of [signal] with the reversed second half.
+  /// Returns 1.0 for a perfectly symmetric signal (e.g. continuous sinusoidal
+  /// vibration) and approaches 0.0 for highly asymmetric transient impacts.
+  ///
+  /// Formula: 1 − clamp( Σ|a_i − b_i| / Σ(|a_i| + |b_i| + ε) )
+  double _computeTemporalSymmetry(List<double> signal) {
+    if (signal.length < 4) return 1.0;
+    final half = signal.length ~/ 2;
+    double num = 0, den = 0;
+    for (int i = 0; i < half; i++) {
+      final a = signal[i];
+      final b = signal[signal.length - 1 - i]; // reversed second half
+      num += (a - b).abs();
+      den += a.abs() + b.abs() + 1e-10;
+    }
+    return 1.0 - (num / den).clamp(0.0, 1.0);
   }
 
   /// Compute vector magnitude PPV from 3-axis raw acceleration data.
@@ -644,6 +671,15 @@ class DspResult {
   /// Elevated hfRatio is characteristic of impact events and machinery.
   final double hfRatio;
 
+  /// Temporal symmetry index in 0.0–1.0.
+  /// 1.0 = perfectly symmetric (continuous vibration); lower = asymmetric (impact).
+  final double temporalSymmetry;
+
+  /// Impulse factor: peak / RMS.
+  /// Higher values indicate sharp transient impacts (distinct from crest factor
+  /// which is peak / mean-absolute).
+  double get impulse => rms > 1e-10 ? peak / rms : 0.0;
+
   const DspResult({
     required this.rms,
     required this.peak,
@@ -663,6 +699,7 @@ class DspResult {
     this.lfRatio = 0.0,
     this.mfRatio = 0.0,
     this.hfRatio = 0.0,
+    this.temporalSymmetry = 1.0,
   });
 
   /// Human-readable quality label based on excess kurtosis and RMS energy.
@@ -703,6 +740,8 @@ class DspResult {
       'lfRatio': lfRatio,
       'mfRatio': mfRatio,
       'hfRatio': hfRatio,
+      'temporalSymmetry': temporalSymmetry,
+      'impulse': impulse,
     };
   }
 }
