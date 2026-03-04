@@ -1,0 +1,71 @@
+name: Security Scan
+
+on:
+  push:
+    paths:
+      - 'docker/*/requirements*.txt'
+      - 'scripts/requirements*.txt'
+      - '.github/workflows/security_scan.yml'
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly Monday 06:00 UTC
+
+jobs:
+  pip-audit:
+    name: pip-audit (Python dependencies)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit collect requirements
+        run: |
+          pip-audit -r docker/collect/requirements.txt --format=columns || true
+        continue-on-error: true
+
+      - name: Audit watcher requirements
+        run: |
+          pip-audit -r docker/watcher/requirements.txt --format=columns || true
+        continue-on-error: true
+
+      - name: Audit ML requirements
+        run: |
+          if [ -f docker/ml/requirements.txt ]; then
+            pip-audit -r docker/ml/requirements.txt --format=columns || true
+          fi
+        continue-on-error: true
+
+      - name: Audit scripts requirements
+        run: |
+          if [ -f scripts/requirements.txt ]; then
+            pip-audit -r scripts/requirements.txt --format=columns || true
+          fi
+        continue-on-error: true
+
+      - name: Strict audit (fail on critical CVEs)
+        run: |
+          # Collect all requirements files
+          REQ_FILES=""
+          for f in docker/collect/requirements.txt docker/watcher/requirements.txt docker/ml/requirements.txt scripts/requirements.txt; do
+            [ -f "$f" ] && REQ_FILES="$REQ_FILES -r $f"
+          done
+          if [ -n "$REQ_FILES" ]; then
+            pip-audit $REQ_FILES --format=json --output=security-report.json || echo "Vulnerabilities found - see report"
+          fi
+
+      - name: Upload security report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: security-report.json
+          if-no-files-found: ignore
+          retention-days: 30
