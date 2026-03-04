@@ -7,6 +7,8 @@ import '../services/voice_service.dart';
 import '../services/progress_service.dart';
 import '../services/cloud_database_service.dart';
 import '../services/weather_service.dart';
+import '../services/vibration_anomaly_service.dart';
+import '../services/location_service.dart';
 import '../utils/app_styles.dart';
 
 /// Field Journal Screen for daily documentation
@@ -29,6 +31,7 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
   final _weatherService = WeatherService();
   String _searchQuery = '';
   final _searchController = TextEditingController();
+  bool _showSearchBar = false;
   WeatherLog? _currentWeather;
 
   // SharedPreferences key for local storage
@@ -337,13 +340,25 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: AppBar(
-        title: const Text('Field Journal', style: AppTextStyles.h3),
+        title: _showSearchBar
+            ? TextField(
+                controller: _searchController,
+                autofocus: true,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  hintText: 'Search by title, content or tags...',
+                  hintStyle: TextStyle(color: Colors.white.withAlpha(128)),
+                  border: InputBorder.none,
+                ),
+                onChanged: (value) => setState(() => _searchQuery = value),
+              )
+            : const Text('Field Journal', style: AppTextStyles.h3),
         backgroundColor: Colors.transparent,
         foregroundColor: AppColors.textPrimary,
         elevation: 0,
         actions: [
           // Weather indicator
-          if (_currentWeather != null)
+          if (_currentWeather != null && !_showSearchBar)
             GestureDetector(
               onTap: _showWeatherDialog,
               child: Container(
@@ -370,13 +385,22 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
               ),
             ),
           IconButton(
-            icon: const Icon(Icons.search),
-            onPressed: _showSearchDialog,
+            icon: Icon(_showSearchBar ? Icons.close : Icons.search),
+            onPressed: () {
+              setState(() {
+                _showSearchBar = !_showSearchBar;
+                if (!_showSearchBar) {
+                  _searchController.clear();
+                  _searchQuery = '';
+                }
+              });
+            },
           ),
-          IconButton(
-            icon: const Icon(Icons.filter_list),
-            onPressed: _showFilterDialog,
-          ),
+          if (!_showSearchBar)
+            IconButton(
+              icon: const Icon(Icons.filter_list),
+              onPressed: _showFilterDialog,
+            ),
         ],
       ),
       body: Container(
@@ -389,12 +413,11 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
                   : _buildJournalList(),
         ),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _showNewEntryDialog(),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => _showQuickEntrySheet(),
         backgroundColor: AppColors.accent,
         foregroundColor: AppColors.primary,
-        icon: const Icon(Icons.add),
-        label: Text('New Entry', style: AppTextStyles.button.copyWith(color: AppColors.primary)),
+        child: const Icon(Icons.add),
       ),
     );
   }
@@ -680,54 +703,259 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
     );
   }
 
-  void _showSearchDialog() {
-    showDialog(
+  /// Quick-entry bottom sheet: minimal fields + live PPV/anomaly context + GPS.
+  void _showQuickEntrySheet() {
+    final noteController = TextEditingController();
+    JournalEntryType selectedType = JournalEntryType.daily;
+
+    // Snapshot current vibration state (for future display when stream is wired up)
+    // ignore: unused_local_variable
+    final anomalyService = VibrationAnomalyService.instance;
+    // Use last known location from LocationService
+    final locService = LocationService.instance;
+    final lastLoc = locService.lastLocation;
+
+    showModalBottomSheet(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF1C2523),
-        title: const Text('Search Entries', style: TextStyle(color: Colors.white)),
-        content: TextField(
-          controller: _searchController,
-          autofocus: true,
-          style: const TextStyle(color: Colors.white),
-          decoration: InputDecoration(
-            hintText: 'Search by title, content, or tags...',
-            hintStyle: const TextStyle(color: Colors.white54),
-            prefixIcon: const Icon(Icons.search, color: Colors.white54),
-            suffixIcon: _searchController.text.isNotEmpty
-                ? IconButton(
-                    icon: const Icon(Icons.clear, color: Colors.white54),
-                    onPressed: () {
-                      _searchController.clear();
-                      setState(() => _searchQuery = '');
-                      Navigator.pop(context);
-                    },
-                  )
-                : null,
-            filled: true,
-            fillColor: Colors.white.withAlpha(26),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: BorderSide.none,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1C2523),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          return Padding(
+            padding: EdgeInsets.only(
+              left: 20,
+              right: 20,
+              top: 20,
+              bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
             ),
-          ),
-          onChanged: (value) => setState(() => _searchQuery = value),
-          onSubmitted: (_) => Navigator.pop(context),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              _searchController.clear();
-              setState(() => _searchQuery = '');
-              Navigator.pop(context);
-            },
-            child: const Text('Clear'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Search'),
-          ),
-        ],
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Handle bar
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.white24,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Quick Entry',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Vibration context banner (always shown; 'No data' if not connected)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withAlpha(20),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.white.withAlpha(38)),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.sensors, color: Color(0xFFFFC107), size: 16),
+                        const SizedBox(width: 8),
+                        Text(
+                          'Vibration: N/A (not yet processed)',
+                          style: TextStyle(
+                            color: Colors.white.withAlpha(179),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+
+                  // GPS context
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withAlpha(20),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.white.withAlpha(38)),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          lastLoc != null ? Icons.location_on : Icons.location_off,
+                          color: lastLoc != null ? const Color(0xFF4CAF50) : Colors.white38,
+                          size: 16,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          lastLoc != null
+                              ? '${lastLoc.latitude.toStringAsFixed(5)}, ${lastLoc.longitude.toStringAsFixed(5)}'
+                              : 'No GPS',
+                          style: TextStyle(
+                            color: Colors.white.withAlpha(179),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Note text field
+                  TextField(
+                    controller: noteController,
+                    style: const TextStyle(color: Colors.white),
+                    maxLines: 4,
+                    autofocus: true,
+                    decoration: InputDecoration(
+                      labelText: 'Note',
+                      labelStyle: const TextStyle(color: Colors.white70),
+                      filled: true,
+                      fillColor: Colors.white.withAlpha(26),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide.none,
+                      ),
+                      hintText: 'Describe your observation...',
+                      hintStyle: TextStyle(color: Colors.white.withAlpha(77)),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Entry type dropdown
+                  const Text('Type', style: TextStyle(color: Colors.white70, fontSize: 13)),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      JournalEntryType.observation,
+                      JournalEntryType.problem,
+                      JournalEntryType.method,
+                      JournalEntryType.other,
+                    ].map((type) {
+                      final isSelected = selectedType == type;
+                      return GestureDetector(
+                        onTap: () => setSheet(() => selectedType = type),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: isSelected ? type.color : Colors.white.withAlpha(26),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(type.icon, size: 14, color: isSelected ? Colors.white : type.color),
+                              const SizedBox(width: 4),
+                              Text(
+                                type.label,
+                                style: TextStyle(
+                                  color: isSelected ? Colors.white : Colors.white70,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 12),
+                  // Link to full entry form
+                  Center(
+                    child: TextButton(
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _showNewEntryDialog();
+                      },
+                      child: const Text(
+                        'Full entry with tags & voice...',
+                        style: TextStyle(color: Colors.white54, fontSize: 12),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+
+                  // Save button
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () async {
+                        final noteText = noteController.text.trim();
+                        if (noteText.isEmpty) {
+                          ScaffoldMessenger.of(ctx).showSnackBar(
+                            const SnackBar(content: Text('Please enter a note')),
+                          );
+                          return;
+                        }
+
+                        // Try to get fresh GPS fix (non-blocking, use cached if unavailable)
+                        GpsLocation? gps = locService.lastLocation;
+                        try {
+                          gps = await locService.getCurrentLocation()
+                              .timeout(const Duration(seconds: 3));
+                        } catch (_) {
+                          // Use cached location
+                        }
+
+                        final locationSubtitle = gps != null
+                            ? '📍 ${gps.latitude.toStringAsFixed(5)}, ${gps.longitude.toStringAsFixed(5)}'
+                            : null;
+
+                        final entry = JournalEntry(
+                          id: DateTime.now().millisecondsSinceEpoch.toString(),
+                          type: selectedType,
+                          title: locationSubtitle ?? selectedType.label,
+                          content: noteText,
+                        );
+
+                        setState(() => _entries.insert(0, entry));
+                        await _saveEntry(entry);
+
+                        if (mounted) {
+                          Navigator.pop(ctx);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                locationSubtitle != null
+                                    ? 'Entry saved • $locationSubtitle'
+                                    : 'Entry saved (no GPS)',
+                              ),
+                              backgroundColor: const Color(0xFF4CAF50),
+                            ),
+                          );
+                        }
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFFFC107),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: const Text(
+                        'Save',
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
       ),
     );
   }
