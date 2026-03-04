@@ -45,3 +45,68 @@ groups:
         annotations:
           summary: "Low sample collection rate"
           description: "Fewer than 0.1 samples per second collected in last 10 minutes"
+
+      # WARNING: device battery critically low — field operator must swap/charge soon.
+      # Requires the collector to expose ancientvision_battery_mv gauge (latest reading
+      # from the BLE JSON "batt" field pushed via /ingest).
+      - alert: BatteryLow
+        expr: ancientvision_battery_mv < 3500
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Device battery voltage is low"
+          description: "Device {{ $labels.device_id }} battery is {{ $value }}mV (threshold: 3500mV). Charge or replace soon."
+
+      # WARNING: anomaly rate has been elevated for >10 minutes — possible model drift.
+      # A short spike is expected during real events; sustained elevation suggests the
+      # model is classifying normal data as anomalous (concept drift or sensor fault).
+      - alert: ModelDriftDetected
+        expr: rate(ancientvision_anomaly_count_total[5m]) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Possible ML model drift detected"
+          description: "Anomaly detection rate has exceeded 0.8/s for >10 minutes. Consider recalibration or model rollback."
+
+      # WARNING: file-watcher health endpoint has been unreachable.
+      # Watcher exposes /health on port 8766; Prometheus job 'ancientvision-watcher'
+      # scrapes it.  If it disappears the data-triggered retraining pipeline is broken.
+      - alert: WatcherDown
+        expr: up{job="ancientvision-watcher"} == 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "File-watcher service is down"
+          description: "The data file-watcher (retraining trigger) has been unreachable for >3 minutes. Automated retraining will not fire."
+
+      # WARNING: PPV has been in the DIN 4150-3 warning zone for >5 minutes.
+      # DIN 4150-3 sensitive-structure limit is 1.0 mm/s peak.  A sustained mean above
+      # this threshold indicates ongoing vibration hazard requiring field intervention.
+      # Uses ancientvision_ppv_mmps gauge (mean over reporting window).
+      - alert: HighPpvSustained
+        expr: ancientvision_ppv_mmps > 1.0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Sustained high PPV — DIN 4150-3 warning zone"
+          description: "Mean PPV is {{ $value | humanizeFloat(2) }} mm/s (DIN limit: 1.0 mm/s) for >5 minutes. Evacuate or inspect site."
+
+      # WARNING: no samples received during active field hours (06:00–22:00 UTC).
+      # Outside those hours the device is expected to be off, so we suppress the alert.
+      # Uses hour() to restrict to active hours; rate window matches LowSampleRate but
+      # the time-of-day guard avoids overnight noise.
+      - alert: NoDevicesSeen
+        expr: |
+          (hour() >= 6 and hour() < 22)
+          and
+          rate(ancientvision_samples_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No vibration samples received during active hours"
+          description: "No samples have been received for >10 minutes between 06:00 and 22:00 UTC. Check device power and BLE connectivity."
