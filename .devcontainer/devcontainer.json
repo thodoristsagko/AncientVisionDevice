@@ -1,0 +1,33 @@
+{
+  "name": "AncientVision Dev",
+  "dockerComposeFile": "../docker-compose.dev.yml",
+  "service": "ml-dev",
+  "workspaceFolder": "/workspace",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.pylint",
+        "dart-code.dart-code",
+        "dart-code.flutter",
+        "platformio.platformio-ide",
+        "ms-azuretools.vscode-docker",
+        "eamodio.gitlens",
+        "usernamehw.errorlens"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3",
+        "editor.formatOnSave": true,
+        "python.linting.enabled": true,
+        "[python]": {
+          "editor.defaultFormatter": "ms-python.python"
+        },
+        "[dart]": {
+          "editor.defaultFormatter": "dart-code.dart-code"
+        }
+      }
+    }
+  },
+  "forwardPorts": [8765, 9090, 3000],
+  "postCreateCommand": "pip install -r docker/collect/requirements.txt && pip install pytest pytest-cov flake8 black isort"
+}
