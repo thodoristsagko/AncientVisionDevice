@@ -1446,6 +1446,7 @@ void collectSample() {
   staValue = STA_ALPHA * sampleEnergy + (1.0f - STA_ALPHA) * staValue;
   ltaValue = LTA_ALPHA * sampleEnergy + (1.0f - LTA_ALPHA) * ltaValue;
   staLtaRatio = (ltaValue > 1e-10f) ? staValue / ltaValue : 1.0f;  // P83: guard prevents zero-division
+  staLtaRatio = (isnan(staLtaRatio) || isinf(staLtaRatio)) ? 1.0f : staLtaRatio;  // P83: clamp NaN/Inf before JSON
 
   // Legacy backward compat: magnitude
   vibrationMagnitude = sqrt(mag);

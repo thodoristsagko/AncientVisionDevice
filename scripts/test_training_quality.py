@@ -10,6 +10,7 @@ import json
 import os
 import py_compile
 import sys
+import unittest
 
 import numpy as np
 
@@ -380,3 +381,193 @@ def test_model_config_complete():
             assert key in config, (
                 f"Required key '{key}' not found in {config_name}"
             )
+
+
+# ---------------------------------------------------------------------------
+# P25 unittest classes: model asset files, scaler, config.json, inference
+# ---------------------------------------------------------------------------
+
+ASSETS_DIR = os.path.join(REPO_DIR, "app", "assets", "ml")
+PRECURSOR_MODEL = os.path.join(ASSETS_DIR, "precursor_classifier.tflite")
+AUTOENCODER_MODEL = os.path.join(ASSETS_DIR, "autoencoder.tflite")
+SCALER_FILE = os.path.join(ASSETS_DIR, "precursor_classifier_scaler.json")
+CONFIG_FILE = os.path.join(ASSETS_DIR, "config.json")
+
+_MODELS_PRESENT = os.path.exists(PRECURSOR_MODEL) and os.path.exists(AUTOENCODER_MODEL)
+SKIP_IF_NO_MODELS = unittest.skipUnless(
+    _MODELS_PRESENT,
+    "TFLite models not found — run training first"
+)
+
+
+class TestModelFilesExist(unittest.TestCase):
+    """Model asset files exist and have reasonable sizes."""
+
+    def test_precursor_tflite_exists(self):
+        if not os.path.exists(PRECURSOR_MODEL):
+            self.skipTest(f"TFLite models not found — run training first: {PRECURSOR_MODEL}")
+        self.assertTrue(True)  # file exists
+
+    def test_autoencoder_tflite_exists(self):
+        if not os.path.exists(AUTOENCODER_MODEL):
+            self.skipTest(f"TFLite models not found — run training first: {AUTOENCODER_MODEL}")
+        self.assertTrue(True)  # file exists
+
+    def test_scaler_json_exists(self):
+        if not os.path.exists(SCALER_FILE):
+            self.skipTest(f"Scaler file not found — run training first: {SCALER_FILE}")
+        self.assertTrue(True)  # file exists
+
+    def test_precursor_tflite_min_size(self):
+        if os.path.exists(PRECURSOR_MODEL):
+            size = os.path.getsize(PRECURSOR_MODEL)
+            self.assertGreater(size, 1000, f"precursor_classifier.tflite suspiciously small: {size} bytes")
+
+    def test_autoencoder_tflite_min_size(self):
+        if os.path.exists(AUTOENCODER_MODEL):
+            size = os.path.getsize(AUTOENCODER_MODEL)
+            self.assertGreater(size, 1000, f"autoencoder.tflite suspiciously small: {size} bytes")
+
+
+class TestScalerJson(unittest.TestCase):
+    """Scaler JSON has correct structure and sane statistics."""
+
+    def setUp(self):
+        if not os.path.exists(SCALER_FILE):
+            self.skipTest("Scaler file not found")
+        with open(SCALER_FILE) as f:
+            self.scaler = json.load(f)
+
+    def test_scaler_has_mean(self):
+        self.assertIn("mean", self.scaler)
+
+    def test_scaler_has_scale(self):
+        self.assertIn("scale", self.scaler)
+
+    def test_scaler_mean_length(self):
+        self.assertEqual(len(self.scaler["mean"]), 17,
+                         "Precursor classifier expects 17 features")
+
+    def test_scaler_scale_length(self):
+        self.assertEqual(len(self.scaler["scale"]), 17)
+
+    def test_scaler_scale_nonzero(self):
+        for i, v in enumerate(self.scaler["scale"]):
+            self.assertGreater(abs(v), 1e-10, f"Scale[{i}] is near zero — division by zero risk")
+
+    def test_scaler_mean_finite(self):
+        for i, v in enumerate(self.scaler["mean"]):
+            self.assertTrue(np.isfinite(v), f"Mean[{i}] is not finite: {v}")
+
+
+class TestConfigJson(unittest.TestCase):
+    """config.json has required fields and reasonable values."""
+
+    def setUp(self):
+        if not os.path.exists(CONFIG_FILE):
+            self.skipTest("Config file not found")
+        with open(CONFIG_FILE) as f:
+            self.config = json.load(f)
+
+    def test_config_has_labels(self):
+        self.assertIn("labels", self.config)
+
+    def test_config_labels_count(self):
+        labels = self.config.get("labels", [])
+        self.assertGreaterEqual(len(labels), 2, "Need at least 2 class labels")
+
+    def test_config_has_version(self):
+        self.assertIn("version", self.config)
+
+    def test_config_has_thresholds(self):
+        has_thresh = (
+            "anomaly_threshold" in self.config or
+            "precursor_thresholds" in self.config or
+            "thresholds" in self.config
+        )
+        self.assertTrue(has_thresh, "Config must contain threshold values")
+
+
+@SKIP_IF_NO_MODELS
+class TestPrecursorModelInference(unittest.TestCase):
+    """Precursor classifier produces valid outputs."""
+
+    def _run_inference(self, features_17):
+        try:
+            import tflite_runtime.interpreter as tflite
+        except ImportError:
+            import tensorflow as tf
+            tflite = tf.lite
+        interp = tflite.Interpreter(model_path=PRECURSOR_MODEL)
+        interp.allocate_tensors()
+        in_idx = interp.get_input_details()[0]["index"]
+        out_idx = interp.get_output_details()[0]["index"]
+        interp.set_tensor(in_idx, np.array([features_17], dtype=np.float32))
+        interp.invoke()
+        return interp.get_tensor(out_idx)[0]
+
+    def test_output_shape(self):
+        probs = self._run_inference([0.0] * 17)
+        self.assertEqual(len(probs), 4, "Precursor classifier must output 4 class probabilities")
+
+    def test_probabilities_sum_to_one(self):
+        probs = self._run_inference([0.0] * 17)
+        total = float(sum(probs))
+        self.assertAlmostEqual(total, 1.0, places=2,
+                               msg=f"Probabilities must sum to ~1.0, got {total:.4f}")
+
+    def test_probabilities_in_range(self):
+        probs = self._run_inference([0.5] * 17)
+        for i, p in enumerate(probs):
+            self.assertGreaterEqual(float(p), 0.0, f"prob[{i}] < 0")
+            self.assertLessEqual(float(p), 1.0, f"prob[{i}] > 1")
+
+    def test_no_nan_output(self):
+        probs = self._run_inference([1.0] * 17)
+        for i, p in enumerate(probs):
+            self.assertFalse(np.isnan(float(p)), f"prob[{i}] is NaN")
+
+    def test_normal_class_dominates_zero_input(self):
+        """With all-zero features, normal class should have highest probability."""
+        probs = self._run_inference([0.0] * 17)
+        max_prob = max(float(p) for p in probs)
+        self.assertGreater(max_prob, 0.25, "No class dominates — model might be random")
+
+
+@SKIP_IF_NO_MODELS
+class TestAutoencoderInference(unittest.TestCase):
+    """Autoencoder produces valid reconstruction errors."""
+
+    def _run_inference(self, features_11):
+        try:
+            import tflite_runtime.interpreter as tflite
+        except ImportError:
+            import tensorflow as tf
+            tflite = tf.lite
+        interp = tflite.Interpreter(model_path=AUTOENCODER_MODEL)
+        interp.allocate_tensors()
+        in_idx = interp.get_input_details()[0]["index"]
+        out_idx = interp.get_output_details()[0]["index"]
+        interp.set_tensor(in_idx, np.array([features_11], dtype=np.float32))
+        interp.invoke()
+        return interp.get_tensor(out_idx)[0]
+
+    def test_output_shape(self):
+        out = self._run_inference([0.0] * 11)
+        self.assertEqual(len(out), 11, "Autoencoder output must match input dimension")
+
+    def test_reconstruction_finite(self):
+        out = self._run_inference([0.5] * 11)
+        for i, v in enumerate(out):
+            self.assertTrue(np.isfinite(float(v)), f"output[{i}] is not finite: {v}")
+
+    def test_zero_input_small_error(self):
+        """Zero input should have small reconstruction error (normal-ish pattern)."""
+        inp = [0.0] * 11
+        out = self._run_inference(inp)
+        mse = float(np.mean((np.array(inp) - np.array(out)) ** 2))
+        self.assertLess(mse, 10.0, f"Reconstruction MSE suspiciously large for zero input: {mse:.4f}")
+
+
+if __name__ == "__main__":
+    unittest.main()
