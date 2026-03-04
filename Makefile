@@ -5,7 +5,8 @@
 
 .PHONY: help build firmware flutter ml collect train monitor dev-ml dev-flutter dev-firmware \
         test simulate backup logs clean report drift validate-config quality-check \
-        label replay schedule playback sync annotate
+        label replay schedule playback sync annotate analyze apk quantize benchmark load-test \
+        validate-data e2e
 
 # ---------------------------------------------------------------------------
 # Help
@@ -43,6 +44,14 @@ help:
 	@echo "  replay         Replay a field CSV against the collector"
 	@echo "  schedule       Trigger retraining check (--once mode)"
 	@echo "  sync           Sync field CSVs to Firebase Storage"
+	@echo ""
+	@echo "  analyze        Run Flutter analyzer (check for lint issues)"
+	@echo "  apk            Build Flutter release APK"
+	@echo "  quantize       Run INT8 quantization on ML models"
+	@echo "  benchmark      Run inference benchmark (100 runs)"
+	@echo "  load-test      Run API load test (500 requests, p95 latency)"
+	@echo "  validate-data  Validate field training data integrity"
+	@echo "  e2e            Run end-to-end pipeline integration tests"
 	@echo ""
 
 # ---------------------------------------------------------------------------
@@ -216,3 +225,52 @@ clean:
 	docker compose -f docker-compose.dev.yml down --remove-orphans || true
 	@echo "==> Pruning Docker system (containers, networks, dangling images)..."
 	docker system prune -f
+
+# ---------------------------------------------------------------------------
+# Build & Analysis
+# ---------------------------------------------------------------------------
+
+analyze:
+	@echo "==> Running Flutter analyze..."
+	cd app && flutter analyze
+
+apk:
+	@echo "==> Building Flutter release APK..."
+	cd app && flutter build apk --release
+	@echo "APK: app/build/app/outputs/flutter-apk/app-release.apk"
+
+quantize:
+	@echo "==> Running INT8 quantization on ML models..."
+	@if [ -f scripts/quantize_models.py ]; then \
+		python scripts/quantize_models.py --assets-dir app/assets/ml; \
+	else \
+		echo "WARNING: scripts/quantize_models.py not found"; \
+	fi
+
+benchmark:
+	@echo "==> Running inference benchmark..."
+	@if [ -f scripts/inference_benchmark.py ]; then \
+		python scripts/inference_benchmark.py --n-runs 100 --model both; \
+	else \
+		echo "WARNING: scripts/inference_benchmark.py not found"; \
+	fi
+
+# ---------------------------------------------------------------------------
+# Testing & Validation
+# ---------------------------------------------------------------------------
+
+load-test:
+	@echo "==> Running load test against local collector..."
+	python scripts/load_test.py --url http://localhost:8765 --n 200 --concurrency 10
+
+validate-data:
+	@echo "==> Validating training data..."
+	@if [ -f scripts/validate_training_data.py ]; then \
+		python scripts/validate_training_data.py --data-dir ./data/field; \
+	else \
+		echo "WARNING: scripts/validate_training_data.py not found"; \
+	fi
+
+e2e:
+	@echo "==> Running end-to-end pipeline tests..."
+	python -m pytest scripts/test_e2e_pipeline.py -v
