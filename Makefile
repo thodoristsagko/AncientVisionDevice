@@ -8,7 +8,7 @@
         label replay schedule playback sync annotate analyze apk quantize benchmark load-test \
         validate-data e2e status health augment online-learn tune onnx \
         live-dashboard ab-test augmentation-report \
-        serve-model session-report calibration-check
+        serve-model session-report calibration-check confidence-analysis
 
 # ---------------------------------------------------------------------------
 # Help
@@ -69,6 +69,7 @@ help:
 	@echo "  serve-model           Start lightweight HTTP model inference server (port 8766)"
 	@echo "  session-report        Generate Markdown report from a session CSV (set SESSION_CSV=)"
 	@echo "  calibration-check     Verify device calibration quality from field CSVs"
+	@echo "  confidence-analysis   Analyze model confidence distribution and calibration (ECE)"
 	@echo ""
 
 # ---------------------------------------------------------------------------
@@ -144,6 +145,7 @@ test:
 		scripts/test_evaluate_models.py \
 		scripts/test_visualize.py \
 		scripts/test_training_quality.py \
+		scripts/test_new_scripts.py \
 		-v
 
 # ---------------------------------------------------------------------------
@@ -393,3 +395,11 @@ session-report:
 calibration-check:
 	@echo "==> Checking device calibration quality from ./data/field..."
 	python scripts/device_calibration_check.py --data-dir ./data/field
+
+confidence-analysis:
+	@echo "==> Analyzing model confidence and calibration..."
+	python scripts/model_confidence_analysis.py \
+		--assets-dir app/assets/ml \
+		$(if $(N_SAMPLES),--n-samples "$(N_SAMPLES)",) \
+		$(if $(OUTPUT),--output "$(OUTPUT)",) \
+		$(if $(SEED),--seed "$(SEED)",)
