@@ -10,7 +10,6 @@ Usage:
 """
 
 import argparse
-import curses
 import json
 import sys
 import time
@@ -18,6 +17,12 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+
+try:
+    import curses
+    _CURSES_AVAILABLE = True
+except ImportError:
+    _CURSES_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # API helpers
@@ -63,7 +68,7 @@ def fetch_recent(base_url: str, n: int = 5):
 # Curses colour pairs
 # ---------------------------------------------------------------------------
 
-# Pair numbers (1-indexed)
+# Pair numbers (1-indexed, only meaningful when curses is available)
 PAIR_HEADER  = 1
 PAIR_HEALTHY = 2
 PAIR_WARN    = 3
@@ -387,6 +392,17 @@ def main(argv=None):
         help="Path to data directory (checked for .retrain_trigger, default: ./data)",
     )
     args = parser.parse_args(argv)
+
+    if not _CURSES_AVAILABLE:
+        print(
+            "Error: curses is not available on this platform.\n"
+            "  On Windows, install windows-curses:  pip install windows-curses\n"
+            "  Or run inside the Docker ml-dev container:\n"
+            "    make dev-ml\n"
+            "    python scripts/live_dashboard.py",
+            file=sys.stderr,
+        )
+        return 1
 
     try:
         curses.wrapper(_run, args)
