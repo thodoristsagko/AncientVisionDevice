@@ -27,5 +27,7 @@ _saved_platform = sys.platform
 sys.platform = "linux_ci_stub"
 try:
     import data_augmentation_report  # noqa: F401  — cache in sys.modules
+    import health_check               # noqa: F401  — same win32 stdout-replace issue
+    import pipeline_status            # noqa: F401  — same win32 stdout-replace guard
 finally:
     sys.platform = _saved_platform

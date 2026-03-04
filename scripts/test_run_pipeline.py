@@ -292,3 +292,195 @@ class TestValidateTrainingData:
 
         count = rp._validate_training_data(field_dir)
         assert count == 3, f"Expected 3 samples, got {count}"
+
+
+# ---------------------------------------------------------------------------
+# --dry-run flag
+# ---------------------------------------------------------------------------
+
+class TestDryRun:
+    """dry_run() validates prerequisites and returns 0 on success, 1 on failure."""
+
+    def _setup_valid_state(self, rp, tmp_path) -> Path:
+        """Create a minimal valid state: trigger + field CSV. Returns field_dir."""
+        rp.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        rp.TRIGGER_FILE.touch()
+        field_dir = rp.DATA_DIR / "field"
+        field_dir.mkdir(parents=True, exist_ok=True)
+        (field_dir / "session.csv").write_text("t,ppv\n0.0,0.1\n0.005,0.2\n")
+        return field_dir
+
+    def test_dry_run_returns_1_when_no_trigger(self, tmp_path, monkeypatch):
+        """dry_run() returns 1 when trigger file is absent (pipeline is a no-op)."""
+        rp = _load_pipeline(tmp_path, monkeypatch)
+        rp.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        # Trigger file deliberately NOT created.
+        field_dir = rp.DATA_DIR / "field"
+        field_dir.mkdir(parents=True, exist_ok=True)
+        (field_dir / "session.csv").write_text("t,ppv\n0.0,0.1\n")
+
+        result = rp.dry_run()
+        assert result == 1, "dry_run() should return 1 when trigger is missing"
+
+    def test_dry_run_returns_1_when_no_field_data(self, tmp_path, monkeypatch):
+        """dry_run() returns 1 when field data directory is absent."""
+        rp = _load_pipeline(tmp_path, monkeypatch)
+        rp.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        rp.TRIGGER_FILE.touch()
+        # field/ dir deliberately NOT created
+
+        result = rp.dry_run()
+        assert result == 1, "dry_run() should return 1 when field dir is missing"
+
+    def test_dry_run_returns_1_when_field_data_empty(self, tmp_path, monkeypatch):
+        """dry_run() returns 1 when field data directory has no valid samples."""
+        rp = _load_pipeline(tmp_path, monkeypatch)
+        rp.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        rp.TRIGGER_FILE.touch()
+        field_dir = rp.DATA_DIR / "field"
+        field_dir.mkdir(parents=True, exist_ok=True)
+        # CSV with header only — no data rows
+        (field_dir / "session.csv").write_text("t,ppv\n")
+
+        result = rp.dry_run()
+        assert result == 1, "dry_run() should return 1 when field data is empty"
+
+    def test_dry_run_returns_0_with_valid_data_and_trigger(self, tmp_path, monkeypatch):
+        """dry_run() returns 0 when trigger exists and field data is valid."""
+        rp = _load_pipeline(tmp_path, monkeypatch)
+        self._setup_valid_state(rp, tmp_path)
+        # Point ASSETS_DIR at a writable temp location (will not exist — parent is writable)
+        rp.ASSETS_DIR = tmp_path / "assets_output"
+
+        result = rp.dry_run()
+        assert result == 0, "dry_run() should return 0 when all prerequisites are met"
+
+    def test_dry_run_does_not_run_training(self, tmp_path, monkeypatch):
+        """dry_run() must not invoke any subprocess (no actual training)."""
+        rp = _load_pipeline(tmp_path, monkeypatch)
+        self._setup_valid_state(rp, tmp_path)
+        rp.ASSETS_DIR = tmp_path / "assets_output"
+
+        with patch("subprocess.run") as mock_run:
+            rp.dry_run()
+            mock_run.assert_not_called()
+
+    def test_dry_run_writes_to_pipeline_log(self, tmp_path, monkeypatch):
+        """dry_run() writes at least one JSON entry to pipeline.log."""
+        rp = _load_pipeline(tmp_path, monkeypatch)
+        self._setup_valid_state(rp, tmp_path)
+        rp.ASSETS_DIR = tmp_path / "assets_output"
+
+        rp.dry_run()
+
+        log_path = rp.DATA_DIR / "pipeline.log"
+        assert log_path.exists(), "pipeline.log must be created by dry_run()"
+        lines = [l for l in log_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        assert lines, "pipeline.log must contain at least one JSON entry"
+        # Each line must be valid JSON
+        for line in lines:
+            parsed = __import__("json").loads(line)
+            assert "ts" in parsed and "msg" in parsed
+
+
+# ---------------------------------------------------------------------------
+# --status flag
+# ---------------------------------------------------------------------------
+
+class TestStatus:
+    """status() prints pipeline state and returns 0."""
+
+    def test_status_returns_0_with_no_data(self, tmp_path, monkeypatch, capsys):
+        """status() returns 0 even when no pipeline_metrics.json exists."""
+        rp = _load_pipeline(tmp_path, monkeypatch)
+        rp.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        rp.ASSETS_DIR = tmp_path / "assets"
+
+        result = rp.status()
+        assert result == 0
+
+    def test_status_prints_last_training_time(self, tmp_path, monkeypatch, capsys):
+        """status() displays 'pipeline_run_at' from pipeline_metrics.json."""
+        rp = _load_pipeline(tmp_path, monkeypatch)
+        rp.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        rp.ASSETS_DIR = tmp_path / "assets"
+
+        metrics = {
+            "pipeline_run_at": "2026-03-04T10:00:00+00:00",
+            "training_duration_seconds": 42.5,
+            "samples_processed": 7,
+            "model_sizes": {},
+        }
+        (rp.DATA_DIR / "pipeline_metrics.json").write_text(
+            __import__("json").dumps(metrics)
+        )
+
+        rp.status()
+        out = capsys.readouterr().out
+        assert "2026-03-04T10:00:00" in out, "status() must print the last training timestamp"
+        assert "42.5" in out, "status() must print the training duration"
+
+    def test_status_prints_model_version(self, tmp_path, monkeypatch, capsys):
+        """status() displays model version from precursor_classifier_config.json."""
+        rp = _load_pipeline(tmp_path, monkeypatch)
+        rp.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        rp.ASSETS_DIR = tmp_path / "assets"
+        rp.ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+
+        config = {
+            "model_version": "2.3.1",
+            "trained_at": "2026-03-04T09:00:00+00:00",
+        }
+        (rp.ASSETS_DIR / "precursor_classifier_config.json").write_text(
+            __import__("json").dumps(config)
+        )
+
+        rp.status()
+        out = capsys.readouterr().out
+        assert "2.3.1" in out, "status() must print the model version"
+
+    def test_status_prints_sample_count(self, tmp_path, monkeypatch, capsys):
+        """status() prints the number of samples in field data CSVs."""
+        rp = _load_pipeline(tmp_path, monkeypatch)
+        rp.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        rp.ASSETS_DIR = tmp_path / "assets"
+
+        field_dir = rp.DATA_DIR / "field"
+        field_dir.mkdir(parents=True, exist_ok=True)
+        (field_dir / "s1.csv").write_text("t,ppv\n0.0,0.1\n0.005,0.2\n0.010,0.3\n")
+        (field_dir / "s2.csv").write_text("t,ppv\n0.0,0.1\n0.005,0.2\n")
+
+        rp.status()
+        out = capsys.readouterr().out
+        # 3 rows in s1 + 2 rows in s2 = 5 total samples
+        assert "5" in out, "status() must print the total sample count (5)"
+
+    def test_status_reports_healthy_when_models_present(self, tmp_path, monkeypatch, capsys):
+        """status() reports HEALTHY when both .tflite models exist."""
+        rp = _load_pipeline(tmp_path, monkeypatch)
+        rp.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        rp.ASSETS_DIR = tmp_path / "assets"
+        rp.ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+
+        (rp.ASSETS_DIR / "vibration_anomaly.tflite").write_bytes(b"fake_tflite")
+        (rp.ASSETS_DIR / "precursor_classifier.tflite").write_bytes(b"fake_tflite")
+
+        rp.status()
+        out = capsys.readouterr().out
+        assert "HEALTHY" in out, "status() should report HEALTHY when all models are present"
+
+    def test_status_reports_needs_attention_when_model_missing(self, tmp_path, monkeypatch, capsys):
+        """status() reports NEEDS ATTENTION when a .tflite model is absent."""
+        rp = _load_pipeline(tmp_path, monkeypatch)
+        rp.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        rp.ASSETS_DIR = tmp_path / "assets"
+        rp.ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+        # Only one model present — precursor_classifier is missing
+
+        (rp.ASSETS_DIR / "vibration_anomaly.tflite").write_bytes(b"fake_tflite")
+
+        rp.status()
+        out = capsys.readouterr().out
+        assert "NEEDS ATTENTION" in out, (
+            "status() should report NEEDS ATTENTION when a model is missing"
+        )
