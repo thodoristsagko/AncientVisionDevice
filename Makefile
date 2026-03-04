@@ -110,6 +110,8 @@ help:
 	@echo "  visualize-latent      Visualize autoencoder latent space"
 	@echo "  field-report          Generate field data report"
 	@echo "  calibrate             Interactive device calibration"
+	@echo "  drift-check           Check for data drift between collected data and training baseline"
+	@echo "  retrain-advisor       Evaluate whether ML model retraining is recommended"
 	@echo ""
 
 
@@ -753,3 +755,13 @@ calibrate:
 	else \
 		echo "WARNING: scripts/calibrate.py not found"; \
 	fi
+
+# ---------------------------------------------------------------------------
+# Drift detection and retraining advisor
+# ---------------------------------------------------------------------------
+
+drift-check: ## Check for data drift between collected data and training baseline
+	python scripts/data_drift_detector.py
+
+retrain-advisor: ## Evaluate whether ML model retraining is recommended
+	python scripts/retrain_advisor.py
