@@ -223,6 +223,52 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / denom)
 
 
+def _ascii_scatter_plot(device_accuracies: list, device_sample_counts: list, device_ids: list) -> None:
+    """Print ASCII scatter plot of device accuracy vs sample count."""
+    if not device_accuracies or not device_sample_counts:
+        return
+
+    acc_vals = [a for a, _ in device_accuracies]
+    sample_vals = [s for _, s in device_sample_counts]
+
+    if not acc_vals or not sample_vals:
+        return
+
+    min_acc, max_acc = min(acc_vals), max(acc_vals)
+    min_samples, max_samples = min(sample_vals), max(sample_vals)
+
+    # If all accuracies are the same, adjust range
+    if min_acc == max_acc:
+        min_acc -= 0.05
+        max_acc += 0.05
+
+    # Chart dimensions
+    chart_h, chart_w = 12, 40
+    chart = [["." for _ in range(chart_w)] for _ in range(chart_h)]
+
+    # Plot points
+    for acc, samples, did in zip(acc_vals, sample_vals, device_ids):
+        x = int((samples - min_samples) / max(max_samples - min_samples, 1) * (chart_w - 1))
+        y = chart_h - 1 - int((acc - min_acc) / max(max_acc - min_acc, 1) * (chart_h - 1))
+        x = max(0, min(x, chart_w - 1))
+        y = max(0, min(y, chart_h - 1))
+        chart[y][x] = "●"
+
+    # Print chart
+    print("\n  Accuracy vs. Sample Count (scatter plot):")
+    print(f"  {max_acc:.3f}  |", end="")
+    print("".join(chart[0]))
+    for i in range(1, chart_h - 1):
+        mid = (max_acc - min_acc) * (1 - i / (chart_h - 1)) + min_acc
+        print(f"  {mid:.3f}  |", end="")
+        print("".join(chart[i]))
+    print(f"  {min_acc:.3f}  |", end="")
+    print("".join(chart[chart_h - 1]))
+    print(f"       +{'-' * chart_w}")
+    print(f"       {min_samples:.0f}" + " " * (chart_w - 10) + f"{max_samples:.0f}")
+    print("       Sample Count")
+
+
 def _device_similarity_matrix(device_feature_means: dict) -> None:
     """Print a cosine similarity matrix between device feature means."""
     device_ids = sorted(device_feature_means.keys())
@@ -439,9 +485,10 @@ def main() -> None:
         all_rec = [r["recall"] for _, r in all_results]
         print("  " + "-" * (len(header) - 2))
         total_n = sum(r["n"] for _, r in all_results)
+        mean_acc = np.mean(all_acc)
         print(
             f"  {'MEAN':<{col_w[0]}}  {total_n:>{col_w[1]}}  "
-            f"{np.mean(all_acc):>{col_w[2]}.4f}  {np.mean(all_prec):>{col_w[3]}.4f}  "
+            f"{mean_acc:>{col_w[2]}.4f}  {np.mean(all_prec):>{col_w[3]}.4f}  "
             f"{np.mean(all_rec):>{col_w[4]}.4f}"
         )
         print()
@@ -454,6 +501,33 @@ def main() -> None:
         if worst_m["accuracy"] < 0.7:
             print(f"  WARNING: {worst_id} has low cross-device accuracy - "
                   "may need device-specific calibration or data collection.")
+
+        # Domain shift detection
+        print()
+        print("=" * 70)
+        print("DOMAIN SHIFT DETECTION (>10% accuracy drop vs mean)")
+        print("=" * 70)
+        print()
+        domain_shifts = []
+        for dev_id, metrics in all_results:
+            acc_drop = mean_acc - metrics["accuracy"]
+            drop_pct = (acc_drop / max(mean_acc, 1e-10)) * 100
+            if drop_pct > 10.0:
+                domain_shifts.append((dev_id, metrics["accuracy"], drop_pct))
+
+        if domain_shifts:
+            print("  Devices with possible domain shift:")
+            for dev_id, acc, drop_pct in sorted(domain_shifts, key=lambda x: -x[2]):
+                print(f"    {dev_id:<20} accuracy={acc:.4f}  "
+                      f"drop={drop_pct:.1f}% vs mean={mean_acc:.4f}")
+        else:
+            print("  No significant domain shift detected across devices.")
+
+        # Scatter plot visualization
+        device_accuracies = [(r["accuracy"], r["n"]) for _, r in all_results]
+        device_sample_counts = [(r["n"], r["accuracy"]) for _, r in all_results]
+        _ascii_scatter_plot(device_accuracies, device_sample_counts, [d for d, _ in all_results])
+
     else:
         print("\n  No devices had sufficient labeled data for evaluation.")
 
