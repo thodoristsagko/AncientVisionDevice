@@ -48,11 +48,11 @@ services:
       - DATA_DIR=/workspace/data
     entrypoint: ["python", "scripts/run_pipeline.py"]
     healthcheck:
-      test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('/workspace/data') else 1)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+      test: ["CMD", "python", "-c", "import tensorflow as tf; print('ok')"]
+      interval: 60s
+      timeout: 30s
+      retries: 2
+      start_period: 120s
     deploy:
       resources:
         limits:
