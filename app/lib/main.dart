@@ -12,6 +12,7 @@ import 'services/notification_service.dart';
 import 'services/background_service.dart';
 import 'services/settings_service.dart';
 
+import 'config/app_theme.dart';
 import 'widgets/offline_indicator.dart';
 import 'widgets/glass_bottom_nav_bar.dart';
 import 'widgets/full_screen_alert_overlay.dart';
@@ -22,6 +23,7 @@ import 'screens/findings_view.dart';
 import 'screens/tools_view.dart';
 import 'screens/safety/index.dart';
 import 'screens/onboarding_screen.dart';
+import 'screens/session_history_screen.dart';
 
 
 /// Sensor metrics passed to the alert overlay for context.
@@ -105,9 +107,25 @@ class _MyAppState extends State<MyApp> {
       );
     }
 
+    // Resolve ThemeMode from SettingsService's AppThemeMode setting.
+    final ThemeMode resolvedThemeMode;
+    switch (_settingsService.settings.themeMode) {
+      case AppThemeMode.light:
+        resolvedThemeMode = ThemeMode.light;
+        break;
+      case AppThemeMode.dark:
+        resolvedThemeMode = ThemeMode.dark;
+        break;
+      case AppThemeMode.system:
+        resolvedThemeMode = ThemeMode.system;
+        break;
+    }
+
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      theme: _settingsService.getThemeData(MediaQuery.platformBrightnessOf(context)),
+      theme: AppTheme.light,
+      darkTheme: AppTheme.dark,
+      themeMode: resolvedThemeMode,
       builder: (context, child) {
         if (_settingsService.settings.nightMode) {
           return ColorFiltered(
@@ -269,6 +287,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           onToggleMute: _toggleMute,
           onAlert: _triggerFullScreenAlert,
         ),
+        const SessionHistoryScreen(),
       ],
     );
   }

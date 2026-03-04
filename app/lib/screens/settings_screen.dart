@@ -167,6 +167,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
                     // === DISPLAY ===
                     _buildSection('Display', Icons.display_settings, [
+                      _buildThemeModeTile(),
+                      const Divider(height: 1, color: Colors.white12),
                       _buildSwitchTile(
                         'Show GPS Coordinates',
                         'Display location on findings',
@@ -364,6 +366,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
             },
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildThemeModeTile() {
+    return ListTile(
+      leading: const Icon(Icons.brightness_medium, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('Theme', style: AppTextStyles.body),
+      subtitle: Text(
+        'App appearance: ${_settingsService.settings.themeMode.label}',
+        style: AppTextStyles.subtitleSmall,
+      ),
+      trailing: DropdownButton<AppThemeMode>(
+        value: _settingsService.settings.themeMode,
+        dropdownColor: AppColors.primaryDark,
+        underline: const SizedBox.shrink(),
+        style: AppTextStyles.body,
+        items: AppThemeMode.values
+            .map(
+              (m) => DropdownMenuItem(
+                value: m,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(m.icon, color: AppColors.accent, size: 18),
+                    const SizedBox(width: 6),
+                    Text(m.label),
+                  ],
+                ),
+              ),
+            )
+            .toList(),
+        onChanged: (value) async {
+          if (value != null) {
+            await _updateSetting('themeMode', value);
+          }
+        },
       ),
     );
   }
