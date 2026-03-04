@@ -278,8 +278,13 @@ class _PhotogrammetryScreenState extends State<PhotogrammetryScreen>
   // Get the next recommended angle
   CaptureAngle get _currentAngle => _captureAngles[_currentAngleIndex];
 
-  // Check if enough photos for generation (minimum 4)
-  bool get _canGenerate => _captures.length >= 4;
+  // Check if enough photos for generation (minimum 5)
+  bool get _canGenerate => _captures.length >= 5;
+
+  // Coverage progress: assumes one photo every 10 degrees = 36 photos for full coverage
+  static const int _fullCoveragePhotoCount = 36;
+  double get _coverageProgress => (_captures.length / _fullCoveragePhotoCount).clamp(0.0, 1.0);
+  int get _coverageDegrees => (_coverageProgress * 360).round();
 
   // Check if all required angles are captured
   bool get _isComplete => _captures.length >= _captureAngles.length;
@@ -703,9 +708,12 @@ class _PhotogrammetryScreenState extends State<PhotogrammetryScreen>
 
   /// Generate 3D model — choose cloud or on-device.
   Future<void> _generate3DModel() async {
-    if (_captures.length < 4) {
+    if (_captures.length < 5) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Need at least 4 photos'), backgroundColor: Colors.orange),
+        SnackBar(
+          content: Text('Need at least 5 photos for reconstruction (you have ${_captures.length})'),
+          backgroundColor: Colors.orange,
+        ),
       );
       return;
     }
@@ -1425,10 +1433,83 @@ class _PhotogrammetryScreenState extends State<PhotogrammetryScreen>
                     ),
                   ),
 
+                  // --- Session info card + coverage ring ---
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 4),
+                    child: Row(
+                      children: [
+                        // Coverage ring
+                        SizedBox(
+                          width: 64,
+                          height: 64,
+                          child: Stack(
+                            alignment: Alignment.center,
+                            children: [
+                              CircularProgressIndicator(
+                                value: _coverageProgress,
+                                backgroundColor: Colors.white.withAlpha(30),
+                                valueColor: AlwaysStoppedAnimation(
+                                  _coverageProgress >= 1.0
+                                      ? const Color(0xFF4CAF50)
+                                      : const Color(0xFF7C4DFF),
+                                ),
+                                strokeWidth: 5,
+                              ),
+                              Text(
+                                '$_coverageDegrees°',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        // Session info text
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '${_captures.length} photo${_captures.length == 1 ? "" : "s"}',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                '${(_coverageProgress * 100).round()}% coverage',
+                                style: TextStyle(color: Colors.white.withAlpha(160), fontSize: 12),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                _captures.length >= 5
+                                    ? (_captures.length >= _fullCoveragePhotoCount
+                                        ? 'Ready for reconstruction'
+                                        : 'Ready — more photos improve quality')
+                                    : 'Need ${5 - _captures.length} more photo${(5 - _captures.length) == 1 ? "" : "s"}',
+                                style: TextStyle(
+                                  color: _captures.length >= 5
+                                      ? const Color(0xFF4CAF50)
+                                      : const Color(0xFFFFC107),
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
                   // --- Angle instruction ---
                   if (!_isComplete)
                     Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 4),
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 2),
                       child: Text(
                         _getAngleInstruction(_currentAngle),
                         style: TextStyle(color: Colors.white.withAlpha(150), fontSize: 12),
@@ -1465,7 +1546,27 @@ class _PhotogrammetryScreenState extends State<PhotogrammetryScreen>
                                         borderRadius: BorderRadius.circular(8),
                                         child: Image.file(File(capture.file.path), fit: BoxFit.cover),
                                       ),
-                                      // Quality dot
+                                      // Photo number overlay (bottom-left)
+                                      Positioned(
+                                        bottom: 3,
+                                        left: 3,
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                          decoration: BoxDecoration(
+                                            color: Colors.black54,
+                                            borderRadius: BorderRadius.circular(4),
+                                          ),
+                                          child: Text(
+                                            '${index + 1}',
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 9,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      // Quality dot (top-right)
                                       Positioned(
                                         top: 3,
                                         right: 3,
