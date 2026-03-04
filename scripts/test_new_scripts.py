@@ -2223,6 +2223,396 @@ class TestFeatureImportanceReport:
         assert "Baseline accuracy" in result.stdout
         assert "Top 5 most important" in result.stdout
         assert "Bottom 3 least important" in result.stdout
+
+
+# ===========================================================================
+# cross_site_comparison tests
+# ===========================================================================
+
+def _write_site_csv(path: Path, rows: list) -> None:
+    """Write list-of-dicts as CSV for cross_site_comparison tests."""
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _site_row(device_id: str, ppv: float, label: str = "normal",
+              anomaly_level: str = "normal",
+              ts: str = "2026-03-03T10:00:00Z") -> dict:
+    """Single CSV row for cross_site_comparison tests."""
+    return {
+        "timestamp": ts,
+        "device_id": device_id,
+        "ppv": str(ppv),
+        "rms": str(ppv * 0.7),
+        "label": label,
+        "anomaly_level": anomaly_level,
+    }
+
+
+class TestCrossSiteComparison:
+    """Tests for cross_site_comparison.py."""
+
+    def _run(self, args: list) -> "subprocess.CompletedProcess":
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "cross_site_comparison.py")] + args,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_no_data(self, tmp_path):
+        """Empty data dir exits 0 and prints 'No data found'."""
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        result = self._run(["--data-dir", str(empty_dir)])
+        assert result.returncode == 0
+        assert "No data found" in result.stdout
+
+    def test_single_device(self, tmp_path):
+        """Single device_id group produces a comparison table with one row."""
+        import cross_site_comparison as csc
+
+        rows = [_site_row("device-A", 0.05 + i * 0.001) for i in range(10)]
+        _write_site_csv(tmp_path / "session.csv", rows)
+
+        all_rows = csc.load_csv_files(str(tmp_path))
+        col_exists = csc._column_exists(all_rows, "device_id")
+        groups = csc.group_rows(all_rows, "device_id", col_exists)
+        stats = {k: csc.compute_group_stats(v) for k, v in groups.items()}
+
+        assert "device-A" in stats
+        assert stats["device-A"]["count"] == 10
+        assert stats["device-A"]["mean_ppv"] > 0.0
+
+    def test_multi_device(self, tmp_path):
+        """Multiple device_ids produce separate stats and a comparison table in output."""
+        rows = (
+            [_site_row("device-A", 0.05) for _ in range(10)]
+            + [_site_row("device-B", 0.20) for _ in range(10)]
+        )
+        _write_site_csv(tmp_path / "session.csv", rows)
+
+        result = self._run(["--data-dir", str(tmp_path), "--by", "device_id"])
+        assert result.returncode == 0
+        assert "device-A" in result.stdout
+        assert "device-B" in result.stdout
+        # device-B has higher PPV so should appear in table
+        assert "0.2000" in result.stdout or "0.20" in result.stdout
+
+    def test_group_by_label(self, tmp_path):
+        """Group by label column produces separate stats per label."""
+        import cross_site_comparison as csc
+
+        rows = (
+            [_site_row("device-A", 0.05, label="normal") for _ in range(10)]
+            + [_site_row("device-A", 0.50, label="soil_creep") for _ in range(10)]
+        )
+        _write_site_csv(tmp_path / "session.csv", rows)
+
+        all_rows = csc.load_csv_files(str(tmp_path))
+        col_exists = csc._column_exists(all_rows, "label")
+        groups = csc.group_rows(all_rows, "label", col_exists)
+        stats = {k: csc.compute_group_stats(v) for k, v in groups.items()}
+
+        assert "normal" in stats
+        assert "soil_creep" in stats
+        assert stats["soil_creep"]["mean_ppv"] > stats["normal"]["mean_ppv"]
+
+    def test_missing_column_fallback(self, tmp_path):
+        """If grouping column missing, falls back to 'all_devices' single group."""
+        import cross_site_comparison as csc
+
+        # CSV without label column
+        rows = [{"timestamp": "2026-03-03T10:00:00Z", "ppv": "0.05"} for _ in range(5)]
+        _write_site_csv(tmp_path / "session.csv", rows)
+
+        all_rows = csc.load_csv_files(str(tmp_path))
+        col_exists = csc._column_exists(all_rows, "label")
+        assert not col_exists
+
+        groups = csc.group_rows(all_rows, "label", col_exists)
+        assert "all_devices" in groups
+        assert len(groups) == 1
+
+    def test_correlation_single_group(self, tmp_path):
+        """Single group returns None for correlation (cannot correlate one group)."""
+        import cross_site_comparison as csc
+
+        rows = [_site_row("device-A", 0.05) for _ in range(5)]
+        _write_site_csv(tmp_path / "session.csv", rows)
+
+        all_rows = csc.load_csv_files(str(tmp_path))
+        col_exists = csc._column_exists(all_rows, "device_id")
+        groups = csc.group_rows(all_rows, "device_id", col_exists)
+        stats = {k: csc.compute_group_stats(v) for k, v in groups.items()}
+
+        r = csc.compute_group_correlations(stats)
+        assert r is None
+
+    def test_correlation_multi_group(self, tmp_path):
+        """Multiple groups returns a float correlation value."""
+        import cross_site_comparison as csc
+
+        rows = (
+            [_site_row("device-A", 0.05) for _ in range(5)]
+            + [_site_row("device-B", 0.20) for _ in range(5)]
+        )
+        _write_site_csv(tmp_path / "session.csv", rows)
+
+        all_rows = csc.load_csv_files(str(tmp_path))
+        col_exists = csc._column_exists(all_rows, "device_id")
+        groups = csc.group_rows(all_rows, "device_id", col_exists)
+        stats = {k: csc.compute_group_stats(v) for k, v in groups.items()}
+
+        r = csc.compute_group_correlations(stats)
+        assert r is not None
+        assert -1.0 <= r <= 1.0
+
+    def test_alert_rate_computed(self, tmp_path):
+        """alert_rate is correctly computed as % of non-normal rows."""
+        import cross_site_comparison as csc
+
+        rows = (
+            [_site_row("device-A", 0.05, anomaly_level="normal") for _ in range(8)]
+            + [_site_row("device-A", 0.50, anomaly_level="soil_creep") for _ in range(2)]
+        )
+        _write_site_csv(tmp_path / "session.csv", rows)
+
+        all_rows = csc.load_csv_files(str(tmp_path))
+        col_exists = csc._column_exists(all_rows, "device_id")
+        groups = csc.group_rows(all_rows, "device_id", col_exists)
+        stats = {k: csc.compute_group_stats(v) for k, v in groups.items()}
+
+        assert abs(stats["device-A"]["alert_rate"] - 20.0) < 1e-6
+
+    def test_output_contains_table_headers(self, tmp_path):
+        """Table output contains expected column headers."""
+        rows = [_site_row("device-A", 0.05) for _ in range(5)]
+        _write_site_csv(tmp_path / "session.csv", rows)
+
+        result = self._run(["--data-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "Mean PPV" in result.stdout
+        assert "Max PPV" in result.stdout
+        assert "Alert Rate%" in result.stdout
+
+
+# ===========================================================================
+# long_term_trend_report tests
+# ===========================================================================
+
+def _write_trend_report_csv(path: Path, rows: list) -> None:
+    """Write list-of-dicts as CSV for long_term_trend_report tests."""
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _ltr_row(ts: datetime, ppv: float, anomaly_level: str = "normal") -> dict:
+    """Single CSV row for long_term_trend_report tests."""
+    return {
+        "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ppv": str(ppv),
+        "rms": str(ppv * 0.7),
+        "device_id": "test-device",
+        "anomaly_level": anomaly_level,
+    }
+
+
+class TestLongTermTrendReport:
+    """Tests for long_term_trend_report.py."""
+
+    def _run(self, args: list) -> "subprocess.CompletedProcess":
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "long_term_trend_report.py")] + args,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_no_data(self, tmp_path):
+        """Empty data dir exits 0 and prints 'No data found'."""
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        result = self._run(["--data-dir", str(empty_dir)])
+        assert result.returncode == 0
+        assert "No data found" in result.stdout
+
+    def test_daily_trend(self, tmp_path):
+        """3 days of data produces daily buckets with correct counts."""
+        import long_term_trend_report as ltr
+
+        base = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        rows = []
+        for day in range(3):
+            for hour in range(5):
+                rows.append(_ltr_row(base + timedelta(days=day, hours=hour), 0.05))
+
+        _write_trend_report_csv(tmp_path / "session.csv", rows)
+
+        all_rows = ltr.load_csv_files(str(tmp_path))
+        records = ltr.aggregate_buckets(all_rows, "daily")
+
+        assert len(records) == 3
+        for rec in records:
+            assert rec["sample_count"] == 5
+
+    def test_trend_up(self, tmp_path):
+        """Increasing PPV across days produces UP slope and is detected."""
+        import long_term_trend_report as ltr
+
+        base = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        rows = []
+        for day in range(5):
+            ppv = 0.05 + day * 0.10  # 0.05, 0.15, 0.25, 0.35, 0.45
+            for hour in range(3):
+                rows.append(_ltr_row(base + timedelta(days=day, hours=hour), ppv))
+
+        _write_trend_report_csv(tmp_path / "session.csv", rows)
+
+        all_rows = ltr.load_csv_files(str(tmp_path))
+        records = ltr.aggregate_buckets(all_rows, "daily")
+        slope = ltr.compute_trend_slope(records)
+        direction = ltr.classify_trend(slope)
+
+        assert slope > 0
+        assert direction == "UP"
+
+    def test_trend_down(self, tmp_path):
+        """Decreasing PPV across days produces DOWN slope and is detected."""
+        import long_term_trend_report as ltr
+
+        base = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        rows = []
+        for day in range(5):
+            ppv = 0.50 - day * 0.08  # 0.50, 0.42, 0.34, 0.26, 0.18
+            for hour in range(3):
+                rows.append(_ltr_row(base + timedelta(days=day, hours=hour), ppv))
+
+        _write_trend_report_csv(tmp_path / "session.csv", rows)
+
+        all_rows = ltr.load_csv_files(str(tmp_path))
+        records = ltr.aggregate_buckets(all_rows, "daily")
+        slope = ltr.compute_trend_slope(records)
+        direction = ltr.classify_trend(slope)
+
+        assert slope < 0
+        assert direction == "DOWN"
+
+    def test_stable_trend(self, tmp_path):
+        """Constant PPV produces STABLE classification."""
+        import long_term_trend_report as ltr
+
+        base = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_ltr_row(base + timedelta(days=d, hours=h), 0.05)
+                for d in range(5) for h in range(3)]
+
+        _write_trend_report_csv(tmp_path / "session.csv", rows)
+
+        all_rows = ltr.load_csv_files(str(tmp_path))
+        records = ltr.aggregate_buckets(all_rows, "daily")
+        slope = ltr.compute_trend_slope(records)
+        direction = ltr.classify_trend(slope)
+
+        assert direction == "STABLE"
+
+    def test_high_risk_period_detected(self, tmp_path):
+        """Day with >20% alert rate is flagged as high-risk."""
+        import long_term_trend_report as ltr
+
+        base = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        rows = []
+        # Day 1: 8 normal + 4 alert = 33% alert rate (high-risk)
+        for h in range(8):
+            rows.append(_ltr_row(base + timedelta(hours=h), 0.05, "normal"))
+        for h in range(8, 12):
+            rows.append(_ltr_row(base + timedelta(hours=h), 0.50, "soil_creep"))
+
+        _write_trend_report_csv(tmp_path / "session.csv", rows)
+
+        all_rows = ltr.load_csv_files(str(tmp_path))
+        records = ltr.aggregate_buckets(all_rows, "daily")
+        high_risk = ltr.identify_high_risk_buckets(records)
+
+        assert len(high_risk) == 1
+        assert "2026-03-01" in high_risk[0]
+
+    def test_auto_period_daily_for_short_span(self, tmp_path):
+        """Data span < 14 days auto-selects 'daily' period."""
+        import long_term_trend_report as ltr
+
+        base = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_ltr_row(base + timedelta(days=d), 0.05) for d in range(7)]
+        _write_trend_report_csv(tmp_path / "session.csv", rows)
+
+        all_rows = ltr.load_csv_files(str(tmp_path))
+        period = ltr.choose_period(all_rows)
+        assert period == "daily"
+
+    def test_auto_period_weekly_for_long_span(self, tmp_path):
+        """Data span >= 14 days auto-selects 'weekly' period."""
+        import long_term_trend_report as ltr
+
+        base = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_ltr_row(base + timedelta(days=d), 0.05) for d in range(21)]
+        _write_trend_report_csv(tmp_path / "session.csv", rows)
+
+        all_rows = ltr.load_csv_files(str(tmp_path))
+        period = ltr.choose_period(all_rows)
+        assert period == "weekly"
+
+    def test_weekly_buckets(self, tmp_path):
+        """3 weeks of data aggregates into weekly buckets."""
+        import long_term_trend_report as ltr
+
+        base = datetime(2026, 3, 2, 10, 0, 0, tzinfo=timezone.utc)  # Monday
+        rows = []
+        for week in range(3):
+            for day in range(7):
+                rows.append(_ltr_row(base + timedelta(weeks=week, days=day), 0.05))
+
+        _write_trend_report_csv(tmp_path / "session.csv", rows)
+
+        all_rows = ltr.load_csv_files(str(tmp_path))
+        records = ltr.aggregate_buckets(all_rows, "weekly")
+
+        assert len(records) == 3
+        for rec in records:
+            assert rec["sample_count"] == 7
+
+    def test_output_contains_table_and_trend(self, tmp_path):
+        """CLI output contains table headers and trend summary."""
+        base = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_ltr_row(base + timedelta(days=d, hours=h), 0.05)
+                for d in range(3) for h in range(4)]
+        _write_trend_report_csv(tmp_path / "session.csv", rows)
+
+        result = self._run(["--data-dir", str(tmp_path), "--period", "daily"])
+        assert result.returncode == 0
+        assert "Mean PPV" in result.stdout
+        assert "Samples" in result.stdout
+        assert "PPV trend" in result.stdout or "PPV trending" in result.stdout
+
+    def test_trend_up_in_output(self, tmp_path):
+        """CLI output says 'trending UP' when PPV is increasing."""
+        base = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        rows = []
+        for day in range(5):
+            ppv = 0.05 + day * 0.10
+            for hour in range(3):
+                rows.append(_ltr_row(base + timedelta(days=day, hours=hour), ppv))
+        _write_trend_report_csv(tmp_path / "session.csv", rows)
+
+        result = self._run(["--data-dir", str(tmp_path), "--period", "daily"])
+        assert result.returncode == 0
+        assert "UP" in result.stdout
         # At least one bar-chart row
         assert "\u2588" in result.stdout or "0.0" in result.stdout
 
