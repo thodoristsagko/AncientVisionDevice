@@ -8,7 +8,8 @@
         label replay schedule playback sync annotate analyze apk quantize benchmark load-test \
         validate-data e2e status health augment online-learn tune onnx \
         live-dashboard ab-test augmentation-report \
-        serve-model session-report calibration-check confidence-analysis monitor-model
+        serve-model session-report calibration-check confidence-analysis monitor-model \
+        freq-analysis compare-devices
 
 # ---------------------------------------------------------------------------
 # Help
@@ -71,6 +72,9 @@ help:
 	@echo "  calibration-check     Verify device calibration quality from field CSVs"
 	@echo "  confidence-analysis   Analyze model confidence distribution and calibration (ECE)"
 	@echo "  monitor-model         Check deployed model accuracy against labeled field data"
+	@echo ""
+	@echo "  freq-analysis         Analyze seismic frequency bands in field data"
+	@echo "  compare-devices       Compare vibration patterns across multiple devices"
 	@echo ""
 
 
@@ -413,4 +417,18 @@ monitor-model:
 		--data-dir ./data/field \
 		--once \
 		$(if $(SET_BASELINE),--set-baseline,) \
+		$(if $(OUTPUT),--output "$(OUTPUT)",)
+
+# ---------------------------------------------------------------------------
+# Analysis & Comparison scripts
+# ---------------------------------------------------------------------------
+
+freq-analysis:
+	@echo "==> Analyzing seismic frequency bands in field data..."
+	python scripts/seismic_frequency_analysis.py --data-dir ./data/field \
+		$(if $(OUTPUT),--output "$(OUTPUT)",)
+
+compare-devices:
+	@echo "==> Comparing vibration patterns across devices..."
+	python scripts/compare_devices.py --data-dir ./data/field \
 		$(if $(OUTPUT),--output "$(OUTPUT)",)
