@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:fl_chart/fl_chart.dart';
@@ -7,6 +8,9 @@ import '../services/progress_service.dart';
 import '../services/local_storage_service.dart';
 import '../services/export_service.dart';
 import '../services/session_export_service.dart';
+import '../services/session_history_service.dart';
+import '../services/alert_history_service.dart';
+import '../services/inference_timing_service.dart';
 
 /// Analytics and Statistics Dashboard Screen
 /// Professional documentation statistics with beautiful visualizations
@@ -35,6 +39,16 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
   // P156: Data quality + model performance extras
   String? _modelAccuracy;    // loaded from precursor_training_metrics.json
   bool _metricsLoaded = false;
+
+  // Session timeline (last 10 sessions, newest first)
+  List<SessionRecord> _recentSessions = [];
+
+  // Alert level distribution from alert history
+  Map<String, int> _alertLevelCounts = {};
+
+  // ML inference stats snapshot
+  int _inferenceCount = 0;
+  double _inferenceAvgMs = 0.0;
 
   @override
   void initState() {
@@ -69,6 +83,23 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
 
     // P156: Attempt to load model performance metrics
     await _loadModelMetrics();
+
+    // Load session timeline (last 10 sessions)
+    final allSessions = await SessionHistoryService.instance.getSessions();
+    _recentSessions = allSessions.take(10).toList();
+
+    // Load alert level distribution
+    final alertHistory = await AlertHistoryService().load();
+    _alertLevelCounts = {};
+    for (final entry in alertHistory) {
+      final level = entry['level'] as String? ?? 'unknown';
+      _alertLevelCounts[level] = (_alertLevelCounts[level] ?? 0) + 1;
+    }
+
+    // Snapshot ML inference stats
+    final timing = InferenceTimingService.instance;
+    _inferenceCount = timing.count;
+    _inferenceAvgMs = timing.avgMs;
 
     if (mounted) {
       setState(() => _isLoading = false);
@@ -471,6 +502,24 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
                           _buildSectionHeader('Material Analysis', Icons.category),
                           const SizedBox(height: 12),
                           _buildMaterialAnalysis(),
+                          const SizedBox(height: 24),
+
+                          // Session PPV Timeline
+                          _buildSectionHeader('Session PPV Timeline', Icons.timeline),
+                          const SizedBox(height: 12),
+                          _buildSessionTimeline(),
+                          const SizedBox(height: 24),
+
+                          // ML Performance
+                          _buildSectionHeader('ML Inference Performance', Icons.speed),
+                          const SizedBox(height: 12),
+                          _buildMlPerformanceSection(),
+                          const SizedBox(height: 24),
+
+                          // Anomaly Level Distribution
+                          _buildSectionHeader('Anomaly Distribution', Icons.donut_large),
+                          const SizedBox(height: 12),
+                          _buildAnomalyPieChart(),
                           const SizedBox(height: 32),
                         ],
                       ),
@@ -508,11 +557,11 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          const Row(
             children: [
-              const Icon(Icons.verified_outlined, color: Color(0xFF4CAF50), size: 18),
-              const SizedBox(width: 8),
-              const Text(
+              Icon(Icons.verified_outlined, color: Color(0xFF4CAF50), size: 18),
+              SizedBox(width: 8),
+              Text(
                 'Data Quality',
                 style: TextStyle(
                   color: Colors.white,
@@ -1318,6 +1367,315 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
       ),
     );
   }
+
+  // ─── New: Session PPV Timeline ───────────────────────────────────────────────
+
+  /// Bar chart using CustomPainter — no chart packages.
+  Widget _buildSessionTimeline() {
+    if (_recentSessions.isEmpty) {
+      return _buildEmptyCard('No session data yet.\nStart a monitoring session to record PPV history.');
+    }
+
+    // Sessions come newest-first; reverse so oldest is on the left.
+    final sessions = _recentSessions.reversed.toList();
+    final maxPpv = sessions.fold<double>(0.01, (m, s) => s.peakPpv > m ? s.peakPpv : m);
+
+    return Container(
+      height: 200,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(20),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withAlpha(30)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Peak PPV per session (last ${sessions.length})',
+            style: TextStyle(color: Colors.white.withAlpha(180), fontSize: 12),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: CustomPaint(
+              size: Size.infinite,
+              painter: _SessionTimelinePainter(sessions: sessions, maxPpv: maxPpv),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─── New: ML Performance Section ─────────────────────────────────────────────
+
+  Widget _buildMlPerformanceSection() {
+    final countLabel = _inferenceCount > 0 ? '$_inferenceCount' : 'N/A';
+    final avgLabel = _inferenceCount > 0
+        ? '${_inferenceAvgMs.toStringAsFixed(1)} ms'
+        : 'N/A';
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(20),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withAlpha(30)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildKV('Total inferences (this session)', countLabel),
+          const SizedBox(height: 8),
+          _buildKV('Avg inference time', avgLabel),
+          const SizedBox(height: 8),
+          _buildKV('Model accuracy (from training)', _modelAccuracy ?? 'N/A'),
+          const SizedBox(height: 8),
+          _buildKV('Inference engine', 'TFLite on-device'),
+        ],
+      ),
+    );
+  }
+
+  // ─── New: Anomaly Distribution Pie Chart ─────────────────────────────────────
+
+  Widget _buildAnomalyPieChart() {
+    if (_alertLevelCounts.isEmpty) {
+      return _buildEmptyCard('No alert history yet.\nAlert levels will be recorded here during monitoring sessions.');
+    }
+
+    const levelColors = {
+      'critical': Color(0xFFE53935),
+      'warning': Color(0xFFFFB300),
+      'elevated': Color(0xFFFF7043),
+      'normal': Color(0xFF4CAF50),
+      'unknown': Color(0xFF90A4AE),
+    };
+
+    final entries = _alertLevelCounts.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final total = entries.fold<int>(0, (s, e) => s + e.value);
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(20),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withAlpha(30)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          // Pie chart using CustomPainter
+          SizedBox(
+            width: 130,
+            height: 130,
+            child: CustomPaint(
+              painter: _PieChartPainter(
+                entries: entries.map((e) => _PieSlice(
+                  label: e.key,
+                  count: e.value,
+                  color: levelColors[e.key] ?? const Color(0xFF90A4AE),
+                )).toList(),
+                total: total,
+              ),
+            ),
+          ),
+          const SizedBox(width: 20),
+          // Legend
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: entries.map((e) {
+                final color = levelColors[e.key] ?? const Color(0xFF90A4AE);
+                final pct = total > 0 ? ((e.value / total) * 100).round() : 0;
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 10, height: 10,
+                        decoration: BoxDecoration(
+                          color: color,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          e.key.toUpperCase(),
+                          style: TextStyle(
+                            color: Colors.white.withAlpha(200),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        '${e.value}',
+                        style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        '($pct%)',
+                        style: TextStyle(color: Colors.white.withAlpha(120), fontSize: 10),
+                      ),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEmptyCard(String text) {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(20),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withAlpha(30)),
+      ),
+      child: Center(
+        child: Text(
+          text,
+          style: TextStyle(color: Colors.white.withAlpha(150), fontSize: 13, height: 1.5),
+          textAlign: TextAlign.center,
+        ),
+      ),
+    );
+  }
+}
+
+// ─── CustomPainter: Session PPV bar chart ─────────────────────────────────────
+
+class _SessionTimelinePainter extends CustomPainter {
+  final List<SessionRecord> sessions;
+  final double maxPpv;
+
+  _SessionTimelinePainter({required this.sessions, required this.maxPpv});
+
+  static const _safeThreshold = 3.0;   // DIN 4150-3 low-end
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (sessions.isEmpty) return;
+
+    final n = sessions.length;
+    final barWidth = (size.width / n) * 0.6;
+    final slotWidth = size.width / n;
+    const labelH = 20.0;
+    final chartH = size.height - labelH;
+
+    final safePaint = Paint()..color = const Color(0xFF4CAF50);
+    final warnPaint = Paint()..color = const Color(0xFFFFB300);
+    final critPaint = Paint()..color = const Color(0xFFE53935);
+    final gridPaint = Paint()
+      ..color = Colors.white.withAlpha(20)
+      ..strokeWidth = 1;
+    final textStyle = TextStyle(
+      color: Colors.white.withAlpha(140),
+      fontSize: 9,
+    );
+
+    // Horizontal grid line at threshold
+    final thresholdY = chartH * (1 - (_safeThreshold / maxPpv).clamp(0, 1));
+    canvas.drawLine(Offset(0, thresholdY), Offset(size.width, thresholdY), gridPaint);
+
+    for (int i = 0; i < n; i++) {
+      final s = sessions[i];
+      final ppv = s.peakPpv;
+      final frac = (ppv / maxPpv).clamp(0.0, 1.0);
+      final barH = (chartH * frac).clamp(2.0, chartH);
+
+      final left = slotWidth * i + (slotWidth - barWidth) / 2;
+      final top = chartH - barH;
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(left, top, barWidth, barH),
+        const Radius.circular(3),
+      );
+
+      final paint = ppv >= _safeThreshold * 1.5
+          ? critPaint
+          : ppv >= _safeThreshold
+              ? warnPaint
+              : safePaint;
+      canvas.drawRRect(rect, paint);
+
+      // X-axis label: month/day
+      final label = '${s.start.month}/${s.start.day}';
+      final tp = TextPainter(
+        text: TextSpan(text: label, style: textStyle),
+        textDirection: TextDirection.ltr,
+      )..layout(maxWidth: slotWidth);
+      tp.paint(canvas, Offset(left + (barWidth - tp.width) / 2, chartH + 3));
+    }
+
+    // Y-axis label at top: max value
+    final maxLabel = TextPainter(
+      text: TextSpan(
+        text: '${maxPpv.toStringAsFixed(1)} mm/s',
+        style: textStyle,
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: 60);
+    maxLabel.paint(canvas, const Offset(0, 0));
+  }
+
+  @override
+  bool shouldRepaint(_SessionTimelinePainter old) =>
+      old.sessions != sessions || old.maxPpv != maxPpv;
+}
+
+// ─── CustomPainter: Pie chart ─────────────────────────────────────────────────
+
+class _PieSlice {
+  final String label;
+  final int count;
+  final Color color;
+  _PieSlice({required this.label, required this.count, required this.color});
+}
+
+class _PieChartPainter extends CustomPainter {
+  final List<_PieSlice> entries;
+  final int total;
+
+  _PieChartPainter({required this.entries, required this.total});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (total == 0) return;
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = math.min(size.width, size.height) / 2 - 4;
+    const gapAngle = 0.04; // radians between slices
+
+    double startAngle = -math.pi / 2;
+    for (final slice in entries) {
+      final sweep = (slice.count / total) * 2 * math.pi - gapAngle;
+      if (sweep <= 0) continue;
+      final paint = Paint()
+        ..color = slice.color
+        ..style = PaintingStyle.fill;
+      canvas.drawArc(
+        Rect.fromCircle(center: center, radius: radius),
+        startAngle + gapAngle / 2,
+        sweep,
+        true,
+        paint,
+      );
+      startAngle += sweep + gapAngle;
+    }
+
+    // Centre hole
+    canvas.drawCircle(center, radius * 0.48,
+        Paint()..color = const Color(0xFF1C2523));
+  }
+
+  @override
+  bool shouldRepaint(_PieChartPainter old) =>
+      old.entries != entries || old.total != total;
 }
 
 class _CategoryData {
