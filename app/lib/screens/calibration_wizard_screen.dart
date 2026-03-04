@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../utils/app_styles.dart';
 
 /// Step-by-step calibration wizard for AncientVision vibration monitoring.
@@ -57,12 +58,19 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
   // Live noise floor reading (simulated during baseline capture).
   // In a real integration this comes from VibrationAnomalyService.instance.
   double _noiseLevel = 0.0;
+  double _currentPpv = 0.0; // live PPV shown during baseline
   final _random = Random();
 
   // Simulated noise floor result shown on verify screen (step 2)
   // In a real integration these values come from the calibration service.
   double _noiseFloor = 0.0;
   double _computedThreshold = 0.0;
+
+  /// Calibration quality assessed after capture:
+  ///   'good'  : RMS < 0.01 g
+  ///   'fair'  : RMS 0.01–0.05 g
+  ///   'poor'  : RMS > 0.05 g
+  String? _calibrationQuality;
 
   // Animation controller for the progress icon on step 1
   late final AnimationController _pulseController;
@@ -174,6 +182,7 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
     _captureStarted = true;
     _secondsRemaining = _baselineDurationSeconds;
     _noiseLevel = 0.005 + _random.nextDouble() * 0.01;
+    _currentPpv = 0.02 + _random.nextDouble() * 0.03;
     widget.onCalibrationStart?.call();
 
     _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
@@ -199,6 +208,7 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
       }
       setState(() {
         _noiseLevel = 0.005 + _random.nextDouble() * 0.01;
+        _currentPpv = 0.02 + _random.nextDouble() * 0.05;
       });
     });
   }
@@ -209,16 +219,27 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
     _captureStarted = false;
     _secondsRemaining = _baselineDurationSeconds;
     _noiseLevel = 0.0;
+    _currentPpv = 0.0;
   }
 
   void _onCaptureComplete() {
     // In real usage the calibration service provides these values.
     // For the wizard we show plausible defaults derived from a 30-sample window.
+    final String quality;
+    if (_noiseLevel < 0.01) {
+      quality = 'good';
+    } else if (_noiseLevel < 0.05) {
+      quality = 'fair';
+    } else {
+      quality = 'poor';
+    }
     setState(() {
       _noiseFloor = 0.05; // mm/s — typical quiet site ambient
       _computedThreshold = (_noiseFloor * 6).clamp(0.1, 2.0);
+      _calibrationQuality = quality;
       _currentStep = 2; // jump to Verify
     });
+    HapticFeedback.mediumImpact();
   }
 
   // ------------------------------------------------------------------
@@ -489,10 +510,12 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
             ),
           ),
           const SizedBox(height: 20),
-          // Live noise floor display
+          // Live noise floor + PPV display
           if (_captureStarted) ...[
             _buildNoiseDisplay(),
-            const SizedBox(height: 20),
+            const SizedBox(height: 8),
+            _buildLivePpvDisplay(),
+            const SizedBox(height: 12),
           ],
           LinearProgressIndicator(
             value: progress,
@@ -567,6 +590,44 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
     );
   }
 
+  /// Live PPV reading shown during baseline capture.
+  Widget _buildLivePpvDisplay() {
+    final ppvFmt = _currentPpv.toStringAsFixed(3);
+    final ppvColor = _currentPpv < 0.1
+        ? AppColors.success
+        : _currentPpv < 0.3
+            ? AppColors.warning
+            : AppColors.error;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: ppvColor.withAlpha(12),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: ppvColor.withAlpha(50)),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.speed_rounded, color: ppvColor, size: 16),
+          const SizedBox(width: 8),
+          const Text(
+            'PPV',
+            style: AppTextStyles.caption,
+          ),
+          const SizedBox(width: 6),
+          Text(
+            '$ppvFmt mm/s',
+            style: AppTextStyles.accentText.copyWith(
+              color: ppvColor,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildMiniWaveform(Color color) {
     final heights = [0.4, 0.7, 1.0, 0.6, 0.8, 0.5, 0.9, 0.3, 0.6, 1.0];
     return Row(
@@ -602,21 +663,28 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
             style: AppTextStyles.subtitle,
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 32),
+          const SizedBox(height: 24),
           _metricRow(
             icon: Icons.waves,
             label: 'Noise floor',
             value: '${_noiseFloor.toStringAsFixed(3)} mm/s',
             color: AppColors.info,
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
           _metricRow(
             icon: Icons.notifications_active,
             label: 'Alert threshold',
             value: '${_computedThreshold.toStringAsFixed(2)} mm/s',
             color: AppColors.accent,
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 20),
+
+          // ── Calibration quality meter ───────────
+          if (_calibrationQuality != null) ...[
+            _buildQualityMeter(_calibrationQuality!),
+            const SizedBox(height: 16),
+          ],
+
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
@@ -638,9 +706,138 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
               ],
             ),
           ),
+
+          const SizedBox(height: 12),
+
+          // ── Recalibrate button ───────────────────
+          OutlinedButton.icon(
+            onPressed: _showRecalibrateConfirmation,
+            icon: const Icon(Icons.refresh, size: 16),
+            label: const Text('Recalibrate'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppColors.textSecondary,
+              side: const BorderSide(color: AppColors.cardBorder),
+            ),
+          ),
         ],
       ),
     );
+  }
+
+  /// Calibration quality meter widget shown on the Verify step.
+  Widget _buildQualityMeter(String quality) {
+    final Color qColor;
+    final String qLabel;
+    final String qDetail;
+    final IconData qIcon;
+
+    switch (quality) {
+      case 'good':
+        qColor = AppColors.success;
+        qLabel = 'Good';
+        qDetail = 'Very quiet environment — optimal calibration conditions.';
+        qIcon = Icons.check_circle_rounded;
+      case 'fair':
+        qColor = AppColors.warning;
+        qLabel = 'Fair';
+        qDetail = 'Moderate background noise. Calibration is usable but not ideal.';
+        qIcon = Icons.warning_amber_rounded;
+      default: // 'poor'
+        qColor = AppColors.error;
+        qLabel = 'Poor';
+        qDetail =
+            'High ambient noise. Consider recalibrating in a quieter environment.';
+        qIcon = Icons.error_rounded;
+    }
+
+    final double fraction = quality == 'good'
+        ? 1.0
+        : quality == 'fair'
+            ? 0.55
+            : 0.2;
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: qColor.withAlpha(15),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: qColor.withAlpha(60)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(qIcon, color: qColor, size: 20),
+              const SizedBox(width: 8),
+              Text(
+                'Calibration Quality: $qLabel',
+                style: AppTextStyles.h4.copyWith(color: qColor),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          LinearProgressIndicator(
+            value: fraction,
+            backgroundColor: AppColors.cardBorder,
+            valueColor: AlwaysStoppedAnimation<Color>(qColor),
+            minHeight: 8,
+            borderRadius: BorderRadius.circular(4),
+          ),
+          const SizedBox(height: 8),
+          Text(qDetail, style: AppTextStyles.caption),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showRecalibrateConfirmation() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.primaryDark,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: AppColors.cardBorder),
+        ),
+        title: const Text('Recalibrate?', style: AppTextStyles.h3),
+        content: const Text(
+          'Are you sure? This will reset your current baseline and run a new '
+          '30-second capture.',
+          style: AppTextStyles.subtitle,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text(
+              'Keep Current',
+              style: AppTextStyles.accentText,
+            ),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.warning,
+              foregroundColor: AppColors.primaryDark,
+            ),
+            child: const Text('Recalibrate'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true && mounted) {
+      setState(() {
+        _currentStep = 0;
+        _noiseFloor = 0.0;
+        _computedThreshold = 0.0;
+        _captureStarted = false;
+        _secondsRemaining = _baselineDurationSeconds;
+        _noiseLevel = 0.0;
+        _currentPpv = 0.0;
+        _calibrationQuality = null;
+      });
+    }
   }
 
   // Step 3: Complete
@@ -691,7 +888,30 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
             value: '${_noiseFloor.toStringAsFixed(3)} mm/s',
             color: AppColors.success,
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 12),
+          // Quality badge
+          if (_calibrationQuality != null) ...[
+            _metricRow(
+              icon: _calibrationQuality == 'good'
+                  ? Icons.check_circle_rounded
+                  : _calibrationQuality == 'fair'
+                      ? Icons.warning_amber_rounded
+                      : Icons.error_rounded,
+              label: 'Calibration quality',
+              value: _calibrationQuality == 'good'
+                  ? 'Good'
+                  : _calibrationQuality == 'fair'
+                      ? 'Fair'
+                      : 'Poor',
+              color: _calibrationQuality == 'good'
+                  ? AppColors.success
+                  : _calibrationQuality == 'fair'
+                      ? AppColors.warning
+                      : AppColors.error,
+            ),
+            const SizedBox(height: 12),
+          ],
+          const SizedBox(height: 8),
 
           // Subtitle
           Container(
@@ -730,19 +950,55 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
           ),
           const SizedBox(height: 12),
 
-          // Secondary action: Calibrate Again
+          // Secondary action: Calibrate Again (with confirmation)
           SizedBox(
             height: AppSizes.buttonHeight,
             child: OutlinedButton.icon(
-              onPressed: () {
-                setState(() {
-                  _currentStep = 0;
-                  _noiseFloor = 0.0;
-                  _computedThreshold = 0.0;
-                  _captureStarted = false;
-                  _secondsRemaining = _baselineDurationSeconds;
-                  _noiseLevel = 0.0;
-                });
+              onPressed: () async {
+                final confirmed = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    backgroundColor: AppColors.primaryDark,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                      side: const BorderSide(color: AppColors.cardBorder),
+                    ),
+                    title: const Text('Recalibrate?', style: AppTextStyles.h3),
+                    content: const Text(
+                      'Are you sure? This will reset your current baseline.',
+                      style: AppTextStyles.subtitle,
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.of(ctx).pop(false),
+                        child: const Text(
+                          'Cancel',
+                          style: AppTextStyles.accentText,
+                        ),
+                      ),
+                      ElevatedButton(
+                        onPressed: () => Navigator.of(ctx).pop(true),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.accent,
+                          foregroundColor: AppColors.primaryDark,
+                        ),
+                        child: const Text('Recalibrate'),
+                      ),
+                    ],
+                  ),
+                );
+                if (confirmed == true && mounted) {
+                  setState(() {
+                    _currentStep = 0;
+                    _noiseFloor = 0.0;
+                    _computedThreshold = 0.0;
+                    _captureStarted = false;
+                    _secondsRemaining = _baselineDurationSeconds;
+                    _noiseLevel = 0.0;
+                    _currentPpv = 0.0;
+                    _calibrationQuality = null;
+                  });
+                }
               },
               icon: const Icon(Icons.refresh, size: 18, color: AppColors.accent),
               label: Text(
