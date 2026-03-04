@@ -4,7 +4,7 @@ import '../utils/app_styles.dart';
 
 /// OnboardingScreen — multi-page introduction shown to first-time users.
 ///
-/// Four pages: Welcome, How It Works, Safety Levels, Get Started.
+/// Four pages: Welcome, How It Works, Safety Thresholds, Get Started.
 /// Saves 'onboarding_seen' to SharedPreferences and navigates to '/' when done.
 class OnboardingScreen extends StatefulWidget {
   const OnboardingScreen({super.key});
@@ -77,33 +77,41 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
+          // Shield icon with glow effect
           Container(
-            width: 120,
-            height: 120,
+            width: 130,
+            height: 130,
             decoration: BoxDecoration(
-              color: AppColors.accent.withAlpha(30),
+              color: AppColors.accent.withAlpha(25),
               shape: BoxShape.circle,
               border: Border.all(color: AppColors.accent.withAlpha(80), width: 2),
+              boxShadow: [
+                BoxShadow(
+                  color: AppColors.accent.withAlpha(40),
+                  blurRadius: 24,
+                  spreadRadius: 4,
+                ),
+              ],
             ),
             child: const Icon(
-              Icons.vibration,
-              size: 64,
+              Icons.security,
+              size: 68,
               color: AppColors.accent,
             ),
           ),
           const SizedBox(height: 40),
           const Text(
-            'AncientVision',
+            'AncientVision\nSafety Monitor',
             style: AppTextStyles.h1,
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 14),
           const Text(
-            'Seismic Safety for Archaeological Sites',
+            'Protect archaeologists from\nsoil instability hazards',
             style: AppTextStyles.subtitle,
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 28),
           Container(
             padding: const EdgeInsets.all(16),
             decoration: AppDecorations.card,
@@ -122,149 +130,276 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
   // ── Page 2: How It Works ─────────────────────────────────────────────────────
   Widget _buildHowItWorksPage() {
-    final steps = [
-      (Icons.developer_board, 'Detect', 'M5StickC device measures ground vibrations at 200 Hz using its onboard IMU sensor.'),
-      (Icons.bluetooth, 'Transmit', 'Raw acceleration data is sent wirelessly via Bluetooth Low Energy to your phone.'),
-      (Icons.psychology, 'Analyse', 'AI models perform FFT, wavelet decomposition, and precursor classification in real-time.'),
-      (Icons.notifications_active, 'Alert', 'Safety alerts are triggered immediately when hazardous vibration patterns are detected.'),
-    ];
-
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('How It Works', style: AppTextStyles.h2),
+          const Text('Real-Time Vibration\nDetection', style: AppTextStyles.h2),
           const SizedBox(height: 8),
-          const Text('Four steps from sensor to safety', style: AppTextStyles.subtitle),
-          const SizedBox(height: 28),
-          ...steps.asMap().entries.map((entry) {
-            final i = entry.key;
-            final step = entry.value;
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 16),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      color: AppColors.accent.withAlpha(25),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: AppColors.accent.withAlpha(60)),
-                    ),
-                    child: Center(
-                      child: Text(
-                        '${i + 1}',
-                        style: const TextStyle(
-                          color: AppColors.accent,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 18,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Icon(step.$1, color: AppColors.accent, size: 16),
-                            const SizedBox(width: 6),
-                            Text(step.$2, style: AppTextStyles.h4),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Text(step.$3, style: AppTextStyles.subtitle),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            );
-          }),
+          const Text(
+            'Your M5StickC Plus sensor detects micro-vibrations that precede '
+            'soil avalanches. The AI model distinguishes between safe activity '
+            '(footsteps, wind) and dangerous soil creep patterns.',
+            style: AppTextStyles.subtitle,
+          ),
+          const SizedBox(height: 24),
+          // Three bullet points for BLE, DSP, ML
+          _buildFeaturePill(
+            icon: Icons.bluetooth,
+            color: AppColors.info,
+            title: 'BLE Connection',
+            description: 'Wireless data from M5StickC at 200 Hz via Bluetooth Low Energy',
+          ),
+          const SizedBox(height: 12),
+          _buildFeaturePill(
+            icon: Icons.equalizer,
+            color: AppColors.accent,
+            title: 'DSP Analysis',
+            description: 'FFT, wavelet decomposition & kurtosis computed on-device in real-time',
+          ),
+          const SizedBox(height: 12),
+          _buildFeaturePill(
+            icon: Icons.psychology,
+            color: AppColors.warning,
+            title: 'ML Classification',
+            description: 'Precursor classifier distinguishes soil creep, cracking & imminent failure',
+          ),
         ],
       ),
     );
   }
 
-  // ── Page 3: Safety Levels ────────────────────────────────────────────────────
-  Widget _buildSafetyLevelsPage() {
-    final levels = [
-      (
-        'SAFE',
-        'Normal vibration — continue work as usual.',
-        AppColors.success,
-        Icons.check_circle_outline,
+  Widget _buildFeaturePill({
+    required IconData icon,
+    required Color color,
+    required String title,
+    required String description,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: color.withAlpha(15),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withAlpha(70)),
       ),
-      (
-        'ANOMALY',
-        'Elevated vibration detected. Stay alert and prepare to evacuate.',
-        AppColors.warning,
-        Icons.warning_amber_outlined,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: color.withAlpha(25),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(icon, color: color, size: 20),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: AppTextStyles.h4),
+                const SizedBox(height: 3),
+                Text(description, style: AppTextStyles.subtitle),
+              ],
+            ),
+          ),
+        ],
       ),
-      (
-        'CRITICAL',
-        'Imminent failure signal. Evacuate the site immediately.',
-        AppColors.error,
-        Icons.crisis_alert,
-      ),
-    ];
+    );
+  }
 
+  // ── Page 3: Safety Thresholds ────────────────────────────────────────────────
+  Widget _buildSafetyThresholdsPage() {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Safety Levels', style: AppTextStyles.h2),
+          const Text('Understanding\nAlert Levels', style: AppTextStyles.h2),
           const SizedBox(height: 8),
           const Text(
-            'The app uses three colour-coded alert levels',
+            'The app uses three colour-coded alert levels based on '
+            'peak particle velocity (PPV) in mm/s.',
             style: AppTextStyles.subtitle,
           ),
-          const SizedBox(height: 28),
-          ...levels.map((level) {
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 16),
-              child: Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: level.$3.withAlpha(20),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: level.$3.withAlpha(100), width: 1.5),
+          const SizedBox(height: 20),
+
+          // Visual threshold scale
+          _buildThresholdScale(),
+
+          const SizedBox(height: 20),
+
+          // Alert level cards
+          _buildAlertLevelCard(
+            label: 'SAFE',
+            range: '< 0.3 mm/s',
+            description: 'Normal background vibration. Continue work as usual.',
+            color: AppColors.success,
+            icon: Icons.check_circle_outline,
+          ),
+          const SizedBox(height: 10),
+          _buildAlertLevelCard(
+            label: 'CAUTION',
+            range: '0.3 – 1.0 mm/s',
+            description: 'Elevated vibration. Stay alert and prepare to evacuate.',
+            color: AppColors.warning,
+            icon: Icons.warning_amber_outlined,
+          ),
+          const SizedBox(height: 10),
+          _buildAlertLevelCard(
+            label: 'CRITICAL',
+            range: '> 1.0 mm/s',
+            description: 'Imminent failure signal. Evacuate the site immediately.',
+            color: AppColors.error,
+            icon: Icons.crisis_alert,
+          ),
+          const SizedBox(height: 16),
+
+          // DIN 4150-3 reference
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: AppColors.overlay,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: const Row(
+              children: [
+                Icon(Icons.menu_book_outlined, size: 14, color: AppColors.textHint),
+                SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    'Thresholds derived from DIN 4150-3 (heritage buildings standard)',
+                    style: AppTextStyles.caption,
+                  ),
                 ),
-                child: Row(
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildThresholdScale() {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.cardBackground,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.cardBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('PPV Scale (mm/s)', style: AppTextStyles.caption),
+          const SizedBox(height: 8),
+          // Gradient bar
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: Container(
+              height: 12,
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [AppColors.success, AppColors.warning, AppColors.error],
+                  stops: [0.3, 0.55, 1.0],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          // Labels beneath bar
+          const Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('0', style: AppTextStyles.caption),
+              Text('0.3', style: AppTextStyles.caption),
+              Text('1.0', style: AppTextStyles.caption),
+              Text('2.0+', style: AppTextStyles.caption),
+            ],
+          ),
+          const SizedBox(height: 4),
+          const Row(
+            children: [
+              Expanded(
+                flex: 3,
+                child: Text('SAFE', style: TextStyle(color: AppColors.success, fontSize: 10, fontWeight: FontWeight.bold)),
+              ),
+              Expanded(
+                flex: 3,
+                child: Text('CAUTION', style: TextStyle(color: AppColors.warning, fontSize: 10, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
+              ),
+              Expanded(
+                flex: 4,
+                child: Text('CRITICAL', style: TextStyle(color: AppColors.error, fontSize: 10, fontWeight: FontWeight.bold), textAlign: TextAlign.end),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAlertLevelCard({
+    required String label,
+    required String range,
+    required String description,
+    required Color color,
+    required IconData icon,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withAlpha(18),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withAlpha(90), width: 1.5),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 28),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
                   children: [
-                    Icon(level.$4, color: level.$3, size: 32),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            level.$1,
-                            style: TextStyle(
-                              color: level.$3,
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: 1.2,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(level.$2, style: AppTextStyles.subtitle),
-                        ],
+                    Text(
+                      label,
+                      style: TextStyle(
+                        color: color,
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.1,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: color.withAlpha(30),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        range,
+                        style: TextStyle(
+                          color: color,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
                   ],
                 ),
-              ),
-            );
-          }),
+                const SizedBox(height: 3),
+                Text(description, style: AppTextStyles.subtitle),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -278,61 +413,78 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Container(
-            width: 100,
-            height: 100,
+            width: 108,
+            height: 108,
             decoration: BoxDecoration(
-              color: AppColors.success.withAlpha(30),
+              color: AppColors.success.withAlpha(25),
               shape: BoxShape.circle,
               border: Border.all(color: AppColors.success.withAlpha(80), width: 2),
+              boxShadow: [
+                BoxShadow(
+                  color: AppColors.success.withAlpha(40),
+                  blurRadius: 20,
+                  spreadRadius: 2,
+                ),
+              ],
             ),
             child: const Icon(
-              Icons.bluetooth_searching,
-              size: 52,
+              Icons.rocket_launch_rounded,
+              size: 54,
               color: AppColors.success,
             ),
           ),
-          const SizedBox(height: 32),
+          const SizedBox(height: 28),
           const Text(
-            'You\'re Ready!',
+            'Ready to Deploy',
             style: AppTextStyles.h1,
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           const Text(
-            'Connect your AncientVision device via Bluetooth',
+            'Follow these steps to begin field monitoring',
             style: AppTextStyles.subtitle,
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 28),
+          const SizedBox(height: 24),
+          // Setup checklist
           Container(
             padding: const EdgeInsets.all(16),
             decoration: AppDecorations.card,
-            child: Column(
-              children: const [
-                _BulletPoint(
+            child: const Column(
+              children: [
+                _SetupStep(
+                  step: 1,
                   icon: Icons.power_settings_new,
                   text: 'Power on your M5StickC Plus 2 device',
                 ),
-                SizedBox(height: 10),
-                _BulletPoint(
-                  icon: Icons.bluetooth,
+                SizedBox(height: 12),
+                _SetupStep(
+                  step: 2,
+                  icon: Icons.bluetooth_searching,
                   text: 'Open the Monitor tab and tap Connect',
                 ),
-                SizedBox(height: 10),
-                _BulletPoint(
+                SizedBox(height: 12),
+                _SetupStep(
+                  step: 3,
                   icon: Icons.place,
-                  text: 'Position the device at the site — it will begin monitoring immediately',
+                  text: 'Position the device at the excavation site',
+                ),
+                SizedBox(height: 12),
+                _SetupStep(
+                  step: 4,
+                  icon: Icons.tune,
+                  text: 'Run the calibration wizard to set local baseline',
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 32),
+          const SizedBox(height: 28),
           SizedBox(
             width: double.infinity,
             height: AppSizes.buttonHeight + 4,
             child: ElevatedButton.icon(
               onPressed: _finish,
-              icon: const Icon(Icons.bluetooth_connected, size: 22),
+              icon: const Icon(Icons.check_circle, size: 22),
               label: const Text('Get Started', style: AppTextStyles.button),
               style: ElevatedButton.styleFrom(
                 backgroundColor: AppColors.accent,
@@ -356,7 +508,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         child: SafeArea(
           child: Column(
             children: [
-              // Top bar: Skip button (pages 1-3) or empty
+              // Top bar: page counter + Skip button (pages 1-3)
               SizedBox(
                 height: 52,
                 child: Padding(
@@ -391,7 +543,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                   children: [
                     _buildWelcomePage(),
                     _buildHowItWorksPage(),
-                    _buildSafetyLevelsPage(),
+                    _buildSafetyThresholdsPage(),
                     _buildGetStartedPage(),
                   ],
                 ),
@@ -431,21 +583,58 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   }
 }
 
-/// Small helper widget for bullet points on page 4.
-class _BulletPoint extends StatelessWidget {
+// ── Helper widgets ────────────────────────────────────────────────────────────
+
+/// Numbered setup step with icon and description — used on the Get Started page.
+class _SetupStep extends StatelessWidget {
+  final int step;
   final IconData icon;
   final String text;
 
-  const _BulletPoint({required this.icon, required this.text});
+  const _SetupStep({
+    required this.step,
+    required this.icon,
+    required this.text,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Icon(icon, size: 18, color: AppColors.accent),
-        const SizedBox(width: 10),
-        Expanded(child: Text(text, style: AppTextStyles.body)),
+        // Numbered badge
+        Container(
+          width: 28,
+          height: 28,
+          decoration: const BoxDecoration(
+            color: AppColors.accent,
+            shape: BoxShape.circle,
+          ),
+          child: Center(
+            child: Text(
+              '$step',
+              style: const TextStyle(
+                color: AppColors.primaryDark,
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        // Icon
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Icon(icon, size: 16, color: AppColors.accent),
+        ),
+        const SizedBox(width: 8),
+        // Text
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(text, style: AppTextStyles.body),
+          ),
+        ),
       ],
     );
   }
