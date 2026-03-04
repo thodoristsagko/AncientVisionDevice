@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:intl/intl.dart';
@@ -115,11 +116,9 @@ class BackupService {
       // Create archive
       final archive = Archive();
 
-      // Add manifest
+      // Add manifest (rich version via buildManifest)
       final manifest = {
-        'createdAt': DateTime.now().toIso8601String(),
-        'app': 'AncientVision',
-        'version': '1.0.0',
+        ...buildManifest(data),
         'contents': data.map((key, value) => MapEntry(
               key,
               value is List ? value.length : 1,
@@ -334,6 +333,165 @@ class BackupService {
     } catch (e) {
       debugPrint('Error backing up preferences: $e');
       return null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Last backup info (synchronous getters backed by cached prefs value)
+  // ---------------------------------------------------------------------------
+
+  /// Last backup time read directly from SharedPreferences.
+  /// Returns null if no backup has ever been created.
+  Future<DateTime?> get lastBackupTime async => getLastBackupDate();
+
+  /// Days elapsed since the last backup.  Returns -1 if no backup exists.
+  Future<int> get daysSinceBackup async {
+    final last = await lastBackupTime;
+    if (last == null) return -1;
+    return DateTime.now().difference(last).inDays;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Auto-backup on app launch
+  // ---------------------------------------------------------------------------
+
+  /// Call this on app launch.  If auto-backup is enabled and the configured
+  /// interval has elapsed, [createBackup] is triggered with [launchData].
+  ///
+  /// The backup interval threshold is read from SharedPreferences
+  /// (key: [_backupIntervalKey], default: 7 days).
+  Future<BackupInfo?> maybeAutoBackup({
+    required Map<String, dynamic> launchData,
+  }) async {
+    final needed = await isBackupNeeded();
+    if (!needed) return null;
+
+    if (kDebugMode) {
+      debugPrint('BackupService: auto-backup triggered on app launch');
+    }
+    return createBackup(data: launchData);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Backup content manifest helpers
+  // ---------------------------------------------------------------------------
+
+  /// Builds a manifest map that is embedded in every backup archive.
+  ///
+  /// Callers supply [data] (the same map passed to [createBackup]).
+  /// The manifest adds:
+  ///   - sessions_count
+  ///   - alert_count
+  ///   - critical_events_count
+  ///   - total_size_bytes  (approximate JSON sizes before compression)
+  ///   - created_at        (ISO-8601)
+  Map<String, dynamic> buildManifest(Map<String, dynamic> data) {
+    int sessionsCount = 0;
+    int alertCount = 0;
+    int criticalCount = 0;
+    int totalSizeBytes = 0;
+
+    for (final entry in data.entries) {
+      final key = entry.key.toLowerCase();
+      final value = entry.value;
+
+      // Approximate serialised size
+      final encoded = jsonEncode(value);
+      totalSizeBytes += utf8.encode(encoded).length;
+
+      if (value is List) {
+        if (key.contains('session')) {
+          sessionsCount += value.length;
+        }
+        if (key.contains('alert')) {
+          alertCount += value.length;
+          // Count entries where level == 'CRITICAL'
+          for (final item in value) {
+            if (item is Map && item['level'] == 'CRITICAL') {
+              criticalCount++;
+            }
+          }
+        }
+      }
+    }
+
+    return {
+      'sessions_count': sessionsCount,
+      'alert_count': alertCount,
+      'critical_events_count': criticalCount,
+      'total_size_bytes': totalSizeBytes,
+      'created_at': DateTime.now().toIso8601String(),
+      'app': 'AncientVision',
+      'version': '1.0.0',
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cloud backup stub
+  // ---------------------------------------------------------------------------
+
+  /// Attempts to upload the most recent local backup to Firebase Storage.
+  ///
+  /// If Firebase Storage is not configured (package not present or no bucket
+  /// URL set in SharedPreferences under key `firebase_storage_bucket`), shows
+  /// an informational dialog instead of throwing.
+  ///
+  /// To enable cloud backups:
+  ///   1. Add `firebase_storage` to pubspec.yaml.
+  ///   2. Store your bucket URL in SharedPreferences under
+  ///      `firebase_storage_bucket`.
+  ///   3. Replace the stub body below with the real upload logic.
+  Future<void> backupToCloud({BuildContext? context}) async {
+    final prefs = await SharedPreferences.getInstance();
+    final bucket = prefs.getString('firebase_storage_bucket');
+
+    final bool firebaseConfigured = bucket != null && bucket.isNotEmpty;
+
+    if (!firebaseConfigured) {
+      if (kDebugMode) {
+        debugPrint(
+          'BackupService.backupToCloud: Firebase Storage not configured. '
+          'Set firebase_storage_bucket in SharedPreferences to enable.',
+        );
+      }
+
+      if (context != null && context.mounted) {
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Cloud Backup Unavailable'),
+            content: const Text(
+              'Firebase Storage is not configured.\n\n'
+              'To enable cloud backups, configure Firebase Storage in app settings.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+      }
+      return;
+    }
+
+    // --- Real upload logic goes here once firebase_storage is added ---
+    // Example (requires `firebase_storage` package):
+    //
+    // final backups = await listBackups();
+    // if (backups.isEmpty) return;
+    // final latest = backups.first;           // already sorted newest-first
+    // final ref = FirebaseStorage.instance
+    //     .ref()
+    //     .child('backups/${latest.filename}');
+    // await ref.putFile(File(latest.path));
+    // if (kDebugMode) debugPrint('Uploaded ${latest.filename} to $bucket');
+
+    if (kDebugMode) {
+      debugPrint(
+        'BackupService.backupToCloud: bucket=$bucket — stub, no upload performed.',
+      );
     }
   }
 
