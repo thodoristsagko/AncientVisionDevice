@@ -39,6 +39,7 @@
 #include "esp_system.h"  // P101: esp_reset_reason()
 #include "nvs_flash.h"   // P180: NVS persistent settings
 #include "nvs.h"         // P180: NVS read/write API
+#include "SPIFFS.h"      // P198: SPIFFS data logging
 
 #if WIFI_ENABLED
 #include <WiFi.h>
@@ -113,6 +114,14 @@ const float TEMP_REF = 25.0f;           // Reference temperature
 #define CHAR_FFT_UUID       "beb5483e-36e1-4688-b7f5-ea07361b26ac"  // Now used for raw accel binary
 #define CHAR_CMD_UUID       "beb5483e-36e1-4688-b7f5-ea07361b26ad"  // P79: writable command characteristic
 
+// ===================== P197: DEEP SLEEP CONFIGURATION =====================
+#define DEEP_SLEEP_ENABLED       1
+#define DEEP_SLEEP_SAFE_MINUTES  5
+#define DEEP_SLEEP_DURATION_S    30
+
+// ===================== P198: SPIFFS DATA LOGGING CONFIGURATION =====================
+#define SD_LOGGING_ENABLED 0
+
 // ===================== MADGWICK FILTER =====================
 Madgwick madgwickFilter;
 
@@ -166,6 +175,15 @@ float g_lastPpv = 0.0f;        // Previous PPV reading for trend arrow calculati
 // ===================== POWER SAVE =====================
 uint32_t g_safeSinceMs = 0;    // millis() timestamp of last non-safe event (or boot)
 bool g_powerSaveActive = false; // True when BLE advertising interval has been extended
+
+// ===================== P197: DEEP SLEEP STATE =====================
+#if DEEP_SLEEP_ENABLED
+unsigned long g_deepSleepCountdownMs = 0; // millis() when PPV first dropped below safe; 0 = not counting
+#endif
+
+// ===================== P199: RTC WALL-CLOCK TIMESTAMP =====================
+time_t g_rtcEpoch = 0;          // Unix epoch received from phone via BLE CMD "TIME:..."
+unsigned long g_rtcSetMs = 0;   // millis() at the moment g_rtcEpoch was set
 
 // ===================== P79: BLE CALIBRATE COMMAND =====================
 bool g_calibrating = false;      // True during active calibration period
@@ -339,6 +357,11 @@ void saveNvsSettings();
 #if WIFI_ENABLED
 void wifiPushData();
 #endif
+#if SD_LOGGING_ENABLED
+void initStorage();
+void logToStorage(float ppv, float rms, float freq, float kurtosis);
+#endif
+time_t getCurrentEpoch();
 
 // ===================== P149: OTA UPDATE READINESS STUB =====================
 // Future: replace body with ArduinoOTA or custom HTTP OTA check when a
@@ -448,6 +471,38 @@ void wifiPushData() {
 }
 #endif
 
+// ===================== P199: RTC WALL-CLOCK HELPERS =====================
+time_t getCurrentEpoch() {
+  if (g_rtcEpoch == 0) return 0;
+  return g_rtcEpoch + (time_t)((millis() - g_rtcSetMs) / 1000UL);
+}
+
+// ===================== P198: SPIFFS DATA LOGGING =====================
+#if SD_LOGGING_ENABLED
+static bool g_spiffsOk = false;
+
+void initStorage() {
+  g_spiffsOk = SPIFFS.begin(true);  // true = format on fail
+  if (g_spiffsOk) {
+    Serial.println("SPIFFS: mounted OK");
+  } else {
+    Serial.println("SPIFFS: mount failed — logging disabled");
+  }
+}
+
+void logToStorage(float ppv, float rms, float freq, float kurtosis) {
+  if (!g_spiffsOk) return;
+  File f = SPIFFS.open("/data.csv", FILE_APPEND);
+  if (!f) {
+    Serial.println("SPIFFS: failed to open /data.csv for append");
+    return;
+  }
+  f.printf("%lu,%.3f,%.4f,%.2f,%.3f\n",
+    (unsigned long)millis(), ppv, rms, freq, kurtosis);
+  f.close();
+}
+#endif
+
 // ===================== BLE CALLBACKS =====================
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
@@ -476,7 +531,36 @@ class CmdCharCallbacks: public BLECharacteristicCallbacks {
     } else if (value == "DEBUG OFF") {
       g_debugMode = false;
       Serial.println("BLE CMD: DEBUG mode OFF");
+    } else if (value.startsWith("TIME:")) {
+      // P199: Phone syncs wall-clock — "TIME:1709500000"
+      String epochStr = value.substring(5);
+      g_rtcEpoch = (time_t)epochStr.toInt();
+      g_rtcSetMs = millis();
+      Serial.printf("BLE CMD: TIME set to %lu (millis=%lu)\n",
+        (unsigned long)g_rtcEpoch, (unsigned long)g_rtcSetMs);
     }
+#if SD_LOGGING_ENABLED
+    else if (value == "DUMP") {
+      // P198: Dump /data.csv over Serial in 256-byte chunks
+      if (!g_spiffsOk) {
+        Serial.println("DUMP: SPIFFS not available");
+      } else {
+        File f = SPIFFS.open("/data.csv", FILE_READ);
+        if (!f) {
+          Serial.println("DUMP: /data.csv not found");
+        } else {
+          Serial.println("DUMP: BEGIN /data.csv");
+          uint8_t chunk[256];
+          while (f.available()) {
+            int n = f.read(chunk, sizeof(chunk));
+            Serial.write(chunk, n);
+          }
+          f.close();
+          Serial.println("\nDUMP: END");
+        }
+      }
+    }
+#endif
   }
 };
 
@@ -584,6 +668,11 @@ void setup() {
     Serial.println("NVS: partition erased and reinitialised");
   }
   loadNvsSettings();
+
+  // P198: Initialize SPIFFS storage for data logging
+#if SD_LOGGING_ENABLED
+  initStorage();
+#endif
 
   // Initialize BLE
   setupBLE();
@@ -703,7 +792,36 @@ void loop() {
     newWindowAvailable = true;
     processVibrationWindow();
     classifyHazard();
+
+    // P197: Update deep sleep countdown based on current PPV
+#if DEEP_SLEEP_ENABLED
+    if (vibrationPPV >= PPV_SAFE_MAX || currentAlert != SAFE) {
+      // Vibration is not safe — reset countdown
+      g_deepSleepCountdownMs = 0;
+    } else {
+      // Vibration is safely low — start countdown if not already running
+      if (g_deepSleepCountdownMs == 0) {
+        g_deepSleepCountdownMs = currentMillis;
+      }
+    }
+#endif
   }
+
+  // P197: Trigger deep sleep when safe threshold has been held long enough
+#if DEEP_SLEEP_ENABLED
+  if (g_deepSleepCountdownMs > 0 &&
+      ppvCalibrated &&
+      (currentMillis - g_deepSleepCountdownMs > (unsigned long)DEEP_SLEEP_SAFE_MINUTES * 60000UL)) {
+    Serial.printf("Entering deep sleep (%ds)\n", DEEP_SLEEP_DURATION_S);
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setTextSize(3);
+    M5.Lcd.setTextColor(WHITE, BLACK);
+    M5.Lcd.setCursor(30, 50);
+    M5.Lcd.print("ZZZ");
+    delay(1000);
+    M5.Power.deepSleep((uint64_t)DEEP_SLEEP_DURATION_S * 1000000ULL);
+  }
+#endif
 
   // ---- Read IMU temperature periodically ----
   if (currentMillis - lastTempRead >= TEMP_READ_INTERVAL) {
@@ -965,6 +1083,12 @@ void processVibrationWindow() {
 
   DBG_PRINTF("DSP v5.0: RMS=%.4fg PPV=%.1fmm/s Crest=%.1f STA/LTA=%.2f\n",
     vibrationRMS, vibrationPPV, crestFactor, staLtaRatio);
+
+  // P198: Log this window's metrics to SPIFFS
+#if SD_LOGGING_ENABLED
+  // freq=0 and kurtosis=0 — full DSP now runs on phone; we only have firmware features here
+  logToStorage(vibrationPPV, vibrationRMS, 0.0f, crestFactor);
+#endif
 }
 
 // ===================== HAZARD CLASSIFICATION (Simplified + Hysteresis) =====================
@@ -1246,19 +1370,20 @@ void sendBLEData() {
 
   // Send simplified IMU JSON (only firmware-computed features)
   // Buffer sized for: existing fields + fw(5) + seq(10) + evtMs(10) + boots(10) + evts(10)
-  //                 + cal(1) + gain(2) + chg(1) + tmp(6) + up(10) + dbg(1) + overhead
-  char imuData[340];
+  //                 + cal(1) + gain(2) + chg(1) + tmp(6) + up(10) + dbg(1) + ts(12) + overhead
+  char imuData[360];
   uint32_t evtMs = g_evtActive ? (uint32_t)(millis() - g_evtStartMs) : 0u;
   uint32_t uptimeSec = millis() / 1000u;  // P146: device uptime in seconds
+  uint32_t tsNow = (uint32_t)getCurrentEpoch(); // P199: wall-clock unix timestamp (0 if not set)
   int imuLen = snprintf(imuData, sizeof(imuData),
     "{\"ppv\":%.1f,\"stalta\":%.2f,\"rms\":%.4f,\"peak\":%.4f,\"crest\":%.1f,\"temp\":%.1f,\"mag\":%.4f"
     ",\"fw\":\"" FW_VERSION "\",\"seq\":%lu,\"evtMs\":%lu,\"boots\":%lu,\"evts\":%lu"
     ",\"cal\":%d,\"gain\":%d,\"chg\":%d"
-    ",\"tmp\":%.1f,\"up\":%lu,\"dbg\":%d}",
+    ",\"tmp\":%.1f,\"up\":%lu,\"dbg\":%d,\"ts\":%lu}",
     vibrationPPV, staLtaRatio, vibrationRMS, vibrationPeak, crestFactor, imuTemp, vibrationMagnitude,
     (unsigned long)g_seq, (unsigned long)evtMs, (unsigned long)g_bootCount, (unsigned long)g_sessionEvts,
     g_calibrating ? 1 : 0, g_highGainMode ? 16 : 4, batteryCharging ? 1 : 0,
-    imuTemp, (unsigned long)uptimeSec, g_debugMode ? 1 : 0);
+    imuTemp, (unsigned long)uptimeSec, g_debugMode ? 1 : 0, (unsigned long)tsNow);
   // P147: Motion threshold filter — only notify if PPV changed > 0.02 mm/s
   //       or more than 5 seconds have elapsed since last notification.
   //       The characteristic value is always updated so a phone read() gets
