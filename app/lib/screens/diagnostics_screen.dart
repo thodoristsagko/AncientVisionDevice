@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../services/critical_event_log_service.dart';
 import '../services/inference_timing_service.dart';
 import '../services/vibration_anomaly_service.dart';
 import '../services/device_memory_service.dart';
@@ -159,6 +160,8 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
                   _buildSessionSection(),
                   const SizedBox(height: 16),
                   _buildSystemSection(),
+                  const SizedBox(height: 24),
+                  _buildExportButton(),
                   const SizedBox(height: 32),
                 ],
               ),
@@ -269,6 +272,56 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
         ),
       ],
     );
+  }
+
+  Widget _buildExportButton() {
+    return Center(
+      child: ElevatedButton.icon(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: const Color(0xFF1C2523),
+          foregroundColor: Colors.white,
+          side: const BorderSide(color: Color(0xFFEF5350)),
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+        icon: const Icon(Icons.download_rounded, color: Color(0xFFEF5350)),
+        label: const Text(
+          'Export Critical Events',
+          style: TextStyle(
+            color: Color(0xFFEF5350),
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        onPressed: _exportCriticalEvents,
+      ),
+    );
+  }
+
+  Future<void> _exportCriticalEvents() async {
+    try {
+      final service = CriticalEventLogService.instance;
+      await service.exportAsCsv();
+
+      // Show a snackbar only if there were no events (exportAsCsv returns
+      // silently when empty).
+      if (mounted && service.events.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No critical events logged yet.'),
+            backgroundColor: Color(0xFF1C2523),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Export failed: $e'),
+            backgroundColor: Colors.red[900],
+          ),
+        );
+      }
+    }
   }
 }
 
