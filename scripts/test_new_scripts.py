@@ -1057,3 +1057,68 @@ class TestExportGpsTrack(unittest.TestCase):
         mod = self._load()
         self.assertIn("CRITICAL", mod.KML_COLORS)
         self.assertIn("SAFE", mod.KML_COLORS)
+
+
+# ===========================================================================
+# vibration_timeline.py tests
+# ===========================================================================
+
+class TestVibrationTimeline(unittest.TestCase):
+    """vibration_timeline.py — ASCII PPV timeline visualization."""
+
+    def _load(self):
+        spec = importlib.util.spec_from_file_location(
+            "vibration_timeline", "scripts/vibration_timeline.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_module_importable(self):
+        self._load()
+
+    def test_cli_help(self):
+        result = subprocess.run(
+            [sys.executable, "scripts/vibration_timeline.py", "--help"],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+
+    def test_empty_dir_ok(self):
+        with tempfile.TemporaryDirectory() as td:
+            result = subprocess.run(
+                [sys.executable, "scripts/vibration_timeline.py", "--data-dir", td],
+                capture_output=True, text=True
+            )
+            self.assertIn(result.returncode, (0, 1))
+
+    def test_render_timeline_basic(self):
+        import pandas as pd
+        mod = self._load()
+        df = pd.DataFrame({
+            "ppv": [0.1, 0.5, 1.0, 0.3, 0.8, 0.2, 0.9, 0.4, 0.7, 0.1],
+        })
+        lines = mod.render_timeline(df, width=30)
+        self.assertIsInstance(lines, list)
+        self.assertGreater(len(lines), 0)
+
+    def test_render_timeline_no_ppv_col(self):
+        import pandas as pd
+        mod = self._load()
+        df = pd.DataFrame({"rms": [0.1, 0.2]})
+        lines = mod.render_timeline(df, width=30)
+        self.assertIsInstance(lines, list)
+        # Should return error message lines, not crash
+        self.assertGreater(len(lines), 0)
+
+    def test_ppv_to_char_zero(self):
+        mod = self._load()
+        c = mod.ppv_to_char(0.0, 1.0)
+        self.assertIsInstance(c, str)
+        self.assertEqual(len(c), 1)
+
+    def test_ppv_to_char_max(self):
+        mod = self._load()
+        c = mod.ppv_to_char(1.0, 1.0)
+        self.assertIsInstance(c, str)
+        self.assertEqual(len(c), 1)
