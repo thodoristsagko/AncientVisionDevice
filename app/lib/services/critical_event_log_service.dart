@@ -93,7 +93,29 @@ class CriticalEventLogService {
   CriticalEventLogService._();
 
   static const String _key = 'critical_event_log';
-  static const int _maxEvents = 100;
+
+  /// Maximum number of events to retain in memory and on disk.
+  ///
+  /// When exceeded, the oldest events (tail of the newest-first list) are
+  /// trimmed to keep memory bounded.  Consumers may pass a custom limit via
+  /// [setMaxEvents].  Defaults to 1000.
+  static const int defaultMaxEvents = 1000;
+
+  int _maxEvents = defaultMaxEvents;
+
+  /// Override the maximum event limit at runtime.
+  ///
+  /// The new limit is applied immediately — if the in-memory list already
+  /// exceeds [limit], it is trimmed and the result is persisted.
+  Future<void> setMaxEvents(int limit) async {
+    assert(limit > 0, 'maxEvents must be positive');
+    _maxEvents = limit;
+    await _ensureLoaded();
+    if (_events.length > _maxEvents) {
+      _events.removeRange(_maxEvents, _events.length);
+      await _persist();
+    }
+  }
 
   // Clustering thresholds.
   static const Duration _clusterTimeWindow = Duration(seconds: 30);
@@ -127,12 +149,57 @@ class CriticalEventLogService {
   /// Timestamp of the most recent event, or null if no events exist.
   DateTime? get lastEventTime => mostRecentEvent?.timestamp;
 
+  /// Sum of ppv² across all stored events (J·s/m² proxy for cumulative damage).
+  ///
+  /// Useful for Arias-intensity-style damage accumulation assessment.
+  double get totalPpvEnergy =>
+      _events.fold(0.0, (sum, e) => sum + e.ppv * e.ppv);
+
   /// Ensures persisted events are loaded, then returns an unmodifiable list.
   ///
   /// Prefer this over [events] when you need the full history on app start.
   Future<List<CriticalEvent>> loadEvents() async {
     await _ensureLoaded();
     return List.unmodifiable(_events);
+  }
+
+  /// Returns events whose [CriticalEvent.timestamp] falls within [[start], [end]]
+  /// (inclusive on both ends), ordered newest-first.
+  ///
+  /// Loads persisted data first so this is safe to call at app startup.
+  Future<List<CriticalEvent>> getEventsBetween(
+    DateTime start,
+    DateTime end,
+  ) async {
+    await _ensureLoaded();
+    return List.unmodifiable(
+      _events.where(
+        (e) =>
+            !e.timestamp.isBefore(start) && !e.timestamp.isAfter(end),
+      ),
+    );
+  }
+
+  /// Removes all events older than [age] from now, then persists the result.
+  ///
+  /// Useful for routine maintenance — e.g. call with `Duration(days: 90)` on
+  /// app start to keep the log from growing indefinitely beyond [_maxEvents].
+  Future<void> clearEventsOlderThan(Duration age) async {
+    try {
+      await _ensureLoaded();
+      final cutoff = DateTime.now().subtract(age);
+      final before = _events.length;
+      _events.removeWhere((e) => e.timestamp.isBefore(cutoff));
+      if (_events.length != before) {
+        await _persist();
+        debugPrint(
+          '[CriticalEventLogService] clearEventsOlderThan: '
+          'removed ${before - _events.length} events older than $age',
+        );
+      }
+    } catch (e) {
+      debugPrint('[CriticalEventLogService] clearEventsOlderThan failed: $e');
+    }
   }
 
   /// Explicit initialise method — loads persisted events from SharedPreferences.

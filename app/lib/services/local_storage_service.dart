@@ -202,4 +202,19 @@ class LocalStorageService {
     await initialize();
     await _prefs!.clear();
   }
+
+  /// Serializes all keys currently stored in SharedPreferences to a JSON
+  /// string.  Useful for diagnostics, bug reports, and local backups.
+  ///
+  /// Values are represented as-is (String/int/double/bool/List<String>).
+  /// The map is sorted by key for deterministic output.
+  Future<String> exportAllPreferencesToJson() async {
+    await initialize();
+    final keys = _prefs!.getKeys().toList()..sort();
+    final result = <String, dynamic>{};
+    for (final key in keys) {
+      result[key] = _prefs!.get(key);
+    }
+    return const JsonEncoder.withIndent('  ').convert(result);
+  }
 }
