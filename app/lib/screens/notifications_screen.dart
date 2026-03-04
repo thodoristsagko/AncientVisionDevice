@@ -94,6 +94,22 @@ class NotificationsScreen extends StatefulWidget {
   State<NotificationsScreen> createState() => _NotificationsScreenState();
 }
 
+// ---------------------------------------------------------------------------
+// Date-group helpers
+// ---------------------------------------------------------------------------
+
+/// Returns the date-group label for a notification timestamp.
+String _dateGroup(DateTime timestamp) {
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final yesterday = today.subtract(const Duration(days: 1));
+  final itemDay = DateTime(timestamp.year, timestamp.month, timestamp.day);
+
+  if (itemDay == today) return 'Today';
+  if (itemDay == yesterday) return 'Yesterday';
+  return 'Earlier';
+}
+
 class _NotificationsScreenState extends State<NotificationsScreen> {
   List<NotificationItem> _notifications = [];
   bool _isLoading = true;
@@ -105,6 +121,9 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   /// Timestamps (ISO-8601 strings) of items marked as read this session.
   final Set<String> _readKeys = {};
 
+  /// Unread count captured before clearing the badge (shown in AppBar).
+  int _unreadCountOnOpen = 0;
+
   // Colour constants (matching the teal/Material theme)
   static const _bgColor = Color(0xFF1C2523);
   static const _appBarColor = Color(0xFF0D3A39);
@@ -115,8 +134,17 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     super.initState();
     _loadNotifications();
     _loadSettings();
-    // Clear badge count when the user opens this screen
-    NotificationService().clearUnreadCount();
+    _captureAndClearUnreadCount();
+  }
+
+  /// Reads the current unread badge count, stores it for display, then
+  /// resets it — so the AppBar can show "(N unread)" on this visit.
+  Future<void> _captureAndClearUnreadCount() async {
+    final count = await NotificationService().getUnreadCount();
+    await NotificationService().clearUnreadCount();
+    if (mounted) {
+      setState(() => _unreadCountOnOpen = count);
+    }
   }
 
   Future<void> _loadNotifications() async {
@@ -256,7 +284,21 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       backgroundColor: _bgColor,
       appBar: AppBar(
         backgroundColor: _appBarColor,
-        title: const Text('Notifications', style: TextStyle(color: Colors.white)),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Notifications', style: TextStyle(color: Colors.white)),
+            if (_unreadCountOnOpen > 0)
+              Text(
+                '$_unreadCountOnOpen unread',
+                style: const TextStyle(
+                  color: Colors.white60,
+                  fontSize: 12,
+                  fontWeight: FontWeight.normal,
+                ),
+              ),
+          ],
+        ),
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
           // Mark all read
@@ -441,16 +483,74 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     final filtered = _filteredNotifications;
 
     if (filtered.isEmpty) {
-      return _buildEmptyState();
+      return RefreshIndicator(
+        color: _accent,
+        backgroundColor: _appBarColor,
+        onRefresh: _loadNotifications,
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: SizedBox(
+            height: 400,
+            child: _buildEmptyState(),
+          ),
+        ),
+      );
     }
 
-    return ListView.builder(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      itemCount: filtered.length,
-      itemBuilder: (context, index) {
-        final notification = filtered[index];
-        return _buildDismissibleTile(notification);
-      },
+    // Build a flat list of items with date-group headers inserted between
+    // sections.  Each entry is either a header String or a NotificationItem.
+    final List<Object> rows = [];
+    String? currentGroup;
+    for (final n in filtered) {
+      final group = _dateGroup(n.timestamp);
+      if (group != currentGroup) {
+        rows.add(group); // header sentinel
+        currentGroup = group;
+      }
+      rows.add(n);
+    }
+
+    return RefreshIndicator(
+      color: _accent,
+      backgroundColor: _appBarColor,
+      onRefresh: _loadNotifications,
+      child: ListView.builder(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        itemCount: rows.length,
+        itemBuilder: (context, index) {
+          final row = rows[index];
+          if (row is String) {
+            return _buildDateHeader(row);
+          }
+          return _buildDismissibleTile(row as NotificationItem);
+        },
+      ),
+    );
+  }
+
+  Widget _buildDateHeader(String label) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 12, 4, 6),
+      child: Row(
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white54,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.8,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Container(
+              height: 1,
+              color: Colors.white.withAlpha(26),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
