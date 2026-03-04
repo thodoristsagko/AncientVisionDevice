@@ -41,11 +41,19 @@ class VibrationDspService {
   static const int windowSize = 256;
   static const double dt = 1.0 / sampleRate;
 
+  /// Expose the configured sample rate as an instance getter (same as [sampleRate]).
+  int get sampleRateHz => sampleRate;
+
   // Running accumulators (persist across windows)
   double ariasIntensity = 0.0;
   double cav = 0.0;
   DateTime _lastAriasReset = DateTime.now();
   static const Duration ariasResetInterval = Duration(seconds: 60);
+
+  // Single-entry result cache keyed by first+last 4 sample values of each axis.
+  // Avoids redundant heavy DSP when the same buffer arrives twice (e.g. BLE retry).
+  _CacheKey? _lastCacheKey;
+  DspResult? _lastCachedResult;
 
   // PPV noise floor calibration (same approach as firmware)
   double _ppvNoiseFloor = 0.0;
@@ -110,6 +118,11 @@ class VibrationDspService {
       ariasIntensity: ariasIntensity,
       cav: cav,
       psdSlope: response.dspResult.psdSlope,
+      spectralBandwidth: response.dspResult.spectralBandwidth,
+      zeroCrossingRate: response.dspResult.zeroCrossingRate,
+      lfRatio: response.dspResult.lfRatio,
+      mfRatio: response.dspResult.mfRatio,
+      hfRatio: response.dspResult.hfRatio,
     );
 
     return (dsp: dsp, ppv: calibratedPPV);
@@ -119,10 +132,19 @@ class VibrationDspService {
   ///
   /// [accelX], [accelY], [accelZ] are filtered acceleration in g units,
   /// each containing [windowSize] samples.
+  ///
+  /// Returns a cached result when the same buffer is submitted twice (detected
+  /// via a lightweight hash of the first + last 4 sample values per axis).
   DspResult process(List<double> accelX, List<double> accelY, List<double> accelZ) {
     assert(accelX.length == windowSize);
     assert(accelY.length == windowSize);
     assert(accelZ.length == windowSize);
+
+    // Cache check: hash first+last 4 values of each axis.
+    final cacheKey = _CacheKey.from(accelX, accelY, accelZ);
+    if (_lastCachedResult != null && _lastCacheKey == cacheKey) {
+      return _lastCachedResult!;
+    }
 
     // 1. Compute magnitude signal
     final magnitude = List<double>.filled(windowSize, 0.0);
@@ -245,7 +267,63 @@ class VibrationDspService {
       _lastAriasReset = now;
     }
 
-    return DspResult(
+    // 8. Spectral bandwidth
+    // bandwidth = sqrt( Σ(f - fc)² × S(f) / Σ S(f) )
+    // where fc = spectralCentroid and S(f) = fftMagnitudes[i] (linear amplitude).
+    // Narrow bandwidth → tonal; wide → broadband noise.
+    double spectralBandwidth = 0.0;
+    {
+      double weightedVarSum = 0.0;
+      double magSum = 0.0;
+      for (int i = 1; i < halfN; i++) {
+        final freq = i * binResolution;
+        final s = fftMagnitudes[i];
+        final diff = freq - spectralCentroid;
+        weightedVarSum += diff * diff * s;
+        magSum += s;
+      }
+      spectralBandwidth = magSum > 0.001 ? sqrt(weightedVarSum / magSum) : 0.0;
+    }
+
+    // 9. Zero-crossing rate (on raw magnitude signal)
+    // ZCR = number of sign changes / windowSize.
+    // Uses the mean-removed signal so that a DC offset does not suppress crossings.
+    int zeroCrossings = 0;
+    {
+      final meanMag = rms; // use RMS as a reasonable centre reference
+      bool prevPositive = magnitude[0] >= meanMag;
+      for (int i = 1; i < windowSize; i++) {
+        final currentPositive = magnitude[i] >= meanMag;
+        if (currentPositive != prevPositive) zeroCrossings++;
+        prevPositive = currentPositive;
+      }
+    }
+    final zeroCrossingRate = zeroCrossings / windowSize.toDouble();
+
+    // 10. Frequency band energy ratios
+    // LF: 1–10 Hz, MF: 10–50 Hz, HF: 50–100 Hz
+    // Ratios relative to total spectral energy (bins 1..halfN-1).
+    // Help distinguish soil movement (LF) from impact events (HF).
+    double lfEnergy = 0.0, mfEnergy = 0.0, hfEnergy = 0.0, totalEnergy = 0.0;
+    {
+      for (int i = 1; i < halfN; i++) {
+        final freq = i * binResolution;
+        final energyBin = fftMagnitudes[i] * fftMagnitudes[i];
+        totalEnergy += energyBin;
+        if (freq >= 1.0 && freq < 10.0) {
+          lfEnergy += energyBin;
+        } else if (freq >= 10.0 && freq < 50.0) {
+          mfEnergy += energyBin;
+        } else if (freq >= 50.0 && freq <= 100.0) {
+          hfEnergy += energyBin;
+        }
+      }
+    }
+    final lfRatio = totalEnergy > 1e-20 ? lfEnergy / totalEnergy : 0.0;
+    final mfRatio = totalEnergy > 1e-20 ? mfEnergy / totalEnergy : 0.0;
+    final hfRatio = totalEnergy > 1e-20 ? hfEnergy / totalEnergy : 0.0;
+
+    final result = DspResult(
       rms: rms,
       peak: peak,
       crestFactor: crestFactor,
@@ -259,7 +337,17 @@ class VibrationDspService {
       ariasIntensity: ariasIntensity,
       cav: cav,
       psdSlope: psdSlope,
+      spectralBandwidth: spectralBandwidth,
+      zeroCrossingRate: zeroCrossingRate,
+      lfRatio: lfRatio,
+      mfRatio: mfRatio,
+      hfRatio: hfRatio,
     );
+
+    // Store in single-entry cache.
+    _lastCacheKey = cacheKey;
+    _lastCachedResult = result;
+    return result;
   }
 
   /// Radix-2 DIT FFT with Hanning window.
@@ -454,6 +542,8 @@ class VibrationDspService {
     _ppvCalibrated = false;
     _calibrationCount = 0;
     _calibrationSum = 0.0;
+    _lastCacheKey = null;
+    _lastCachedResult = null;
   }
 
   /// Clean up resources
@@ -479,6 +569,25 @@ class DspResult {
   final double cav;
   final double psdSlope; // Log-log PSD slope (β exponent) in 0.78-5 Hz band
 
+  /// Spectral bandwidth: sqrt(Σ(f-fc)²·S(f) / Σ S(f)) in Hz.
+  /// Narrow = tonal; wide = broadband noise.
+  final double spectralBandwidth;
+
+  /// Zero-crossing rate: sign-change count / window length (crossings per sample).
+  /// High ZCR → high-frequency content; low ZCR → low-frequency / DC content.
+  final double zeroCrossingRate;
+
+  /// Fraction of spectral energy in the 1–10 Hz low-frequency band.
+  /// Elevated lfRatio is characteristic of soil creep and slow mass movement.
+  final double lfRatio;
+
+  /// Fraction of spectral energy in the 10–50 Hz mid-frequency band.
+  final double mfRatio;
+
+  /// Fraction of spectral energy in the 50–100 Hz high-frequency band.
+  /// Elevated hfRatio is characteristic of impact events and machinery.
+  final double hfRatio;
+
   const DspResult({
     required this.rms,
     required this.peak,
@@ -493,6 +602,11 @@ class DspResult {
     required this.ariasIntensity,
     required this.cav,
     required this.psdSlope,
+    this.spectralBandwidth = 0.0,
+    this.zeroCrossingRate = 0.0,
+    this.lfRatio = 0.0,
+    this.mfRatio = 0.0,
+    this.hfRatio = 0.0,
   });
 
   /// Convert to feature map for anomaly detection pipeline.
@@ -513,6 +627,11 @@ class DspResult {
       'cav': cav,
       'temp': temp,
       'psdSlope': psdSlope,
+      'spectralBandwidth': spectralBandwidth,
+      'zeroCrossingRate': zeroCrossingRate,
+      'lfRatio': lfRatio,
+      'mfRatio': mfRatio,
+      'hfRatio': hfRatio,
     };
   }
 }
@@ -522,4 +641,48 @@ class _DwtResult {
   final double energy2;
   final double energy3;
   const _DwtResult({required this.energy1, required this.energy2, required this.energy3});
+}
+
+/// Lightweight cache key built from the first + last 4 samples of each axis.
+/// Collisions are astronomically unlikely for real sensor data.
+class _CacheKey {
+  final List<double> _values;
+
+  _CacheKey._(this._values);
+
+  factory _CacheKey.from(
+    List<double> x,
+    List<double> y,
+    List<double> z,
+  ) {
+    final n = x.length;
+    final vals = <double>[];
+    // First 4 samples of each axis.
+    for (int i = 0; i < 4 && i < n; i++) {
+      vals.add(x[i]);
+      vals.add(y[i]);
+      vals.add(z[i]);
+    }
+    // Last 4 samples of each axis (guard against n < 8).
+    final start = n > 4 ? n - 4 : 4;
+    for (int i = start; i < n; i++) {
+      vals.add(x[i]);
+      vals.add(y[i]);
+      vals.add(z[i]);
+    }
+    return _CacheKey._(vals);
+  }
+
+  @override
+  bool operator ==(Object other) {
+    if (other is! _CacheKey) return false;
+    if (_values.length != other._values.length) return false;
+    for (int i = 0; i < _values.length; i++) {
+      if (_values[i] != other._values[i]) return false;
+    }
+    return true;
+  }
+
+  @override
+  int get hashCode => Object.hashAll(_values);
 }

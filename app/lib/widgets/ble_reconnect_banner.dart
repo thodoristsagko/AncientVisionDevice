@@ -1,13 +1,73 @@
 import 'package:flutter/material.dart';
 import '../utils/app_styles.dart';
 
+// ---------------------------------------------------------------------------
+// RSSI helper
+// ---------------------------------------------------------------------------
+
+/// Converts an RSSI value (dBm) to a 0–5 bar count.
+///
+/// Thresholds follow common BLE RSSI conventions:
+///   ≥ -55 dBm → 5 bars (excellent)
+///   ≥ -65 dBm → 4 bars (good)
+///   ≥ -75 dBm → 3 bars (fair)
+///   ≥ -85 dBm → 2 bars (weak)
+///   ≥ -95 dBm → 1 bar  (very weak)
+///   <  -95 dBm → 0 bars (no signal)
+int _rssiToBars(int rssi) {
+  if (rssi >= -55) return 5;
+  if (rssi >= -65) return 4;
+  if (rssi >= -75) return 3;
+  if (rssi >= -85) return 2;
+  if (rssi >= -95) return 1;
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// _SignalStrengthDots — "●●●○○" style widget
+// ---------------------------------------------------------------------------
+
+class _SignalStrengthDots extends StatelessWidget {
+  final int bars; // 0–5
+  static const int _maxBars = 5;
+
+  const _SignalStrengthDots({required this.bars});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(_maxBars, (i) {
+        final filled = i < bars;
+        return Padding(
+          padding: const EdgeInsets.only(right: 2),
+          child: Text(
+            '●',
+            style: TextStyle(
+              fontSize: 10,
+              color: filled ? Colors.white : Colors.white38,
+            ),
+          ),
+        );
+      }),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// BleReconnectBanner
+// ---------------------------------------------------------------------------
+
 /// An animated banner displayed when BLE connectivity is lost.
 ///
 /// Shows:
-///   - The current reconnect attempt number and max
-///   - A live countdown until the next automatic retry
-///   - A "Retry Now" button to trigger an immediate attempt
-///   - A "Cancel" button to stop all retries
+///   - The current reconnect attempt number and max.
+///   - A live countdown until the next automatic retry.
+///   - Last known RSSI as a "Signal: ●●●○○" indicator.
+///   - A "Retry Now" button to trigger an immediate attempt.
+///   - A "Scan for devices" button to pop back to device scanning mode.
+///   - A "Cancel" button to stop all retries.
+///   - Color: orange while attempting, red when all attempts have failed.
 ///
 /// Wrap in an [AnimatedSwitcher] or a [Visibility] widget to slide it in/out.
 ///
@@ -18,7 +78,9 @@ import '../utils/app_styles.dart';
 ///     attemptNumber: _manager.currentAttempt,
 ///     maxAttempts: BleReconnectManager.maxAttempts,
 ///     secondsUntilRetry: _manager.secondsUntilRetry,
+///     lastRssi: _lastKnownRssi,
 ///     onRetryNow: () => _manager.retryNow(...),
+///     onScan: () => Navigator.of(context).pop(),
 ///     onCancel: () { _manager.cancel(); setState(() => _isDisconnected = false); },
 ///   ),
 /// ```
@@ -26,7 +88,16 @@ class BleReconnectBanner extends StatefulWidget {
   final int attemptNumber;
   final int maxAttempts;
   final int secondsUntilRetry;
+
+  /// Last known RSSI in dBm.  Pass null if unavailable.
+  final int? lastRssi;
+
   final VoidCallback onRetryNow;
+
+  /// Called when the user taps "Scan for devices".  Typically pops back to
+  /// the device-scanning screen.  Pass null to hide the button.
+  final VoidCallback? onScan;
+
   final VoidCallback onCancel;
 
   const BleReconnectBanner({
@@ -34,7 +105,9 @@ class BleReconnectBanner extends StatefulWidget {
     required this.attemptNumber,
     required this.maxAttempts,
     required this.secondsUntilRetry,
+    this.lastRssi,
     required this.onRetryNow,
+    this.onScan,
     required this.onCancel,
   });
 
@@ -67,18 +140,41 @@ class _BleReconnectBannerState extends State<BleReconnectBanner>
     super.dispose();
   }
 
+  // -------------------------------------------------------------------------
+  // State-derived helpers
+  // -------------------------------------------------------------------------
+
+  /// True when all retry attempts have been exhausted.
+  bool get _hasFailed =>
+      widget.attemptNumber >= widget.maxAttempts &&
+      widget.secondsUntilRetry == 0;
+
+  /// Background gradient: orange while retrying, red when failed.
+  LinearGradient get _gradient {
+    if (_hasFailed) {
+      return const LinearGradient(
+        colors: [Color(0xFFB71C1C), Color(0xFFE53935)],
+        begin: Alignment.centerLeft,
+        end: Alignment.centerRight,
+      );
+    }
+    return const LinearGradient(
+      colors: [Color(0xFFE65100), Color(0xFFF57C00)],
+      begin: Alignment.centerLeft,
+      end: Alignment.centerRight,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Build
+  // -------------------------------------------------------------------------
+
   @override
   Widget build(BuildContext context) {
     return SlideTransition(
       position: _slideAnimation,
       child: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Color(0xFFB71C1C), Color(0xFFE65100)],
-            begin: Alignment.centerLeft,
-            end: Alignment.centerRight,
-          ),
-        ),
+        decoration: BoxDecoration(gradient: _gradient),
         child: SafeArea(
           bottom: false,
           child: Padding(
@@ -99,17 +195,27 @@ class _BleReconnectBannerState extends State<BleReconnectBanner>
   }
 
   Widget _buildStatusRow() {
-    final String attemptLabel = widget.attemptNumber == 0
-        ? 'Connection lost'
-        : 'Connection lost — attempt ${widget.attemptNumber}/${widget.maxAttempts}';
+    final String attemptLabel;
+    if (_hasFailed) {
+      attemptLabel = 'Connection failed after ${widget.maxAttempts} attempts';
+    } else if (widget.attemptNumber == 0) {
+      attemptLabel = 'Connection lost';
+    } else {
+      attemptLabel =
+          'Reconnect attempt ${widget.attemptNumber}/${widget.maxAttempts}';
+    }
 
     final String countdownLabel = widget.secondsUntilRetry > 0
         ? 'Retrying in ${widget.secondsUntilRetry}s'
-        : 'Connecting...';
+        : (_hasFailed ? 'No further retries' : 'Connecting...');
 
     return Row(
       children: [
-        const Icon(Icons.bluetooth_disabled, color: Colors.white, size: 20),
+        Icon(
+          _hasFailed ? Icons.bluetooth_disabled : Icons.bluetooth_searching,
+          color: Colors.white,
+          size: 20,
+        ),
         const SizedBox(width: 8),
         Expanded(
           child: Column(
@@ -123,28 +229,55 @@ class _BleReconnectBannerState extends State<BleReconnectBanner>
                   fontWeight: FontWeight.bold,
                 ),
               ),
-              Text(
-                countdownLabel,
-                style: const TextStyle(
-                  color: Colors.white70,
-                  fontSize: 12,
-                ),
+              const SizedBox(height: 2),
+              Row(
+                children: [
+                  Text(
+                    countdownLabel,
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 12,
+                    ),
+                  ),
+                  if (widget.lastRssi != null) ...[
+                    const SizedBox(width: 10),
+                    _buildSignalIndicator(widget.lastRssi!),
+                  ],
+                ],
               ),
             ],
           ),
         ),
-        // Mini countdown progress
+        // Mini countdown spinner
         if (widget.secondsUntilRetry > 0)
-          SizedBox(
+          const SizedBox(
             width: 28,
             height: 28,
             child: CircularProgressIndicator(
-              value: null, // indeterminate while counting down
               strokeWidth: 3,
               backgroundColor: Colors.white24,
-              valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+              valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
             ),
           ),
+      ],
+    );
+  }
+
+  Widget _buildSignalIndicator(int rssi) {
+    final bars = _rssiToBars(rssi);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Text(
+          'Signal: ',
+          style: TextStyle(color: Colors.white70, fontSize: 11),
+        ),
+        _SignalStrengthDots(bars: bars),
+        const SizedBox(width: 4),
+        Text(
+          '($rssi dBm)',
+          style: const TextStyle(color: Colors.white54, fontSize: 10),
+        ),
       ],
     );
   }
@@ -152,6 +285,7 @@ class _BleReconnectBannerState extends State<BleReconnectBanner>
   Widget _buildActionRow() {
     return Row(
       children: [
+        // Cancel button
         Expanded(
           child: OutlinedButton(
             onPressed: widget.onCancel,
@@ -164,18 +298,47 @@ class _BleReconnectBannerState extends State<BleReconnectBanner>
             child: const Text('Cancel', style: TextStyle(fontSize: 13)),
           ),
         ),
-        const SizedBox(width: 12),
+        const SizedBox(width: 8),
+        // Scan button (optional)
+        if (widget.onScan != null) ...[
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: widget.onScan,
+              icon: const Icon(Icons.search, size: 15, color: Colors.white),
+              label: const Text(
+                'Scan',
+                style: TextStyle(color: Colors.white, fontSize: 12),
+              ),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Colors.white,
+                side: const BorderSide(color: Colors.white38),
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+        ],
+        // Retry Now button
         Expanded(
           flex: 2,
           child: ElevatedButton.icon(
-            onPressed: widget.onRetryNow,
-            icon: const Icon(Icons.refresh, size: 16, color: Color(0xFFB71C1C)),
-            label: const Text(
+            onPressed: _hasFailed ? null : widget.onRetryNow,
+            icon: Icon(
+              Icons.refresh,
+              size: 16,
+              color: _hasFailed ? Colors.grey : const Color(0xFFB71C1C),
+            ),
+            label: Text(
               'Retry Now',
-              style: TextStyle(color: Color(0xFFB71C1C), fontSize: 13),
+              style: TextStyle(
+                color: _hasFailed ? Colors.grey : const Color(0xFFB71C1C),
+                fontSize: 13,
+              ),
             ),
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.white,
+              disabledBackgroundColor: Colors.white38,
               padding: const EdgeInsets.symmetric(vertical: 8),
               visualDensity: VisualDensity.compact,
             ),
@@ -186,9 +349,13 @@ class _BleReconnectBannerState extends State<BleReconnectBanner>
   }
 }
 
+// ---------------------------------------------------------------------------
+// BleReconnectingChip — compact inline chip variant
+// ---------------------------------------------------------------------------
+
 /// Compact inline chip variant for use inside card views.
 ///
-/// Shows a pulsing red dot + "Reconnecting..." text.
+/// Shows a pulsing dot + "Reconnecting…" text.
 class BleReconnectingChip extends StatefulWidget {
   final int secondsUntilRetry;
 
