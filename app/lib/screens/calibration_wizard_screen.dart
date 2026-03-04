@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import '../utils/app_styles.dart';
 
@@ -6,9 +7,9 @@ import '../utils/app_styles.dart';
 ///
 /// Walk the user through four stages:
 ///   1. Prepare   — place the device correctly
-///   2. Baseline  — 30-second ambient capture with live countdown
+///   2. Baseline  — 30-second ambient capture with live countdown + noise display
 ///   3. Verify    — display captured noise floor and computed threshold
-///   4. Complete  — confirmation with a large green checkmark
+///   4. Complete  — confirmation with a large green checkmark and action buttons
 ///
 /// Usage:
 /// ```dart
@@ -50,7 +51,13 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
   static const int _baselineDurationSeconds = 30;
   int _secondsRemaining = _baselineDurationSeconds;
   Timer? _countdownTimer;
+  Timer? _noiseLevelTimer;
   bool _captureStarted = false;
+
+  // Live noise floor reading (simulated during baseline capture).
+  // In a real integration this comes from VibrationAnomalyService.instance.
+  double _noiseLevel = 0.0;
+  final _random = Random();
 
   // Simulated noise floor result shown on verify screen (step 2)
   // In a real integration these values come from the calibration service.
@@ -80,6 +87,7 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
   @override
   void dispose() {
     _countdownTimer?.cancel();
+    _noiseLevelTimer?.cancel();
     _pulseController.dispose();
     super.dispose();
   }
@@ -109,16 +117,63 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
       Navigator.of(context).pop(false); // cancelled
       return;
     }
-    // Cancelling mid-capture resets the countdown
-    if (_currentStep == 1) {
-      _cancelBaselineCapture();
+    // Show confirmation dialog when cancelling mid-calibration
+    if (_currentStep == 1 || _currentStep == 2) {
+      _showCancelConfirmation();
+      return;
     }
     setState(() => _currentStep--);
+  }
+
+  Future<void> _showCancelConfirmation() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.primaryDark,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: AppColors.cardBorder),
+        ),
+        title: const Text(
+          'Cancel Calibration?',
+          style: AppTextStyles.h3,
+        ),
+        content: const Text(
+          'Progress will be lost. The device will return to uncalibrated mode.',
+          style: AppTextStyles.subtitle,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text(
+              'Continue Calibrating',
+              style: AppTextStyles.accentText,
+            ),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.error,
+              foregroundColor: AppColors.textPrimary,
+            ),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true && mounted) {
+      if (_currentStep == 1) {
+        _cancelBaselineCapture();
+      }
+      setState(() => _currentStep--);
+    }
   }
 
   void _startBaselineCapture() {
     _captureStarted = true;
     _secondsRemaining = _baselineDurationSeconds;
+    _noiseLevel = 0.005 + _random.nextDouble() * 0.01;
     widget.onCalibrationStart?.call();
 
     _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
@@ -131,15 +186,29 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
       });
       if (_secondsRemaining <= 0) {
         timer.cancel();
+        _noiseLevelTimer?.cancel();
         _onCaptureComplete();
       }
+    });
+
+    // Live noise floor update every second
+    _noiseLevelTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() {
+        _noiseLevel = 0.005 + _random.nextDouble() * 0.01;
+      });
     });
   }
 
   void _cancelBaselineCapture() {
     _countdownTimer?.cancel();
+    _noiseLevelTimer?.cancel();
     _captureStarted = false;
     _secondsRemaining = _baselineDurationSeconds;
+    _noiseLevel = 0.0;
   }
 
   void _onCaptureComplete() {
@@ -158,97 +227,147 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.primaryDark,
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.close, color: AppColors.textSecondary),
-          onPressed: () => Navigator.of(context).pop(false),
-          tooltip: 'Cancel calibration',
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        if (_currentStep == 0 || _currentStep == 3) {
+          Navigator.of(context).pop(false);
+        } else {
+          _showCancelConfirmation();
+        }
+      },
+      child: Scaffold(
+        backgroundColor: AppColors.primaryDark,
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          leading: IconButton(
+            icon: const Icon(Icons.close, color: AppColors.textSecondary),
+            onPressed: () {
+              if (_currentStep == 0 || _currentStep == 3) {
+                Navigator.of(context).pop(false);
+              } else {
+                _showCancelConfirmation();
+              }
+            },
+            tooltip: 'Cancel calibration',
+          ),
+          title: const Text('Calibration Wizard', style: AppTextStyles.h3),
+          foregroundColor: AppColors.textPrimary,
         ),
-        title: const Text('Calibration Wizard', style: AppTextStyles.h3),
-        foregroundColor: AppColors.textPrimary,
-      ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            _buildStepIndicator(),
-            Expanded(child: _buildStepContent()),
-            _buildNavigationButtons(),
-          ],
+        body: SafeArea(
+          child: Column(
+            children: [
+              _buildStepIndicator(),
+              Expanded(child: _buildStepContent()),
+              _buildNavigationButtons(),
+            ],
+          ),
         ),
       ),
     );
   }
 
   // ------------------------------------------------------------------
-  // Step indicator
+  // Step indicator — numbered circles with connecting lines
   // ------------------------------------------------------------------
 
   Widget _buildStepIndicator() {
     const stepLabels = ['Prepare', 'Baseline', 'Verify', 'Complete'];
     return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: List.generate(_totalSteps * 2 - 1, (index) {
           if (index.isOdd) {
-            // Connector line
+            // Connector line between circles
+            final leftStep = index ~/ 2;
+            final lineActive = leftStep < _currentStep;
             return Expanded(
-              child: Container(
-                height: 2,
-                color: index ~/ 2 < _currentStep
-                    ? AppColors.accent
-                    : AppColors.cardBorder,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 16),
+                child: Container(
+                  height: 2,
+                  decoration: BoxDecoration(
+                    gradient: lineActive
+                        ? const LinearGradient(
+                            colors: [AppColors.accent, AppColors.accent],
+                          )
+                        : null,
+                    color: lineActive ? null : AppColors.cardBorder,
+                    borderRadius: BorderRadius.circular(1),
+                  ),
+                ),
               ),
             );
           }
+
           final step = index ~/ 2;
           final isDone = step < _currentStep;
           final isCurrent = step == _currentStep;
+
           return Column(
             children: [
-              Container(
-                width: 32,
-                height: 32,
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                width: 34,
+                height: 34,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: isDone
                       ? AppColors.accent
                       : isCurrent
-                          ? AppColors.accent.withAlpha(80)
-                          : AppColors.cardBorder,
+                          ? Colors.transparent
+                          : AppColors.cardBorder.withAlpha(80),
                   border: Border.all(
-                    color:
-                        isCurrent ? AppColors.accent : Colors.transparent,
+                    color: isDone
+                        ? AppColors.accent
+                        : isCurrent
+                            ? AppColors.accent
+                            : AppColors.cardBorder,
                     width: 2,
                   ),
+                  boxShadow: isCurrent
+                      ? [
+                          BoxShadow(
+                            color: AppColors.accent.withAlpha(60),
+                            blurRadius: 8,
+                            spreadRadius: 1,
+                          )
+                        ]
+                      : null,
                 ),
                 child: Center(
                   child: isDone
-                      ? const Icon(Icons.check, size: 16, color: AppColors.primaryDark)
+                      ? const Icon(
+                          Icons.check,
+                          size: 16,
+                          color: AppColors.primaryDark,
+                        )
                       : Text(
                           '${step + 1}',
                           style: AppTextStyles.buttonSmall.copyWith(
                             color: isCurrent
                                 ? AppColors.accent
                                 : AppColors.textSecondary,
+                            fontWeight: isCurrent
+                                ? FontWeight.bold
+                                : FontWeight.normal,
                           ),
                         ),
                 ),
               ),
-              const SizedBox(height: 4),
+              const SizedBox(height: 5),
               Text(
                 stepLabels[step],
                 style: AppTextStyles.caption.copyWith(
-                  color: isCurrent
-                      ? AppColors.accent
-                      : isDone
-                          ? AppColors.textPrimary
-                          : AppColors.textSecondary,
+                  color: isDone || isCurrent
+                      ? AppColors.textPrimary
+                      : AppColors.textSecondary,
                   fontWeight:
                       isCurrent ? FontWeight.bold : FontWeight.normal,
+                  fontSize: 10,
                 ),
               ),
             ],
@@ -333,7 +452,7 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
             style: AppTextStyles.subtitle,
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 32),
+          const SizedBox(height: 24),
           // Animated countdown ring
           ScaleTransition(
             scale: _pulseAnimation,
@@ -369,7 +488,12 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
               ],
             ),
           ),
-          const SizedBox(height: 32),
+          const SizedBox(height: 20),
+          // Live noise floor display
+          if (_captureStarted) ...[
+            _buildNoiseDisplay(),
+            const SizedBox(height: 20),
+          ],
           LinearProgressIndicator(
             value: progress,
             backgroundColor: AppColors.cardBorder,
@@ -393,6 +517,75 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
           ],
         ],
       ),
+    );
+  }
+
+  /// Live noise level widget shown during baseline capture.
+  Widget _buildNoiseDisplay() {
+    final noiseFmt = _noiseLevel.toStringAsFixed(4);
+    // Colour-code: green if very quiet, amber if borderline
+    final noiseColor = _noiseLevel < 0.008
+        ? AppColors.success
+        : _noiseLevel < 0.012
+            ? AppColors.warning
+            : AppColors.error;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: noiseColor.withAlpha(15),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: noiseColor.withAlpha(70)),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.waves, color: noiseColor, size: 18),
+          const SizedBox(width: 8),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Current noise',
+                style: AppTextStyles.caption,
+              ),
+              Text(
+                '$noiseFmt g RMS',
+                style: AppTextStyles.h4.copyWith(
+                  color: noiseColor,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(width: 12),
+          // Mini waveform bars (cosmetic)
+          _buildMiniWaveform(noiseColor),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMiniWaveform(Color color) {
+    final heights = [0.4, 0.7, 1.0, 0.6, 0.8, 0.5, 0.9, 0.3, 0.6, 1.0];
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: heights.map((h) {
+        final barH = 4.0 + h * 16.0;
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 1),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 500),
+            width: 3,
+            height: barH * (_noiseLevel / 0.015).clamp(0.2, 1.5),
+            decoration: BoxDecoration(
+              color: color.withAlpha(180),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+        );
+      }).toList(),
     );
   }
 
@@ -452,38 +645,118 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
 
   // Step 3: Complete
   Widget _buildCompleteStep() {
-    return _buildStepPage(
-      icon: Icons.check_circle,
-      iconColor: AppColors.success,
-      title: 'Calibration Complete',
-      body: Column(
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(24, 32, 24, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const SizedBox(height: 16),
-          Container(
-            width: 100,
-            height: 100,
-            decoration: BoxDecoration(
-              color: AppColors.success.withAlpha(25),
-              shape: BoxShape.circle,
-            ),
-            child: const Icon(
-              Icons.check,
-              color: AppColors.success,
-              size: 60,
+          // Large green checkmark
+          Center(
+            child: Container(
+              width: 112,
+              height: 112,
+              decoration: BoxDecoration(
+                color: AppColors.success.withAlpha(30),
+                shape: BoxShape.circle,
+                border: Border.all(color: AppColors.success.withAlpha(100), width: 2),
+                boxShadow: [
+                  BoxShadow(
+                    color: AppColors.success.withAlpha(50),
+                    blurRadius: 20,
+                    spreadRadius: 2,
+                  ),
+                ],
+              ),
+              child: const Icon(
+                Icons.check_circle_rounded,
+                color: AppColors.success,
+                size: 72,
+              ),
             ),
           ),
           const SizedBox(height: 24),
+
+          // Heading
           const Text(
-            'Device ready for monitoring.',
-            style: AppTextStyles.h3,
+            'Calibration Complete!',
+            style: AppTextStyles.h2,
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: 12),
-          Text(
-            'The vibration sensor has been calibrated to the site\'s '
-            'ambient conditions. Alerts will now be tuned to local noise.',
-            style: AppTextStyles.subtitle,
-            textAlign: TextAlign.center,
+
+          // Noise floor recorded
+          _metricRow(
+            icon: Icons.waves,
+            label: 'Recorded noise floor',
+            value: '${_noiseFloor.toStringAsFixed(3)} mm/s',
+            color: AppColors.success,
+          ),
+          const SizedBox(height: 20),
+
+          // Subtitle
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: AppDecorations.card,
+            child: const Text(
+              'Your device is now optimised for the current environment. '
+              'Alert thresholds have been tuned to local ambient conditions.',
+              style: AppTextStyles.subtitle,
+              textAlign: TextAlign.center,
+            ),
+          ),
+          const SizedBox(height: 28),
+
+          // Primary action: Start Monitoring
+          SizedBox(
+            height: AppSizes.buttonHeight,
+            child: ElevatedButton.icon(
+              onPressed: () {
+                // Pop back to the safety view (root of the navigator stack)
+                Navigator.of(context).popUntil((route) => route.isFirst);
+              },
+              icon: const Icon(Icons.monitor_heart, size: 20, color: AppColors.primaryDark),
+              label: Text(
+                'Start Monitoring',
+                style: AppTextStyles.button.copyWith(color: AppColors.primaryDark),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.success,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppSizes.borderRadius),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          // Secondary action: Calibrate Again
+          SizedBox(
+            height: AppSizes.buttonHeight,
+            child: OutlinedButton.icon(
+              onPressed: () {
+                setState(() {
+                  _currentStep = 0;
+                  _noiseFloor = 0.0;
+                  _computedThreshold = 0.0;
+                  _captureStarted = false;
+                  _secondsRemaining = _baselineDurationSeconds;
+                  _noiseLevel = 0.0;
+                });
+              },
+              icon: const Icon(Icons.refresh, size: 18, color: AppColors.accent),
+              label: Text(
+                'Calibrate Again',
+                style: AppTextStyles.button.copyWith(color: AppColors.accent),
+              ),
+              style: OutlinedButton.styleFrom(
+                side: const BorderSide(color: AppColors.accent, width: 1.5),
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppSizes.borderRadius),
+                ),
+              ),
+            ),
           ),
         ],
       ),
@@ -495,61 +768,53 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
   // ------------------------------------------------------------------
 
   Widget _buildNavigationButtons() {
-    final isLastStep = _currentStep == _totalSteps - 1;
+    final isCompleteStep = _currentStep == _totalSteps - 1;
     final isBaselineCapturing = _currentStep == 1 && _captureStarted && _secondsRemaining > 0;
+
+    // Complete step has its own action buttons embedded in the page content
+    if (isCompleteStep) return const SizedBox.shrink();
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
       child: Row(
         children: [
-          if (!isLastStep)
-            OutlinedButton(
-              onPressed: _goBack,
-              style: OutlinedButton.styleFrom(
-                side: const BorderSide(color: AppColors.cardBorder),
-                foregroundColor: AppColors.textSecondary,
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+          OutlinedButton(
+            onPressed: _goBack,
+            style: OutlinedButton.styleFrom(
+              side: const BorderSide(color: AppColors.cardBorder),
+              foregroundColor: AppColors.textSecondary,
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+            ),
+            child: Text(
+              _currentStep == 0 ? 'Cancel' : 'Back',
+              style: AppTextStyles.button.copyWith(color: AppColors.textSecondary),
+            ),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: ElevatedButton(
+              onPressed: isBaselineCapturing ? null : _goNext,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.accent,
+                disabledBackgroundColor: AppColors.cardBorder,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppSizes.borderRadius),
+                ),
               ),
               child: Text(
-                _currentStep == 0 ? 'Cancel' : 'Back',
-                style: AppTextStyles.button.copyWith(color: AppColors.textSecondary),
+                _currentStep == 0
+                    ? 'Start Capture'
+                    : isBaselineCapturing
+                        ? 'Capturing...'
+                        : 'Next',
+                style: AppTextStyles.button.copyWith(
+                  color: isBaselineCapturing
+                      ? AppColors.textSecondary
+                      : AppColors.primaryDark,
+                ),
               ),
             ),
-          if (!isLastStep) const SizedBox(width: 16),
-          Expanded(
-            child: isLastStep
-                ? ElevatedButton.icon(
-                    onPressed: () => Navigator.of(context).pop(true),
-                    icon: const Icon(Icons.check, size: 18, color: AppColors.primaryDark),
-                    label: Text(
-                      'Done',
-                      style: AppTextStyles.button.copyWith(color: AppColors.primaryDark),
-                    ),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.success,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                    ),
-                  )
-                : ElevatedButton(
-                    onPressed: isBaselineCapturing ? null : _goNext,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.accent,
-                      disabledBackgroundColor: AppColors.cardBorder,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                    ),
-                    child: Text(
-                      _currentStep == 0
-                          ? 'Start Capture'
-                          : isBaselineCapturing
-                              ? 'Capturing...'
-                              : 'Next',
-                      style: AppTextStyles.button.copyWith(
-                        color: isBaselineCapturing
-                            ? AppColors.textSecondary
-                            : AppColors.primaryDark,
-                      ),
-                    ),
-                  ),
           ),
         ],
       ),
@@ -557,7 +822,7 @@ class _CalibrationWizardScreenState extends State<CalibrationWizardScreen>
   }
 
   // ------------------------------------------------------------------
-  // Shared page scaffold
+  // Shared page scaffold (used by steps 0, 1, 2 only)
   // ------------------------------------------------------------------
 
   Widget _buildStepPage({
