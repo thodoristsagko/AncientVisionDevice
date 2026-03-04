@@ -1998,3 +1998,229 @@ class TestPpvTrendAnalysis:
             capture_output=True, text=True
         )
         assert result.returncode == 0
+
+
+# ===========================================================================
+# training_history tests
+# ===========================================================================
+
+def _write_metrics_json(path: Path, data: dict) -> None:
+    """Write a metrics JSON file."""
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _make_metrics(
+    accuracy: float = 0.90,
+    loss: float = 0.25,
+    training_time_s: float = 120.5,
+    epochs_run: int = 50,
+    git_sha: str = "abc1234",
+    trained_at: str = "2026-03-01T10:00:00+00:00",
+) -> dict:
+    return {
+        "trained_at": trained_at,
+        "accuracy": accuracy,
+        "loss": loss,
+        "training_time_s": training_time_s,
+        "epochs_run": epochs_run,
+        "git_sha": git_sha,
+    }
+
+
+class TestTrainingHistory:
+    """Tests for scripts/training_history.py"""
+
+    def _run(self, args: list) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "training_history.py")] + args,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_no_model_dir(self, tmp_path):
+        """Empty directory exits 0 and prints 'No training runs found'."""
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "No training runs found" in result.stdout
+
+    def test_single_run_shows_row(self, tmp_path):
+        """Single metrics file produces one data row and a summary line."""
+        _write_metrics_json(
+            tmp_path / "precursor_training_metrics.json",
+            _make_metrics(accuracy=0.91, trained_at="2026-03-01T10:00:00+00:00"),
+        )
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        # Row 1 must appear, change column should show — (first run)
+        assert "0.9100" in result.stdout
+        assert "—" in result.stdout
+        # Summary line
+        assert "Best accuracy" in result.stdout
+        assert "Latest" in result.stdout
+
+    def test_multiple_runs_show_trend_arrows(self, tmp_path):
+        """Two runs — second with higher accuracy — shows improvement arrow."""
+        import time
+
+        m1 = tmp_path / "precursor_training_metrics.json"
+        _write_metrics_json(m1, _make_metrics(accuracy=0.88, trained_at="2026-03-01T09:00:00+00:00"))
+        # Ensure second file has a later mtime
+        time.sleep(0.05)
+
+        archive = tmp_path / "archive" / "run2"
+        archive.mkdir(parents=True)
+        _write_metrics_json(
+            archive / "precursor_training_metrics.json",
+            _make_metrics(accuracy=0.93, trained_at="2026-03-02T10:00:00+00:00"),
+        )
+
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        # Improvement arrow for the second run
+        assert "▲" in result.stdout
+        assert "+5.0%" in result.stdout or "▲" in result.stdout
+
+    def test_regression_shows_down_arrow(self, tmp_path):
+        """Second run with lower accuracy shows regression arrow."""
+        import time
+
+        m1 = tmp_path / "precursor_training_metrics.json"
+        _write_metrics_json(m1, _make_metrics(accuracy=0.95, trained_at="2026-03-01T09:00:00+00:00"))
+        time.sleep(0.05)
+
+        archive = tmp_path / "archive" / "run2"
+        archive.mkdir(parents=True)
+        _write_metrics_json(
+            archive / "precursor_training_metrics.json",
+            _make_metrics(accuracy=0.88, trained_at="2026-03-02T10:00:00+00:00"),
+        )
+
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "▼" in result.stdout
+
+    def test_limit_flag_restricts_output(self, tmp_path):
+        """--limit 1 shows only the last run."""
+        import time
+
+        for i, ts in enumerate(["2026-03-01T08:00:00+00:00", "2026-03-02T09:00:00+00:00"]):
+            d = tmp_path / "archive" / f"run{i}"
+            d.mkdir(parents=True)
+            _write_metrics_json(
+                d / "precursor_training_metrics.json",
+                _make_metrics(accuracy=0.80 + i * 0.05, trained_at=ts),
+            )
+            time.sleep(0.05)
+
+        result = self._run(["--model-dir", str(tmp_path), "--limit", "1"])
+        assert result.returncode == 0
+        # Only one row of actual data (row #1 in the limited view)
+        lines = [l for l in result.stdout.splitlines() if l.strip().startswith("1 ") or l.strip().startswith("1\t")]
+        # Simpler: output should contain exactly one data row line
+        # Count lines that start with a digit (data rows)
+        data_lines = [l for l in result.stdout.splitlines()
+                      if l and l[0].isdigit()]
+        assert len(data_lines) == 1
+
+    def test_summary_shows_best_and_latest(self, tmp_path):
+        """Summary line correctly identifies best and latest runs."""
+        import time
+
+        m1 = tmp_path / "precursor_training_metrics.json"
+        _write_metrics_json(m1, _make_metrics(accuracy=0.90, trained_at="2026-03-01T09:00:00+00:00"))
+        time.sleep(0.05)
+
+        archive = tmp_path / "archive" / "run2"
+        archive.mkdir(parents=True)
+        _write_metrics_json(
+            archive / "precursor_training_metrics.json",
+            _make_metrics(accuracy=0.85, trained_at="2026-03-02T10:00:00+00:00"),
+        )
+
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        # Best is run 1 (0.90), latest is run 2 (0.85)
+        assert "Best accuracy: 0.900" in result.stdout
+        assert "Latest: 0.850" in result.stdout
+
+    def test_alternate_accuracy_key_cv_accuracy_mean(self, tmp_path):
+        """Metrics with cv_accuracy_mean field are parsed correctly."""
+        data = {
+            "trained_at": "2026-03-01T10:00:00+00:00",
+            "cv_accuracy_mean": 0.87,
+            "total_samples": 1000,
+        }
+        _write_metrics_json(tmp_path / "precursor_training_metrics.json", data)
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "0.8700" in result.stdout
+
+    def test_extra_metrics_files_included(self, tmp_path):
+        """Any *_metrics.json files in model dir are also shown."""
+        _write_metrics_json(
+            tmp_path / "vibration_training_metrics.json",
+            _make_metrics(accuracy=0.77, trained_at="2026-03-03T08:00:00+00:00"),
+        )
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "0.7700" in result.stdout
+
+
+# ===========================================================================
+# feature_importance_report tests
+# ===========================================================================
+
+class TestFeatureImportanceReport:
+    """Tests for scripts/feature_importance_report.py"""
+
+    def _run(self, args: list) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "feature_importance_report.py")] + args,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_no_model_files(self, tmp_path):
+        """Empty directory: exits 0 and prints 'Model files not found'."""
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "Model files not found" in result.stdout
+
+    def test_missing_tflite_only(self, tmp_path):
+        """Config present but .tflite missing: exits 0 gracefully."""
+        config = {
+            "feature_names": ["rms", "ppv"],
+            "class_names": ["normal", "soil_creep"],
+            "input_dim": 2,
+            "output_dim": 2,
+        }
+        (tmp_path / "precursor_classifier_config.json").write_text(
+            json.dumps(config), encoding="utf-8"
+        )
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "Model files not found" in result.stdout
+
+    def test_with_real_model(self):
+        """
+        If the real model exists in app/assets/ml, run permutation importance
+        and verify the output contains expected sections. Skip if model absent.
+        """
+        real_assets = Path(_SCRIPTS_DIR).parent / "app" / "assets" / "ml"
+        tflite = real_assets / "precursor_classifier.tflite"
+        config = real_assets / "precursor_classifier_config.json"
+        if not tflite.exists() or not config.exists():
+            pytest.skip("precursor_classifier.tflite not found — skipping live test")
+
+        result = self._run(["--model-dir", str(real_assets), "--n-samples", "40"])
+        assert result.returncode == 0
+        assert "Baseline accuracy" in result.stdout
+        assert "Top 5 most important" in result.stdout
+        assert "Bottom 3 least important" in result.stdout
+        # At least one bar-chart row
+        assert "\u2588" in result.stdout or "0.0" in result.stdout
+
+    def test_help_flag(self):
+        """--help exits 0."""
+        result = self._run(["--help"])
+        assert result.returncode == 0

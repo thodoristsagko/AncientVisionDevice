@@ -16,7 +16,9 @@
         plot-session reset pipeline run-pipeline send-alert simulate-anomaly \
         threshold-optimize train-autoencoder training-smoke visualize-features visualize-latent \
         field-report calibrate drift-check retrain-advisor \
-        session-risk ppv-trend
+        session-risk ppv-trend \
+        noise-floor event-duration \
+        training-history feature-importance-report
 
 # ---------------------------------------------------------------------------
 # Help
@@ -783,3 +785,15 @@ session-risk: ## Generate per-session risk assessment report
 
 ppv-trend: ## Analyze PPV trend acceleration in field data
 	python scripts/ppv_trend_analysis.py
+
+noise-floor: ## Analyze sensor noise floor for each device
+	python scripts/sensor_noise_floor.py
+
+event-duration: ## Analyze alert event durations and shapes
+	python scripts/event_duration_analysis.py
+
+training-history: ## Show ML training run history and accuracy trends
+	python scripts/training_history.py
+
+feature-importance-report: ## Analyze feature importance using permutation method
+	python scripts/feature_importance_report.py
