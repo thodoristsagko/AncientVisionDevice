@@ -6,7 +6,7 @@
 .PHONY: help build firmware flutter ml collect train monitor dev-ml dev-flutter dev-firmware \
         test simulate backup logs clean report drift validate-config quality-check \
         label replay schedule playback sync annotate analyze apk quantize benchmark load-test \
-        validate-data e2e
+        validate-data e2e status health augment online-learn tune onnx
 
 # ---------------------------------------------------------------------------
 # Help
@@ -52,6 +52,13 @@ help:
 	@echo "  load-test      Run API load test (500 requests, p95 latency)"
 	@echo "  validate-data  Validate field training data integrity"
 	@echo "  e2e            Run end-to-end pipeline integration tests"
+	@echo ""
+	@echo "  status         Show system-wide pipeline and model status"
+	@echo "  health         Ping all services and show status table"
+	@echo "  augment        Augment training data with Gaussian noise"
+	@echo "  online-learn   Fine-tune models with recent field data"
+	@echo "  tune           Auto-tune classification thresholds from calibration data"
+	@echo "  onnx           Export TFLite models to ONNX format"
 	@echo ""
 
 # ---------------------------------------------------------------------------
@@ -212,6 +219,46 @@ sync:
 		echo "Usage: make sync BUCKET=my-firebase-bucket"; exit 1; \
 	fi
 	python scripts/sync_to_firebase.py --data-dir ./data/field --bucket $(BUCKET)
+
+status:
+	@echo "==> AncientVision system status report..."
+	python scripts/pipeline_status.py --data-dir ./data/field --assets-dir app/assets/ml
+
+augment:
+	@echo "==> Augmenting training data with Gaussian noise..."
+	@if [ -f scripts/augment_training_data.py ]; then \
+		python scripts/augment_training_data.py --data-dir ./data/field; \
+	else \
+		echo "WARNING: scripts/augment_training_data.py not found"; \
+	fi
+
+health:
+	@echo "==> Running service health check..."
+	python scripts/health_check.py --timeout 5
+
+online-learn:
+	@echo "==> Running online fine-tuning on field data..."
+	@if [ -f scripts/online_learning.py ]; then \
+		python scripts/online_learning.py --data-dir ./data/field; \
+	else \
+		echo "WARNING: scripts/online_learning.py not found"; \
+	fi
+
+tune:
+	@echo "==> Auto-tuning classification thresholds..."
+	@if [ -f scripts/tune_thresholds.py ]; then \
+		python scripts/tune_thresholds.py --data-dir ./data/field; \
+	else \
+		echo "WARNING: scripts/tune_thresholds.py not found"; \
+	fi
+
+onnx:
+	@echo "==> Exporting models to ONNX format..."
+	@if [ -f scripts/onnx_export.py ]; then \
+		python scripts/onnx_export.py --assets-dir app/assets/ml; \
+	else \
+		echo "WARNING: scripts/onnx_export.py not found"; \
+	fi
 
 # ---------------------------------------------------------------------------
 # Clean
