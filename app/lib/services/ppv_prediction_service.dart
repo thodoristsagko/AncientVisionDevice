@@ -1,5 +1,41 @@
 import 'dart:math';
 
+/// Simple Kalman filter compatible with PPVPredictionService.
+///
+/// Alias-friendly wrapper around [KalmanPPVFilter] with constructor
+/// parameters that match the service API.
+class KalmanFilter {
+  double _estimate;
+  double _errorEstimate;
+  final double _q;
+  final double _r;
+
+  KalmanFilter({
+    double initialEstimate = 0.0,
+    double initialError = 1.0,
+    double processNoise = 0.01,
+    double measurementNoise = 0.1,
+  })  : _estimate = initialEstimate,
+        _errorEstimate = initialError,
+        _q = processNoise,
+        _r = measurementNoise;
+
+  double update(double measurement) {
+    final errorPrediction = _errorEstimate + _q;
+    final kalmanGain = errorPrediction / (errorPrediction + _r);
+    _estimate = _estimate + kalmanGain * (measurement - _estimate);
+    _errorEstimate = (1 - kalmanGain) * errorPrediction;
+    return _estimate;
+  }
+
+  double get estimate => _estimate;
+
+  void reset() {
+    _estimate = 0.0;
+    _errorEstimate = 1.0;
+  }
+}
+
 /// Adaptive Kalman filter for optimal PPV smoothing.
 ///
 /// Replaces the static EMA (alpha=0.3) with a proper Kalman filter
@@ -192,5 +228,84 @@ class PPVTrendPredictor {
       targetLimit: limitMmPerSec,
       minutesToLimit: minutesToLimit,
     );
+  }
+}
+
+/// Service for real-time PPV prediction, Kalman smoothing, and trend analysis.
+///
+/// Singleton that accumulates PPV samples, maintains a Kalman-filtered
+/// parallel history, and exposes exceedance / slope metrics used by the
+/// safety UI and BLE processing pipeline.
+class PPVPredictionService {
+  static final PPVPredictionService instance = PPVPredictionService._();
+  PPVPredictionService._();
+
+  static const int _maxHistory = 60;
+
+  final List<double> _ppvHistory = [];
+  final List<double> _kalmanHistory = [];
+  final KalmanFilter _kalman = KalmanFilter(
+    processNoise: 0.005,
+    measurementNoise: 0.05,
+  );
+  final PPVTrendPredictor _predictor = PPVTrendPredictor();
+
+  /// Unmodifiable view of raw PPV samples (newest last).
+  List<double> get rawHistory => List.unmodifiable(_ppvHistory);
+
+  /// Unmodifiable view of Kalman-filtered PPV samples (newest last).
+  List<double> get kalmanHistory => List.unmodifiable(_kalmanHistory);
+
+  /// Add a new raw PPV measurement (mm/s).
+  ///
+  /// Also pushes through the Kalman filter and maintains the rolling window.
+  void addSample(double ppv) {
+    final filtered = _kalman.update(ppv);
+    _ppvHistory.add(ppv);
+    _kalmanHistory.add(filtered);
+    if (_ppvHistory.length > _maxHistory) {
+      _ppvHistory.removeAt(0);
+      _kalmanHistory.removeAt(0);
+    }
+  }
+
+  /// Current trend prediction based on Kalman-filtered history.
+  ///
+  /// Returns null when fewer than 5 samples have been collected.
+  PPVPrediction? get prediction {
+    if (_kalmanHistory.length < 5) return null;
+    return _predictor.predict(_kalmanHistory);
+  }
+
+  /// Predicted number of samples until PPV exceeds [threshold] mm/s.
+  ///
+  /// Returns 0 if already exceeded, null if the trend is flat or falling,
+  /// and a positive integer otherwise (capped at 600).
+  int? samplesUntilExceedance(double threshold) {
+    if (_ppvHistory.isEmpty) return null;
+    if (_ppvHistory.last >= threshold) return 0;
+    final p = prediction;
+    if (p == null || !p.isTrendingUp || p.slope <= 0) return null;
+    // Using the Kalman-filtered series as the basis for the fitted line:
+    // current value approximated by the last Kalman estimate.
+    final currentFiltered = _kalmanHistory.last;
+    if (currentFiltered >= threshold) return 0;
+    final steps = (threshold - currentFiltered) / p.slope;
+    return steps.round().clamp(0, 600);
+  }
+
+  /// Number of raw PPV samples in history that are >= [threshold] mm/s.
+  int exceedanceCount(double threshold) =>
+      _ppvHistory.where((v) => v >= threshold).length;
+
+  /// Maximum raw PPV value observed in the current rolling window.
+  double get peakPpv =>
+      _ppvHistory.isEmpty ? 0.0 : _ppvHistory.reduce(max);
+
+  /// Clear all history and reset the Kalman filter.
+  void reset() {
+    _ppvHistory.clear();
+    _kalmanHistory.clear();
+    _kalman.reset();
   }
 }
