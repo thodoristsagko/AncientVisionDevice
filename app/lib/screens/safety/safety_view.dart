@@ -41,6 +41,8 @@ import '../../services/session_history_service.dart';
 import '../../services/critical_event_log_service.dart';
 import '../../services/session_sync_service.dart';
 import '../../widgets/battery_indicator.dart';
+import '../../utils/ble_reconnect_manager.dart';
+import '../../widgets/ble_reconnect_banner.dart';
 
 const String _bleSensorServiceUUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 
@@ -192,6 +194,9 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
   static const int _maxReconnectAttempts = 10;
   Timer? _reconnectTimer;
   Timer? _keepAliveTimer;
+  // P67/P68: BleReconnectManager — exponential backoff with live countdown UI
+  final _reconnectManager = BleReconnectManager();
+  bool _isReconnecting = false;
   DateTime? _lastDataReceived;
   DateTime? _keepAliveStartTime;
   String? _lastNotifiedAlertLevel; // Prevent duplicate notifications
@@ -252,6 +257,8 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
 
   // P7: Last connected device hint (from DeviceMemoryService)
   String? _lastDeviceHint;
+  // P68: Last connected device ID for auto-select in scan
+  String? _lastDeviceId;
 
   // BLE characteristic references for bidirectional communication
   BluetoothCharacteristic? _alertCharacteristic;
@@ -272,6 +279,10 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
       if (mounted && name != null) {
         setState(() => _lastDeviceHint = name);
       }
+    });
+    // P68: Load last device ID for auto-select during BLE scan
+    DeviceMemoryService.instance.getLastDeviceId().then((id) {
+      if (mounted) _lastDeviceId = id;
     });
     // Throttled UI refresh: max 2 repaints/sec to prevent flickering
     _uiRefreshTimer = Timer.periodic(const Duration(milliseconds: 1000), (_) {
@@ -436,11 +447,17 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
           if (lockedMac.isNotEmpty) {
             matched = r.device.remoteId.str.toLowerCase() == lockedMac.toLowerCase();
           } else {
-            matched = nameLower.contains('ancientvision') ||
-                nameLower.contains('ancient') ||
-                nameLower.contains('m5stick') ||
-                nameLower.contains('m5-') ||
-                nameLower.startsWith('m5');
+            // P68: Prefer the remembered device by ID, then fall back to name filter
+            final deviceId = r.device.remoteId.str;
+            if (_lastDeviceId != null && deviceId == _lastDeviceId) {
+              matched = true;
+              debugPrint('>>> AUTO-SELECTED remembered device: $name ($deviceId)');
+            } else {
+              matched = _isAncientVisionDevice(r) ||
+                  nameLower.contains('m5stick') ||
+                  nameLower.contains('m5-') ||
+                  nameLower.startsWith('m5');
+            }
           }
 
           if (matched) {
@@ -486,6 +503,18 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
     }
   }
 
+  /// P68: Returns true if the scan result matches an AncientVision sensor.
+  ///
+  /// Checks both platformName (cached OS name) and advName (live advertisement)
+  /// because Android often provides an empty platformName during active scans.
+  bool _isAncientVisionDevice(ScanResult result) {
+    final name = result.device.platformName.isNotEmpty
+        ? result.device.platformName
+        : result.advertisementData.advName;
+    final nameLower = name.toLowerCase();
+    return nameLower.contains('ancientvision') || nameLower.contains('ancient');
+  }
+
   Future<void> _connectToDevice(BluetoothDevice device) async {
     if (_isConnecting || _connectedDevice != null) {
       debugPrint('>>> _connectToDevice SKIPPED: isConnecting=$_isConnecting connectedDevice=$_connectedDevice');
@@ -512,8 +541,14 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
         _isScanning = false;
         _connectionStatus = 'Connected';
         _reconnectAttempts = 0;
+        _isReconnecting = false;
       });
       WakelockPlus.enable();
+
+      // P67/P68: Stop reconnect manager and reset ML baselines on reconnect
+      _reconnectManager.reset();
+      _anomalyService.resetBaseline();   // P67: clear adaptive calibration baseline
+      _anomalyService.attemptMlRetry();  // P68: re-enable ML inference if previously failed
 
       // P7: Save connected device to memory for auto-reconnect hint
       final deviceId = device.remoteId.str;
@@ -633,7 +668,28 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
     // Cancel keepalive
     _keepAliveTimer?.cancel();
 
-    // Schedule reconnect with exponential backoff
+    // P67/P68: Start BleReconnectManager for structured backoff + live countdown UI
+    if (mounted) setState(() => _isReconnecting = true);
+    _reconnectManager.onCountdownTick = () {
+      if (mounted) setState(() {}); // refresh countdown display
+    };
+    _reconnectManager.startReconnect(
+      onAttempt: () {
+        if (mounted && _connectedDevice == null) {
+          _checkBluetoothAndScan();
+        }
+      },
+      onGiveUp: () {
+        if (mounted) {
+          setState(() {
+            _isReconnecting = false;
+            _connectionStatus = 'Connection lost - tap Scan';
+          });
+        }
+      },
+    );
+
+    // Also use legacy backoff counter for _connectionStatus text fallback
     _scheduleReconnect();
   }
 
@@ -1925,6 +1981,38 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
 
     return Stack(
       children: [
+        // P67/P68: BLE reconnect banner — shown at top when disconnected
+        if (_isReconnecting)
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: BleReconnectBanner(
+              attemptNumber: _reconnectManager.currentAttempt,
+              maxAttempts: BleReconnectManager.maxAttempts,
+              secondsUntilRetry: _reconnectManager.secondsUntilRetry,
+              onRetryNow: () => _reconnectManager.retryNow(
+                onAttempt: () {
+                  if (mounted && _connectedDevice == null) {
+                    _checkBluetoothAndScan();
+                  }
+                },
+                onGiveUp: () {
+                  if (mounted) {
+                    setState(() {
+                      _isReconnecting = false;
+                      _connectionStatus = 'Connection lost - tap Scan';
+                    });
+                  }
+                },
+              ),
+              onCancel: () {
+                _reconnectManager.cancel();
+                if (mounted) setState(() => _isReconnecting = false);
+              },
+            ),
+          ),
+
         // P192: Offline banner — shown at top when no network
         ListenableBuilder(
           listenable: NetworkStatusService.instance,
