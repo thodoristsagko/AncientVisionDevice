@@ -26,19 +26,38 @@ class VibrationAnalysisCard extends StatelessWidget {
 
   String _getFreqBandLabel() {
     if (dominantFreq <= 0) return '--';
-    if (dominantFreq <= 1.0) return 'Sub-Hz (wind/ambient)';
-    if (dominantFreq <= 5.0) return '1-5 Hz (footsteps/sway)';
-    if (dominantFreq <= 10.0) return '1-10 Hz (seismic band)';
-    if (dominantFreq <= 50.0) return '10-50 Hz (machinery)';
-    return '50-100 Hz (structural)';
+    if (dominantFreq <= 5.0) return '${dominantFreq.toStringAsFixed(1)} Hz — Low frequency (structural/wind)';
+    if (dominantFreq <= 30.0) return '${dominantFreq.toStringAsFixed(1)} Hz — Mid frequency (soil movement)';
+    if (dominantFreq <= 100.0) return '${dominantFreq.toStringAsFixed(1)} Hz — High frequency (impact/machinery)';
+    return '${dominantFreq.toStringAsFixed(1)} Hz — Very high (close impact)';
   }
 
   Color _getFreqBandColor() {
     if (dominantFreq <= 0) return Colors.grey;
     if (dominantFreq <= 5.0) return const Color(0xFF4CAF50);
-    if (dominantFreq <= 10.0) return const Color(0xFFFF5722);
-    if (dominantFreq <= 50.0) return const Color(0xFFFF9800);
-    return const Color(0xFFFFC107);
+    if (dominantFreq <= 30.0) return const Color(0xFFFF9800);
+    if (dominantFreq <= 100.0) return const Color(0xFFFF5722);
+    return const Color(0xFFE53935);
+  }
+
+  /// Interprets the STA/LTA ratio for display.
+  String _getStaLtaLabel() {
+    if (staLtaRatio < 1.5) return 'Background noise';
+    if (staLtaRatio < 3.0) return 'Possible event';
+    return 'Seismic event detected';
+  }
+
+  Color _getStaLtaColor() {
+    if (staLtaRatio < 1.5) return const Color(0xFF4CAF50);
+    if (staLtaRatio < 3.0) return const Color(0xFFFFC107);
+    return const Color(0xFFE53935);
+  }
+
+  /// Color-codes the crest factor: red >5.0 (impulsive), amber 3-5, green <3.
+  Color _getCrestColor() {
+    if (crestFactor > 5.0) return const Color(0xFFE53935);
+    if (crestFactor > 3.0) return const Color(0xFFFF9800);
+    return const Color(0xFF4CAF50);
   }
 
   @override
@@ -103,7 +122,8 @@ class VibrationAnalysisCard extends StatelessWidget {
                   children: [
                     _buildMetricTile('RMS', '${rms.toStringAsFixed(4)}g', Icons.show_chart),
                     const SizedBox(width: 10),
-                    _buildMetricTile('Crest', crestFactor.toStringAsFixed(1), Icons.bolt),
+                    _buildMetricTile('Crest', crestFactor.toStringAsFixed(1), Icons.bolt,
+                      valueColor: _getCrestColor()),
                     const SizedBox(width: 10),
                     _buildMetricTile('Freq', '${dominantFreq.toStringAsFixed(0)}Hz', Icons.graphic_eq),
                   ],
@@ -117,7 +137,7 @@ class VibrationAnalysisCard extends StatelessWidget {
                       valueColor: kurtosis > 6 ? const Color(0xFFFF5722) : kurtosis > 3 ? const Color(0xFFFF9800) : null),
                     const SizedBox(width: 10),
                     _buildMetricTile('STA/LTA', staLtaRatio.toStringAsFixed(1), Icons.sensors,
-                      valueColor: staLtaRatio > 4.0 ? const Color(0xFFFF5722) : staLtaRatio > 2.0 ? const Color(0xFFFF9800) : null),
+                      valueColor: _getStaLtaColor()),
                     const SizedBox(width: 10),
                     _buildMetricTile('Cent', '${centroid.toStringAsFixed(0)}Hz', Icons.center_focus_strong),
                   ],
@@ -191,13 +211,42 @@ class VibrationAnalysisCard extends StatelessWidget {
                     children: [
                       Icon(Icons.waves, color: _getFreqBandColor(), size: 16),
                       const SizedBox(width: 8),
-                      Text(
-                        _getFreqBandLabel(),
-                        style: TextStyle(color: _getFreqBandColor(), fontSize: 12, fontWeight: FontWeight.w500),
+                      Expanded(
+                        child: Text(
+                          _getFreqBandLabel(),
+                          style: TextStyle(color: _getFreqBandColor(), fontSize: 12, fontWeight: FontWeight.w500),
+                        ),
                       ),
                     ],
                   ),
                 ),
+                const SizedBox(height: 6),
+
+                // STA/LTA interpretation row
+                if (staLtaRatio > 0)
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                    decoration: BoxDecoration(
+                      color: _getStaLtaColor().withAlpha(20),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: _getStaLtaColor().withAlpha(55), width: 1),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.sensors, color: _getStaLtaColor(), size: 15),
+                        const SizedBox(width: 8),
+                        Text(
+                          'STA/LTA ${staLtaRatio.toStringAsFixed(2)} — ',
+                          style: TextStyle(color: Colors.white.withAlpha(170), fontSize: 11),
+                        ),
+                        Text(
+                          _getStaLtaLabel(),
+                          style: TextStyle(color: _getStaLtaColor(), fontSize: 11, fontWeight: FontWeight.w600),
+                        ),
+                      ],
+                    ),
+                  ),
 
                 // Damage assessment
                 if (damageAssessment.isNotEmpty) ...[

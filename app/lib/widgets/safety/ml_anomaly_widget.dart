@@ -2,6 +2,7 @@ import 'dart:ui' as ui;
 import 'dart:math';
 import 'package:flutter/material.dart';
 import '../../services/vibration_anomaly_service.dart';
+import '../../services/inference_timing_service.dart';
 
 // ===================== ML ANOMALY INDICATOR =====================
 class MLAnomalyIndicator extends StatelessWidget {
@@ -9,6 +10,8 @@ class MLAnomalyIndicator extends StatelessWidget {
   final Map<String, double> features;
   final List<double> anomalyHistory;
   final String modelVersion;
+  /// True when the service is running rule-based fallback (ML inactive).
+  final bool isRuleBased;
 
   const MLAnomalyIndicator({
     super.key,
@@ -16,6 +19,7 @@ class MLAnomalyIndicator extends StatelessWidget {
     this.features = const {},
     this.anomalyHistory = const [],
     this.modelVersion = '4.0',
+    this.isRuleBased = false,
   });
 
   Color _getColor() {
@@ -69,6 +73,27 @@ class MLAnomalyIndicator extends StatelessWidget {
     'arias': 'Arias', 'cav': 'CAV', 'temp': 'Temp',
   };
 
+  /// Human-readable description for each precursor pattern class.
+  static const _precursorDescriptions = {
+    'soil_creep': 'Gradual soil movement detected',
+    'crack_propagation': 'Subsurface fracturing pattern',
+    'imminent_failure': 'Imminent structural failure risk',
+  };
+
+  /// Icon to accompany each precursor pattern.
+  static const _precursorIcons = {
+    'soil_creep': Icons.terrain,
+    'crack_propagation': Icons.electric_bolt,
+    'imminent_failure': Icons.warning_amber_rounded,
+  };
+
+  /// Returns the rolling average inference time from [InferenceTimingService].
+  String _inferenceLabel() {
+    final avg = InferenceTimingService.instance.rollingAvgMs;
+    if (avg <= 0) return '--';
+    return '${avg.toStringAsFixed(1)} ms avg';
+  }
+
   @override
   Widget build(BuildContext context) {
     final color = _getColor();
@@ -90,6 +115,25 @@ class MLAnomalyIndicator extends StatelessWidget {
                   Icon(_getIcon(), color: color, size: 18),
                   const SizedBox(width: 8),
                   Text('Anomaly Detection', style: TextStyle(color: Colors.white.withAlpha(200), fontSize: 12, fontWeight: FontWeight.w600)),
+                  const SizedBox(width: 6),
+                  // ML health indicator dot
+                  Tooltip(
+                    message: isRuleBased ? 'Rule-based fallback active' : 'ML inference active',
+                    child: Container(
+                      width: 7,
+                      height: 7,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: isRuleBased ? const Color(0xFFFFC107) : const Color(0xFF4CAF50),
+                        boxShadow: [
+                          BoxShadow(
+                            color: (isRuleBased ? const Color(0xFFFFC107) : const Color(0xFF4CAF50)).withAlpha(120),
+                            blurRadius: 4,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                   const Spacer(),
                   Text(modelVersion, style: TextStyle(color: modelVersion.contains('Rule') ? const Color(0xFFFFC107) : const Color(0xFFCE93D8), fontSize: 9, fontWeight: FontWeight.w600)),
                   const SizedBox(width: 6),
@@ -123,6 +167,61 @@ class MLAnomalyIndicator extends StatelessWidget {
                 ],
               ),
 
+              // Confidence display (top-class confidence = anomaly score mapped to 0-100%)
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  Text('Confidence: ', style: TextStyle(color: Colors.white.withAlpha(140), fontSize: 11)),
+                  Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: SizedBox(
+                        height: 5,
+                        child: Stack(
+                          children: [
+                            Container(color: Colors.white.withAlpha(15)),
+                            FractionallySizedBox(
+                              widthFactor: result.score.clamp(0.0, 1.0),
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(colors: [color.withAlpha(160), color]),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '${(result.score * 100).toStringAsFixed(0)}%',
+                    style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w700),
+                  ),
+                ],
+              ),
+
+              // Inference time + precursor confidence row
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  Icon(Icons.timer_outlined, color: Colors.white.withAlpha(100), size: 11),
+                  const SizedBox(width: 4),
+                  Text(
+                    'Inference: ${_inferenceLabel()}',
+                    style: TextStyle(color: Colors.white.withAlpha(120), fontSize: 10),
+                  ),
+                  if (result.precursorPattern != null && result.precursorConfidence > 0) ...[
+                    const Spacer(),
+                    Text(
+                      'Pattern conf: ${(result.precursorConfidence * 100).toStringAsFixed(0)}%',
+                      style: TextStyle(color: Colors.white.withAlpha(120), fontSize: 10),
+                    ),
+                  ],
+                ],
+              ),
+
               // Reconstruction error detail
               const SizedBox(height: 8),
               Row(
@@ -140,6 +239,57 @@ class MLAnomalyIndicator extends StatelessWidget {
                   ),
                 ],
               ),
+
+              // Precursor pattern description
+              if (result.precursorPattern != null) ...[
+                const SizedBox(height: 8),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                  decoration: BoxDecoration(
+                    color: (result.precursorPattern == 'imminent_failure'
+                            ? const Color(0xFFE53935)
+                            : result.precursorPattern == 'crack_propagation'
+                                ? const Color(0xFFFF9800)
+                                : const Color(0xFFFFC107))
+                        .withAlpha(30),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: (result.precursorPattern == 'imminent_failure'
+                              ? const Color(0xFFE53935)
+                              : result.precursorPattern == 'crack_propagation'
+                                  ? const Color(0xFFFF9800)
+                                  : const Color(0xFFFFC107))
+                          .withAlpha(80),
+                      width: 1,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        _precursorIcons[result.precursorPattern] ?? Icons.info_outline,
+                        size: 14,
+                        color: result.precursorPattern == 'imminent_failure'
+                            ? const Color(0xFFE53935)
+                            : result.precursorPattern == 'crack_propagation'
+                                ? const Color(0xFFFF9800)
+                                : const Color(0xFFFFC107),
+                      ),
+                      const SizedBox(width: 7),
+                      Expanded(
+                        child: Text(
+                          _precursorDescriptions[result.precursorPattern] ?? result.precursorPattern!,
+                          style: TextStyle(
+                            color: Colors.white.withAlpha(210),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
 
               // Top feature contributors
               if (topContribs.isNotEmpty) ...[
