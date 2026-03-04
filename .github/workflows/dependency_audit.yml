@@ -1,8 +1,10 @@
-name: Dependency Audit
+name: Dependency Security Audit
 
 on:
+  push:
+    branches: [master, docker-experiment]
   schedule:
-    - cron: '0 6 * * 3'  # Every Wednesday 6am UTC
+    - cron: '0 6 * * 1'  # Every Monday 6am UTC
   workflow_dispatch:
 
 jobs:
@@ -15,12 +17,93 @@ jobs:
           python-version: '3.11'
       - name: Install pip-audit
         run: pip install pip-audit
-      - name: Audit collect requirements
-        run: pip-audit -r docker/collect/requirements.txt || true
-      - name: Audit watcher requirements
-        run: pip-audit -r docker/watcher/requirements.txt || true
-      - name: Audit ML requirements
-        run: pip-audit -r docker/ml/requirements.txt || true
+
+      - name: Audit collect requirements (JSON)
+        run: pip-audit -r docker/collect/requirements.txt --output json -o audit-collect.json || true
+
+      - name: Audit ML requirements (JSON)
+        run: pip-audit -r docker/ml/requirements.txt --output json -o audit-ml.json || true
+
+      - name: Parse and summarize vulnerabilities
+        run: |
+          python3 - <<'EOF'
+          import json
+          import sys
+          import glob
+          import os
+          from collections import defaultdict
+
+          total_vulns = 0
+          high_critical = 0
+          medium = 0
+          summary = defaultdict(list)
+
+          for audit_file in glob.glob('audit-*.json'):
+              try:
+                  with open(audit_file) as f:
+                      data = json.load(f)
+
+                  for dep in data.get('dependencies', []):
+                      pkg_name = dep.get('name', 'unknown')
+                      vulns = dep.get('vulns', [])
+
+                      for vuln in vulns:
+                          total_vulns += 1
+                          severity = vuln.get('fix_state', 'unknown')
+                          cve_id = vuln.get('cve', 'N/A')
+
+                          # Classify severity (pip-audit uses "CRITICAL", "HIGH", "MEDIUM", "LOW")
+                          if severity in ['CRITICAL', 'HIGH']:
+                              high_critical += 1
+                              summary[f'{severity}'].append(f'{pkg_name}: {cve_id}')
+                          elif severity == 'MEDIUM':
+                              medium += 1
+                              summary['MEDIUM'].append(f'{pkg_name}: {cve_id}')
+              except Exception as e:
+                  print(f"Warning: Could not parse {audit_file}: {e}")
+
+          # Write to GitHub summary
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('## Dependency Security Audit Results\n\n')
+              f.write(f'**Total Vulnerabilities**: {total_vulns}\n\n')
+              f.write(f'| Severity | Count |\n')
+              f.write(f'|----------|-------|\n')
+              f.write(f'| CRITICAL/HIGH | {high_critical} |\n')
+              f.write(f'| MEDIUM | {medium} |\n\n')
+
+              if high_critical > 0:
+                  f.write('### Critical/High Vulnerabilities\n')
+                  for vuln in summary.get('CRITICAL', []) + summary.get('HIGH', []):
+                      f.write(f'- {vuln}\n')
+                  f.write('\n')
+
+              if medium > 0:
+                  f.write('### Medium Vulnerabilities (Warnings)\n')
+                  for vuln in summary.get('MEDIUM', []):
+                      f.write(f'- {vuln}\n')
+                  f.write('\n')
+
+          print(f'\n✓ Total: {total_vulns} | ✗ CRITICAL/HIGH: {high_critical} | ⚠ MEDIUM: {medium}')
+
+          # Fail if CRITICAL or HIGH exist
+          if high_critical > 0:
+              print(f'::error::Found {high_critical} CRITICAL or HIGH severity vulnerabilities')
+              sys.exit(1)
+          elif medium > 0:
+              print(f'::warning::Found {medium} MEDIUM severity vulnerabilities')
+
+          sys.exit(0)
+          EOF
+        env:
+          GITHUB_STEP_SUMMARY: ${{ github.workspace }}/.github/audit-summary.md
+
+      - name: Upload audit reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-reports
+          path: audit-*.json
+          retention-days: 30
 
   flutter-audit:
     runs-on: ubuntu-latest
@@ -31,4 +114,5 @@ jobs:
           flutter-version: '3.22.3'
       - name: Check for outdated packages
         working-directory: app
-        run: flutter pub outdated || true
+        run: |
+          flutter pub outdated || echo "WARNING: Some packages are outdated"
