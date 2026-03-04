@@ -1,0 +1,675 @@
+openapi: 3.0.3
+info:
+  title: AncientVision Data Collector API
+  version: "1.0"
+  description: |
+    Seismic vibration data collection and monitoring API for archaeological site safety.
+
+    The API collects real-time vibration measurements from M5StickC ESP32 devices and provides
+    aggregated statistics, data quality metrics, and model training support.
+
+    **Authentication:** Optional via `X-API-Key` header (if `API_KEY` env var is set).
+    Exempt endpoints: `/health`, `/metrics`.
+  contact:
+    name: AncientVision Team
+  license:
+    name: Apache 2.0
+
+servers:
+  - url: http://localhost:8765
+    description: Local development
+  - url: http://{host}:8765
+    description: Field deployment
+    variables:
+      host:
+        description: Collector host IP or hostname
+        default: 192.168.1.100
+
+tags:
+  - name: Health
+    description: Service health and metrics
+  - name: Data Collection
+    description: Ingest vibration samples
+  - name: Data Export
+    description: Download and stream collected data
+  - name: Data Maintenance
+    description: Quality checks, deletion, labeling
+  - name: Configuration
+    description: Runtime configuration management
+  - name: Device Management
+    description: Device discovery and monitoring
+
+paths:
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Health check endpoint
+      description: Returns service status and sample count. No authentication required.
+      operationId: getHealth
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+      x-healthcheck: true
+
+  /metrics:
+    get:
+      tags:
+        - Health
+      summary: Prometheus metrics endpoint
+      description: |
+        Prometheus-format metrics.
+        Metrics tracked:
+        - `ancientvision_samples_total`: Total samples collected (counter)
+        - `ancientvision_devices_active`: Unique devices (gauge)
+        - `ancientvision_rate_limit_hits_total`: Rate limit rejections (counter)
+      operationId: getMetrics
+      responses:
+        "200":
+          description: Prometheus metrics in text format
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /ingest:
+    post:
+      tags:
+        - Data Collection
+      summary: Ingest a vibration sample
+      description: |
+        Submit a vibration measurement from a device.
+
+        - **Deduplication:** Samples are deduplicated by `(device_id, timestamp)` pair.
+        - **Rate limiting:** Per-device limit (configurable, default 10 requests/sec).
+        - **Validation:** All required fields must be present and within valid numeric ranges.
+        - **CSV storage:** Samples written to daily CSV files in `./data/field/YYYY-MM-DD.csv`.
+      operationId: ingestSample
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VibrationalSample"
+      responses:
+        "200":
+          description: Sample accepted (may be duplicate)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "400":
+          description: Missing or invalid field
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateLimitError"
+        "401":
+          description: Unauthorized (if API key required)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      security:
+        - ApiKeyHeader: []
+
+  /stats:
+      get:
+        tags:
+          - Data Export
+        summary: Get aggregate statistics
+        description: |
+          Returns cached statistics about collected data. Cache TTL: 10 seconds.
+        operationId: getStats
+        responses:
+          "200":
+            description: Aggregate statistics
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/StatsResponse"
+        security:
+          - ApiKeyHeader: []
+
+  /export:
+    get:
+      tags:
+        - Data Export
+      summary: Download all collected data as CSV
+      description: |
+        Exports all collected vibration data as a single CSV file.
+        Filename: `field_data_YYYY-MM-DD.csv` (date of export).
+      operationId: exportCSV
+      responses:
+        "200":
+          description: CSV file download
+          content:
+            text/csv:
+              schema:
+                type: string
+      security:
+        - ApiKeyHeader: []
+
+  /export/stream:
+    get:
+      tags:
+        - Data Export
+      summary: Stream collected data as NDJSON
+      description: |
+        Stream all collected data as newline-delimited JSON (NDJSON).
+        Supports optional device filtering via `device_id` query parameter.
+
+        Each line is a valid JSON object representing one sample.
+      operationId: exportStream
+      parameters:
+        - name: device_id
+          in: query
+          description: Optional device filter (exact match)
+          schema:
+            type: string
+      responses:
+        "200":
+          description: NDJSON stream
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: "#/components/schemas/VibrationalSample"
+      security:
+        - ApiKeyHeader: []
+
+  /quality:
+    get:
+      tags:
+        - Data Maintenance
+      summary: Data quality report
+      description: |
+        Scans all CSV files and computes quality metrics:
+        - Missing required fields
+        - Out-of-range values
+        - Duplicate records
+        - Overall quality score (0-1)
+      operationId: getQuality
+      responses:
+        "200":
+          description: Quality report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QualityResponse"
+        "500":
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      security:
+        - ApiKeyHeader: []
+
+  /devices:
+    get:
+      tags:
+        - Device Management
+      summary: List unique devices
+      description: Returns a sorted list of all device IDs that have sent data.
+      operationId: getDevices
+      responses:
+        "200":
+          description: Device list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DevicesResponse"
+      security:
+        - ApiKeyHeader: []
+
+  /label:
+    post:
+      tags:
+        - Data Maintenance
+      summary: Update sample label
+      description: |
+        Update the label for a specific sample (identified by `device_id` + `timestamp`).
+
+        Valid labels: `normal`, `anomaly`, `precursor`, `unknown`.
+      operationId: updateLabel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LabelRequest"
+      responses:
+        "200":
+          description: Label(s) updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LabelResponse"
+        "400":
+          description: Invalid label or missing fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: No matching sample found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      security:
+        - ApiKeyHeader: []
+
+  /config:
+    get:
+      tags:
+        - Configuration
+      summary: Get current configuration
+      description: Returns current runtime configuration.
+      operationId: getConfig
+      responses:
+        "200":
+          description: Configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigResponse"
+      security:
+        - ApiKeyHeader: []
+
+    post:
+      tags:
+        - Configuration
+      summary: Update configuration
+      description: |
+        Update runtime configuration parameters.
+
+        Supported fields:
+        - `trigger_threshold` (1-10000): Alert threshold
+        - `rate_limit_rps` (1-100): Max requests per second per device
+      operationId: updateConfig
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfigRequest"
+      responses:
+        "200":
+          description: Configuration updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigResponse"
+        "400":
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      security:
+        - ApiKeyHeader: []
+
+  /data/old:
+    delete:
+      tags:
+        - Data Maintenance
+      summary: Delete old data by retention policy
+      description: |
+        Delete rows older than `days` parameter (default 30) from all CSV files.
+        Parses ISO 8601 timestamps; unparseable rows are retained.
+      operationId: deleteOldData
+      parameters:
+        - name: days
+          in: query
+          description: Age threshold in days (default 30)
+          schema:
+            type: integer
+            default: 30
+            minimum: 0
+      responses:
+        "200":
+          description: Deletion complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteResponse"
+        "400":
+          description: Invalid `days` parameter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      security:
+        - ApiKeyHeader: []
+
+  /data/invalid:
+    get:
+      tags:
+        - Data Maintenance
+      summary: List CSV files with schema errors
+      description: |
+        Returns list of CSV files that failed schema validation during startup.
+        Required columns: `device_id`, `timestamp`, `ppv`, `rms`, `freq`, `kurtosis`.
+      operationId: getInvalidFiles
+      responses:
+        "200":
+          description: Invalid files list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvalidFilesResponse"
+      security:
+        - ApiKeyHeader: []
+
+components:
+  schemas:
+    VibrationalSample:
+      type: object
+      required:
+        - device_id
+        - timestamp
+        - rms
+        - ppv
+        - freq
+        - crest
+        - centroid
+        - kurtosis
+        - stalta
+        - arias
+        - cav
+        - label
+      properties:
+        device_id:
+          type: string
+          description: Unique device identifier (e.g., M5StickC MAC address)
+          example: "AA:BB:CC:DD:EE:FF"
+        timestamp:
+          type: string
+          format: date-time
+          description: Sample timestamp (ISO 8601)
+          example: "2026-03-04T12:34:56.789Z"
+        ppv:
+          type: number
+          format: float
+          description: Peak Particle Velocity (mm/s)
+          minimum: 0.0
+          maximum: 100.0
+          example: 0.25
+        rms:
+          type: number
+          format: float
+          description: Root Mean Square acceleration (m/s²)
+          minimum: 0.0
+          maximum: 1000.0
+          example: 0.15
+        freq:
+          type: number
+          format: float
+          description: Dominant frequency (Hz)
+          minimum: 0.0
+          maximum: 2000.0
+          example: 5.5
+        crest:
+          type: number
+          format: float
+          description: Crest factor (peak/RMS)
+          minimum: 0.0
+          maximum: 100.0
+          example: 3.0
+        centroid:
+          type: number
+          format: float
+          description: Spectral centroid (Hz)
+          minimum: 0.0
+          maximum: 2000.0
+          example: 10.2
+        kurtosis:
+          type: number
+          format: float
+          description: Statistical kurtosis
+          minimum: -5.0
+          maximum: 50.0
+          example: 3.5
+        stalta:
+          type: number
+          format: float
+          description: STA/LTA ratio (short-term/long-term average)
+          minimum: 0.0
+          maximum: 100.0
+          example: 1.2
+        arias:
+          type: number
+          format: float
+          description: Arias intensity (m/s)
+          minimum: 0.0
+          example: 0.05
+        cav:
+          type: number
+          format: float
+          description: Cumulative Absolute Velocity (m/s)
+          minimum: 0.0
+          example: 0.08
+        label:
+          type: string
+          enum: [normal, anomaly, precursor, unknown]
+          description: Sample classification label
+          example: "normal"
+
+    IngestResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, duplicate]
+          description: "ok: new sample accepted, duplicate: sample already in database"
+
+    RateLimitError:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "rate_limited"
+        device_id:
+          type: string
+          example: "AA:BB:CC:DD:EE:FF"
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+          description: Error message(s)
+
+    StatsResponse:
+      type: object
+      properties:
+        total_samples:
+          type: integer
+          description: Total samples across all files
+          example: 45000
+        samples_today:
+          type: integer
+          description: Samples collected today (UTC)
+          example: 2300
+        devices:
+          type: array
+          items:
+            type: string
+          description: List of unique device IDs
+          example: ["AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"]
+        classes:
+          type: object
+          properties:
+            normal:
+              type: integer
+              example: 40000
+            anomaly:
+              type: integer
+              example: 3000
+            precursor:
+              type: integer
+              example: 2000
+          description: Sample counts by label
+        csv_files:
+          type: integer
+          description: Number of daily CSV files
+          example: 15
+
+    QualityResponse:
+      type: object
+      properties:
+        total_samples:
+          type: integer
+          example: 45000
+        missing_required_fields:
+          type: integer
+          description: Rows missing at least one required field
+          example: 10
+        out_of_range_values:
+          type: integer
+          description: Rows with out-of-range numeric fields
+          example: 5
+        duplicate_records:
+          type: integer
+          description: Duplicate (timestamp, device_id) pairs
+          example: 0
+        quality_score:
+          type: number
+          format: float
+          description: Aggregate quality score (0-1)
+          minimum: 0.0
+          maximum: 1.0
+          example: 0.995
+        status:
+          type: string
+          enum: [good, degraded, poor]
+          description: Quality classification
+          example: "good"
+
+    DevicesResponse:
+      type: object
+      properties:
+        devices:
+          type: array
+          items:
+            type: string
+          description: Sorted list of device IDs
+          example: ["AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"]
+        count:
+          type: integer
+          example: 2
+
+    LabelRequest:
+      type: object
+      required:
+        - device_id
+        - timestamp
+        - label
+      properties:
+        device_id:
+          type: string
+          example: "AA:BB:CC:DD:EE:FF"
+        timestamp:
+          type: string
+          format: date-time
+          example: "2026-03-04T12:34:56.789Z"
+        label:
+          type: string
+          enum: [normal, anomaly, precursor, unknown]
+          example: "anomaly"
+
+    LabelResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        rows_updated:
+          type: integer
+          example: 1
+
+    ConfigResponse:
+      type: object
+      properties:
+        firestore_collection:
+          type: string
+          example: "vibration_samples"
+        trigger_threshold:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          example: 100
+        rate_limit_rps:
+          type: integer
+          minimum: 1
+          maximum: 100
+          example: 10
+        max_ppv:
+          type: number
+          example: 100
+
+    ConfigRequest:
+      type: object
+      properties:
+        trigger_threshold:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          description: Alert threshold
+        rate_limit_rps:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: Max requests per second per device
+
+    DeleteResponse:
+      type: object
+      properties:
+        deleted_rows:
+          type: integer
+          example: 500
+        files_processed:
+          type: integer
+          example: 8
+
+    InvalidFilesResponse:
+      type: object
+      properties:
+        invalid_files:
+          type: array
+          items:
+            type: string
+          description: CSV filenames with schema errors
+          example: ["2026-02-15.csv", "2026-02-16.csv"]
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "ok"
+        samples:
+          type: integer
+          example: 45000
+
+  securitySchemes:
+    ApiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Optional API key (if API_KEY env var is set)
