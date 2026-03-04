@@ -27,7 +27,6 @@ import '../../services/translation_service.dart';
 import '../../services/alert_history_service.dart' as ahs;
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../../services/session_export_service.dart';
-import '../../services/calibration_progress_service.dart';
 import '../../services/inference_timing_service.dart';
 import '../../services/device_memory_service.dart';
 import '../../utils/ble_packet_tracker.dart';
@@ -249,9 +248,6 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
 
   // P51: Session export
   final _sessionExportService = SessionExportService.instance;
-
-  // P52: Calibration progress service
-  final _calibrationProgress = CalibrationProgressService(requiredSamples: 100);
 
   // P55: BLE packet tracker for missed packet detection
   final _packetTracker = BlePacketTracker();
@@ -1020,8 +1016,6 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
           // Parse v2.0+ fields (backward compatible - defaults to 0 if missing)
           _ppv = (data['ppv'] as num?)?.toDouble() ?? 0.0;
           if (_isPpvCalibrating) _calibrationSamples.add(_ppv);
-          // P52: Feed calibration progress service on every sample
-          _calibrationProgress.addSample();
           if (_ppv > 0 || _rms > 0) _hasReceivedVibData = true;
           _rms = (data['rms'] as num?)?.toDouble() ?? 0.0;
           _crestFactor = (data['crest'] as num?)?.toDouble() ?? 0.0;
@@ -2543,22 +2537,47 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
             const SizedBox(height: 12),
           ],
 
-          // P52: Calibration progress bar (shown while not yet calibrated)
-          if (!_calibrationProgress.isCalibrated) ...[
+          // P52: Calibration progress bar (shown while adaptive service is still calibrating)
+          if (!_anomalyService.adaptiveService.isCalibrated) ...[
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    'Calibrating baseline… (${_calibrationProgress.samplesCollected}/100 samples)',
-                    style: TextStyle(color: Colors.white.withAlpha(140), fontSize: 11),
+                  Row(
+                    children: [
+                      const Icon(Icons.tune, size: 14, color: Colors.amber),
+                      const SizedBox(width: 4),
+                      Text(
+                        'Calibrating: ${(_anomalyService.adaptiveService.calibrationProgress * 100).toStringAsFixed(0)}%',
+                        style: const TextStyle(fontSize: 12, color: Colors.amber),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 4),
-                  LinearProgressIndicator(
-                    value: _calibrationProgress.progress,
-                    backgroundColor: Colors.white12,
-                    color: Colors.tealAccent,
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(2),
+                    child: LinearProgressIndicator(
+                      value: _anomalyService.adaptiveService.calibrationProgress,
+                      backgroundColor: Colors.white12,
+                      valueColor: const AlwaysStoppedAnimation<Color>(Colors.amber),
+                      minHeight: 4,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ] else if (_anomalyService.adaptiveService.calibrationQualityLabel.isNotEmpty &&
+              _anomalyService.adaptiveService.calibrationQualityLabel != 'Poor') ...[
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Row(
+                children: [
+                  const Icon(Icons.check_circle_outline, size: 12, color: Colors.greenAccent),
+                  const SizedBox(width: 4),
+                  Text(
+                    'Calibration: ${_anomalyService.adaptiveService.calibrationQualityLabel}',
+                    style: const TextStyle(fontSize: 11, color: Colors.white60),
                   ),
                 ],
               ),
