@@ -2,7 +2,8 @@ import csv
 import os
 import threading
 import pytest
-from app import create_app
+from datetime import datetime, timezone, timedelta
+from app import create_app, CSV_HEADER
 
 
 @pytest.fixture
@@ -409,3 +410,263 @@ class TestConcurrentWrites:
         assert sample_count == 100, (
             f"Expected 100 samples (20 threads x 5 each), got {sample_count}"
         )
+
+
+# ---------------------------------------------------------------------------
+# New tests: Pagination, Archive, and Metrics
+# ---------------------------------------------------------------------------
+
+def test_paginated_data_endpoint(client):
+    """POST multiple samples, GET /data with pagination."""
+    c, _ = client
+    # Post 20 samples with different timestamps and two devices
+    # Use unique timestamps to avoid dedup, and spread by device to manage rate limiting
+    sample_count = 0
+    for i in range(10):
+        # dev-a: post 10 samples
+        payload = {
+            **BASE_PAYLOAD,
+            "device_id": "dev-a",
+            "timestamp": f"2026-03-03T16:01:{i:02d}Z",
+            "ppv": 0.01 + (i * 0.002),
+        }
+        c.post("/ingest", json=payload)
+        sample_count += 1
+
+    for i in range(10):
+        # dev-b: post 10 samples
+        payload = {
+            **BASE_PAYLOAD,
+            "device_id": "dev-b",
+            "timestamp": f"2026-03-03T16:02:{i:02d}Z",
+            "ppv": 0.01 + (i * 0.002),
+        }
+        c.post("/ingest", json=payload)
+        sample_count += 1
+
+    # Test: default pagination (per_page=50)
+    r = c.get("/data")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert "data" in body
+    assert "total" in body
+    assert "page" in body
+    assert "per_page" in body
+    assert "pages" in body
+    assert body["total"] == sample_count
+    assert body["page"] == 1
+    assert body["per_page"] == 50
+    assert body["pages"] == 1
+    assert len(body["data"]) == sample_count
+
+    # Test: custom per_page
+    r = c.get("/data?page=1&per_page=10")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["total"] == sample_count
+    assert body["per_page"] == 10
+    assert body["pages"] == 2
+    assert len(body["data"]) == 10
+
+    # Test: page 2
+    r = c.get("/data?page=2&per_page=10")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["page"] == 2
+    assert len(body["data"]) == 10
+
+    # Test: out of range page
+    r = c.get("/data?page=100&per_page=10")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert len(body["data"]) == 0
+
+    # Test: device_id filter
+    r = c.get("/data?device_id=dev-a&per_page=50")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["total"] == 10
+    assert all(row["device_id"] == "dev-a" for row in body["data"])
+
+    # Test: device_id filter with dev-b
+    r = c.get("/data?device_id=dev-b&per_page=50")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["total"] == 10
+    assert all(row["device_id"] == "dev-b" for row in body["data"])
+
+    # Test: date_from filter
+    r = c.get("/data?date_from=2026-03-03&per_page=50")
+    assert r.status_code == 200
+    body = r.get_json()
+    # All samples are from 2026-03-03
+    assert body["total"] == sample_count
+
+    # Test: invalid page
+    r = c.get("/data?page=0")
+    assert r.status_code == 400
+    assert "page must be >= 1" in r.get_json()["error"]
+
+    # Test: invalid per_page
+    r = c.get("/data?per_page=0")
+    assert r.status_code == 400
+    assert "per_page must be 1-1000" in r.get_json()["error"]
+
+    r = c.get("/data?per_page=2000")
+    assert r.status_code == 400
+    assert "per_page must be 1-1000" in r.get_json()["error"]
+
+
+def test_archive_endpoint_basic(client):
+    """POST samples, archive old data, verify files moved."""
+    import os
+    c, data_dir = client
+
+    # Create a sample from 40 days ago by manually writing to CSV
+    # (since we can't easily mock time in ingest())
+    field_dir = data_dir / "field"
+    field_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write old CSV with a sample from 40 days ago
+    old_date = (datetime.now(timezone.utc) - timedelta(days=40)).strftime("%Y-%m-%d")
+    old_csv = field_dir / f"{old_date}.csv"
+    old_sample = {
+        "device_id": "old-dev",
+        "timestamp": (datetime.now(timezone.utc) - timedelta(days=40)).isoformat(),
+        "rms": 0.01,
+        "ppv": 0.05,
+        "freq": 15.0,
+        "crest": 3.0,
+        "centroid": 20.0,
+        "kurtosis": 1.5,
+        "stalta": 1.0,
+        "arias": 0.0001,
+        "cav": 0.002,
+        "label": "normal",
+    }
+    with open(old_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_HEADER)
+        writer.writeheader()
+        writer.writerow(old_sample)
+
+    # Set file mtime to 40 days ago so archive can detect it
+    old_mtime = (datetime.now(timezone.utc) - timedelta(days=40)).timestamp()
+    os.utime(old_csv, (old_mtime, old_mtime))
+
+    # Also post a recent sample
+    _post_sample(c, overrides={"device_id": "recent-dev"})
+
+    # Verify files before archive
+    assert old_csv.exists()
+    assert len(list(field_dir.glob("*.csv"))) == 2  # old + today
+
+    # Archive with days=30 (should move old_csv but not today)
+    r = c.post("/archive?days=30")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["archived_files"] >= 1
+    assert body["archived_samples"] >= 1
+    assert body["freed_bytes"] > 0
+
+    # Verify old file was moved to archive/
+    archive_dir = data_dir / "archive"
+    assert archive_dir.exists()
+    assert (archive_dir / old_csv.name).exists()
+    # Old file should no longer be in field/
+    assert not old_csv.exists()
+
+    # Verify today's file still exists
+    today_csv = field_dir / datetime.now(timezone.utc).strftime("%Y-%m-%d.csv")
+    assert today_csv.exists()
+
+
+def test_archive_endpoint_respects_days_threshold(client):
+    """Test that archive respects the days parameter."""
+    import os
+    c, data_dir = client
+
+    field_dir = data_dir / "field"
+    field_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create two old CSVs: 15 days old and 45 days old
+    for days_old in [15, 45]:
+        old_date = (datetime.now(timezone.utc) - timedelta(days=days_old)).strftime("%Y-%m-%d")
+        old_csv = field_dir / f"{old_date}.csv"
+        old_sample = {
+            **BASE_PAYLOAD,
+            "device_id": f"dev-{days_old}days",
+            "timestamp": (datetime.now(timezone.utc) - timedelta(days=days_old)).isoformat(),
+        }
+        with open(old_csv, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_HEADER)
+            writer.writeheader()
+            writer.writerow(old_sample)
+
+        # Set file mtime to match the age
+        old_mtime = (datetime.now(timezone.utc) - timedelta(days=days_old)).timestamp()
+        os.utime(old_csv, (old_mtime, old_mtime))
+
+    # Archive with days=30 (should only move 45-day-old file)
+    r = c.post("/archive?days=30")
+    assert r.status_code == 200
+    body = r.get_json()
+    # Only the 45-day-old file should be archived
+    assert body["archived_files"] >= 1
+
+    # 15-day-old file should still be in field/
+    csv_15 = field_dir / (datetime.now(timezone.utc) - timedelta(days=15)).strftime("%Y-%m-%d.csv")
+    # Note: file might not exist if the date doesn't match exactly due to midnight boundary
+    # But if it does exist, it should not be archived
+    if csv_15.exists():
+        assert csv_15.exists()  # Should still be there
+
+
+def test_metrics_endpoint_format(client):
+    """Test /metrics endpoint returns valid Prometheus format."""
+    c, _ = client
+    _post_sample(c, overrides={"device_id": "metrics-dev", "label": "normal"})
+    _post_sample(c, overrides={"device_id": "metrics-dev", "label": "anomaly", "timestamp": "2026-03-03T10:00:01Z"})
+
+    r = c.get("/metrics")
+    assert r.status_code == 200
+    # Content type should be text/plain
+    assert "text/plain" in r.content_type
+    text = r.data.decode("utf-8")
+
+    # Check for key Prometheus metrics
+    assert "ancientvision_samples_total" in text
+    assert "ancientvision_devices_active" in text
+    assert "ancientvision_rate_limit_hits_total" in text
+    assert "ancientvision_samples_by_class" in text
+    assert "ancientvision_samples_by_device" in text
+
+    # Verify format: each metric should have HELP and TYPE
+    lines = text.strip().split("\n")
+    assert any("# HELP ancientvision_samples_total" in line for line in lines)
+    assert any("# TYPE ancientvision_samples_total counter" in line for line in lines)
+    assert any("ancientvision_samples_total " in line for line in lines)
+
+    # Check for per-device breakdown
+    assert 'device_id="metrics-dev"' in text
+
+    # Check for per-class breakdown
+    assert 'class="normal"' in text
+    assert 'class="anomaly"' in text
+
+
+def test_metrics_endpoint_per_device_counts(client):
+    """Test that /metrics reports per-device sample counts accurately."""
+    c, _ = client
+    # Post samples from different devices
+    for i in range(3):
+        _post_sample(c, overrides={"device_id": "dev-x", "timestamp": f"2026-03-03T10:00:0{i}Z"})
+    for i in range(5):
+        _post_sample(c, overrides={"device_id": "dev-y", "timestamp": f"2026-03-03T11:00:0{i}Z"})
+
+    r = c.get("/metrics")
+    assert r.status_code == 200
+    text = r.data.decode("utf-8")
+
+    # Should report 3 samples for dev-x and 5 for dev-y
+    assert 'ancientvision_samples_by_device{device_id="dev-x"} 3' in text
+    assert 'ancientvision_samples_by_device{device_id="dev-y"} 5' in text

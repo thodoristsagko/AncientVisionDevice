@@ -515,10 +515,11 @@ def create_app():
 
     @app.route("/metrics")
     def metrics():
-        """Return Prometheus-compatible metrics in exposition format."""
+        """Return Prometheus-compatible metrics in exposition format with per-device breakdown."""
         stats_data = _compute_stats()
         total_samples = stats_data["total_samples"]
         devices_active = len(stats_data["devices"])
+        class_counts = stats_data.get("classes", {})
 
         with _rate_limit_hits_lock:
             hits = _rate_limit_hits
@@ -533,9 +534,186 @@ def create_app():
             "# HELP ancientvision_rate_limit_hits_total Rate limit rejections",
             "# TYPE ancientvision_rate_limit_hits_total counter",
             f"ancientvision_rate_limit_hits_total {hits}",
-            "",
         ]
+
+        # Per-class sample counts
+        lines.append("# HELP ancientvision_samples_by_class Samples per label class")
+        lines.append("# TYPE ancientvision_samples_by_class gauge")
+        for class_label in sorted(class_counts.keys()):
+            count = class_counts[class_label]
+            lines.append(f'ancientvision_samples_by_class{{class="{class_label}"}} {count}')
+
+        # Per-device sample counts
+        lines.append("# HELP ancientvision_samples_by_device Samples per device_id")
+        lines.append("# TYPE ancientvision_samples_by_device gauge")
+        device_counts = {}
+        for csv_path in sorted(field_dir.glob("*.csv")):
+            try:
+                with open(csv_path, newline="") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        dev = row.get("device_id", "")
+                        if dev:
+                            device_counts[dev] = device_counts.get(dev, 0) + 1
+            except Exception:
+                pass
+        for device_id in sorted(device_counts.keys()):
+            count = device_counts[device_id]
+            lines.append(f'ancientvision_samples_by_device{{device_id="{device_id}"}} {count}')
+
+        lines.append("")
         return Response("\n".join(lines), mimetype="text/plain; version=0.0.4")
+
+    # --- Pagination and Archive endpoints ---
+
+    @app.route("/data")
+    def paginated_data():
+        """Return paginated collected data with optional filtering.
+
+        Query parameters:
+        - page (int, default 1): Page number (1-indexed)
+        - per_page (int, default 50): Samples per page
+        - device_id (str, optional): Filter by device_id
+        - date_from (str, optional): ISO 8601 date (e.g. 2026-03-01)
+        - date_to (str, optional): ISO 8601 date (e.g. 2026-03-04)
+
+        Returns: {"data": [...], "total": N, "page": 1, "per_page": 50, "pages": 10}
+        """
+        try:
+            page = int(request.args.get("page", 1))
+            per_page = int(request.args.get("per_page", 50))
+            device_filter = request.args.get("device_id", "").strip() or None
+            date_from_str = request.args.get("date_from", "").strip() or None
+            date_to_str = request.args.get("date_to", "").strip() or None
+
+            if page < 1:
+                return jsonify({"error": "page must be >= 1"}), 400
+            if per_page < 1 or per_page > 1000:
+                return jsonify({"error": "per_page must be 1-1000"}), 400
+        except (TypeError, ValueError):
+            return jsonify({"error": "page and per_page must be integers"}), 400
+
+        # Parse date filters
+        date_from = None
+        date_to = None
+        try:
+            if date_from_str:
+                # Parse as ISO date (YYYY-MM-DD)
+                date_from = datetime.fromisoformat(date_from_str).replace(tzinfo=timezone.utc)
+            if date_to_str:
+                # Parse as ISO date, add 1 day to include entire day
+                date_to = (datetime.fromisoformat(date_to_str) + timedelta(days=1)).replace(tzinfo=timezone.utc)
+        except ValueError:
+            return jsonify({"error": "date_from and date_to must be ISO 8601 dates (YYYY-MM-DD)"}), 400
+
+        # Collect all matching rows
+        all_rows = []
+        for csv_path in sorted(field_dir.glob("*.csv")):
+            try:
+                with open(csv_path, newline="") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        # Device filter
+                        if device_filter and row.get("device_id") != device_filter:
+                            continue
+                        # Date range filter
+                        if date_from or date_to:
+                            ts_str = row.get("timestamp", "")
+                            try:
+                                ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                                if ts.tzinfo is None:
+                                    ts = ts.replace(tzinfo=timezone.utc)
+                                if date_from and ts < date_from:
+                                    continue
+                                if date_to and ts >= date_to:
+                                    continue
+                            except (ValueError, AttributeError):
+                                continue
+                        all_rows.append(row)
+            except Exception:
+                pass
+
+        total = len(all_rows)
+        total_pages = (total + per_page - 1) // per_page if total > 0 else 1
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        page_data = all_rows[start_idx:end_idx]
+
+        return jsonify({
+            "data": page_data,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "pages": total_pages,
+        })
+
+    @app.route("/archive", methods=["POST"])
+    def archive_data():
+        """Move collected CSV data older than ?days (default 30) to {DATA_DIR}/archive/.
+
+        Query parameters:
+        - days (int, default 30): Age threshold in days
+
+        Returns: {"archived_files": N, "archived_samples": N, "freed_bytes": N}
+        Requires API_KEY if set.
+        """
+        try:
+            days = int(request.args.get("days", 30))
+            if days < 0:
+                return jsonify({"error": "days must be >= 0"}), 400
+        except (TypeError, ValueError):
+            return jsonify({"error": "days must be an integer"}), 400
+
+        archive_dir = data_dir / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        archived_files = 0
+        archived_samples = 0
+        freed_bytes = 0
+
+        with _csv_lock:
+            for csv_path in sorted(field_dir.glob("*.csv")):
+                # Check file mtime
+                try:
+                    file_mtime = datetime.fromtimestamp(csv_path.stat().st_mtime, tz=timezone.utc)
+                    if file_mtime >= cutoff:
+                        # File is recent enough, skip
+                        continue
+                except Exception:
+                    continue
+
+                # Count samples in file
+                sample_count = 0
+                try:
+                    with open(csv_path, newline="") as f:
+                        reader = csv.DictReader(f)
+                        sample_count = sum(1 for _ in reader)
+                except Exception:
+                    pass
+
+                # Move file to archive
+                try:
+                    archive_path = archive_dir / csv_path.name
+                    file_size = csv_path.stat().st_size
+                    csv_path.rename(archive_path)
+                    archived_files += 1
+                    archived_samples += sample_count
+                    freed_bytes += file_size
+                    jlog("info", "archive_moved", file=csv_path.name, samples=sample_count,
+                         bytes=file_size, archive=archive_path.name)
+                except Exception as exc:
+                    jlog("warning", "archive_error", file=csv_path.name, error=str(exc))
+
+        if archived_files > 0:
+            _invalidate_stats_cache()
+
+        jlog("info", "archive_complete", files=archived_files, samples=archived_samples, bytes=freed_bytes)
+        return jsonify({
+            "archived_files": archived_files,
+            "archived_samples": archived_samples,
+            "freed_bytes": freed_bytes,
+        })
 
     # --- Sessions endpoints ---
 
