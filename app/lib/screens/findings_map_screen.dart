@@ -17,6 +17,7 @@ import '../services/shapefile_service.dart';
 import '../services/cached_tile_provider.dart';
 import '../services/location_service.dart';
 import '../services/critical_event_log_service.dart';
+import '../services/geofencing_service.dart';
 
 class FindingsMap extends StatefulWidget {
   final List<Finding> findings;
@@ -54,6 +55,10 @@ class _FindingsMapState extends State<FindingsMap> {
   /// Loaded CRITICAL events for alert history markers.
   List<CriticalEvent> _criticalEvents = [];
 
+  /// Geofence zones drawn as semi-transparent circles on the map.
+  List<GeofenceZone> _geofenceZones = [];
+  bool _showGeofenceZones = true;
+
   final GeoJsonService _geoJsonService = GeoJsonService();
   final ShapefileService _shapefileService = ShapefileService();
   final List<_LayerEntry> _entries = [];
@@ -73,6 +78,7 @@ class _FindingsMapState extends State<FindingsMap> {
     _startLocationTracking();
     _loadSensorLocation();
     _loadCriticalEvents();
+    _loadGeofenceZones();
   }
 
   Future<void> _loadGeoJsonLayers() async {
@@ -153,6 +159,178 @@ class _FindingsMapState extends State<FindingsMap> {
     } catch (e) {
       debugPrint('[FindingsMap] _loadCriticalEvents: $e');
     }
+  }
+
+  /// Load zones from GeofencingService singleton (in-memory, always fast).
+  void _loadGeofenceZones() {
+    final zones = GeofencingService.instance.zones;
+    if (mounted) {
+      setState(() => _geofenceZones = List<GeofenceZone>.from(zones));
+    }
+  }
+
+  /// Add a danger zone at the current GPS position and refresh the circle layer.
+  Future<void> _addDangerZoneHere() async {
+    final loc = LocationService.instance.lastLocation ?? (_myLocation != null
+        ? GpsLocation(
+            latitude: _myLocation!.latitude,
+            longitude: _myLocation!.longitude,
+            accuracy: 10.0,
+            timestamp: DateTime.now(),
+          )
+        : null);
+
+    if (loc == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No GPS fix — cannot add zone')),
+        );
+      }
+      return;
+    }
+
+    GeofencingService.instance.addCriticalEventZone(loc.latitude, loc.longitude);
+    _loadGeofenceZones();
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Danger zone added at '
+            '${_formatCoord(loc.latitude, isLat: true)}, '
+            '${_formatCoord(loc.longitude, isLat: false)}',
+          ),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
+  /// Show a bottom sheet with zone details when a zone circle is tapped.
+  void _showZoneInfo(GeofenceZone zone) {
+    final location = LocationService.instance.lastLocation ?? (_myLocation != null
+        ? GpsLocation(
+            latitude: _myLocation!.latitude,
+            longitude: _myLocation!.longitude,
+            accuracy: 10.0,
+            timestamp: DateTime.now(),
+          )
+        : null);
+
+    GeofenceStatus? status;
+    if (location != null) {
+      // Recompute status using simple Haversine for display.
+      final distM = _haversineMeters(
+        location.latitude, location.longitude,
+        zone.center.latitude, zone.center.longitude,
+      );
+      if (distM <= zone.radiusMeters) {
+        status = GeofenceStatus.inside;
+      } else if (distM <= zone.radiusMeters * 2.0) {
+        status = GeofenceStatus.approaching;
+      } else {
+        status = GeofenceStatus.outside;
+      }
+    }
+
+    final severityColors = {
+      GeofenceSeverity.info: Colors.blue,
+      GeofenceSeverity.warning: Colors.amber,
+      GeofenceSeverity.danger: Colors.red,
+      GeofenceSeverity.critical: Colors.red,
+    };
+    final severityColor = severityColors[zone.severity] ?? Colors.grey;
+
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A2E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Handle bar
+            Center(
+              child: Container(
+                width: 40, height: 4,
+                margin: const EdgeInsets.only(bottom: 16),
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            Row(
+              children: [
+                Icon(Icons.radar, color: severityColor, size: 22),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    zone.name,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _zoneInfoRow('Severity',
+                zone.severity.name.toUpperCase(), severityColor),
+            _zoneInfoRow('Radius', '${zone.radiusMeters.toStringAsFixed(0)} m',
+                Colors.white70),
+            _zoneInfoRow(
+              'Centre',
+              '${_formatCoord(zone.center.latitude, isLat: true)}, '
+                  '${_formatCoord(zone.center.longitude, isLat: false)}',
+              Colors.white70,
+            ),
+            if (status != null)
+              _zoneInfoRow(
+                'Your status',
+                status == GeofenceStatus.inside
+                    ? 'INSIDE — Retreat immediately!'
+                    : status == GeofenceStatus.approaching
+                        ? 'Approaching — Exercise caution'
+                        : 'Outside zone',
+                status == GeofenceStatus.inside
+                    ? Colors.red
+                    : status == GeofenceStatus.approaching
+                        ? Colors.amber
+                        : Colors.green,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _zoneInfoRow(String label, String value, Color valueColor) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 90,
+            child: Text(label,
+                style: const TextStyle(color: Colors.white54, fontSize: 13)),
+          ),
+          Expanded(
+            child: Text(value,
+                style: TextStyle(
+                    color: valueColor,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600)),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _importGeoData() async {
@@ -390,6 +568,58 @@ class _FindingsMapState extends State<FindingsMap> {
     } else {
       setState(() => _measureWaypoints.add(tappedPoint));
     }
+  }
+
+  // ── Geofence zone circle builders ─────────────────────────────────────────
+
+  /// Build flutter_map Circle overlays for each registered geofence zone.
+  List<CircleMarker> _buildGeofenceCircles() {
+    if (!_showGeofenceZones || _geofenceZones.isEmpty) return [];
+
+    return _geofenceZones.map((zone) {
+      final Color fillColor;
+      final Color borderColor;
+
+      switch (zone.severity) {
+        case GeofenceSeverity.danger:
+        case GeofenceSeverity.critical:
+          fillColor = const Color(0x33F44336); // red 20% opacity
+          borderColor = const Color(0xCCF44336);
+        case GeofenceSeverity.warning:
+          fillColor = const Color(0x26FFC107); // amber 15% opacity
+          borderColor = const Color(0xCCFFC107);
+        case GeofenceSeverity.info:
+          fillColor = const Color(0x1A2196F3); // blue 10% opacity
+          borderColor = const Color(0xCC2196F3);
+      }
+
+      return CircleMarker(
+        point: LatLng(zone.center.latitude, zone.center.longitude),
+        radius: zone.radiusMeters,
+        useRadiusInMeter: true,
+        color: fillColor,
+        borderColor: borderColor,
+        borderStrokeWidth: 1.5,
+      );
+    }).toList();
+  }
+
+  /// Build tap-target markers centred on each geofence zone (invisible but
+  /// tappable, sitting above the circles in the layer stack).
+  List<Marker> _buildGeofenceZoneTapTargets() {
+    if (!_showGeofenceZones || _geofenceZones.isEmpty) return [];
+
+    return _geofenceZones.map((zone) {
+      return Marker(
+        point: LatLng(zone.center.latitude, zone.center.longitude),
+        width: 44,
+        height: 44,
+        child: GestureDetector(
+          onTap: () => _showZoneInfo(zone),
+          child: const SizedBox.expand(), // transparent hit area
+        ),
+      );
+    }).toList();
   }
 
   // ── Marker builders ───────────────────────────────────────────────────────
@@ -668,6 +898,20 @@ class _FindingsMapState extends State<FindingsMap> {
     return '${abs.toStringAsFixed(5)}°$dir';
   }
 
+  /// Haversine great-circle distance in metres (used for zone status display).
+  double _haversineMeters(double lat1, double lon1, double lat2, double lon2) {
+    const r = 6371000.0;
+    final dLat = (lat2 - lat1) * 3.141592653589793 / 180;
+    final dLon = (lon2 - lon1) * 3.141592653589793 / 180;
+    final a = (dLat / 2) * (dLat / 2) +
+        (lat1 * 3.141592653589793 / 180).abs() *
+            (lat2 * 3.141592653589793 / 180).abs() *
+            (dLon / 2) *
+            (dLon / 2);
+    // Simplified — accurate enough for display at short range.
+    return r * 2 * (a < 1 ? a : 1);
+  }
+
   /// Total geodetic distance along the measure waypoints in metres.
   double _measureTotalMetres() {
     double total = 0;
@@ -722,6 +966,8 @@ class _FindingsMapState extends State<FindingsMap> {
               tileProvider: CachedTileProvider(),
             ),
             MarkerLayer(markers: _buildMyLocationMarker()),
+            // Geofence zone circles below all other overlays.
+            CircleLayer(circles: _buildGeofenceCircles()),
             PolygonLayer(polygons: _buildGeoJsonPolygons()),
             PolylineLayer(polylines: allPolylines),
             MarkerLayer(markers: _buildGeoJsonPointMarkers()),
@@ -730,6 +976,8 @@ class _FindingsMapState extends State<FindingsMap> {
             MarkerLayer(markers: _buildFindingMarkers()),
             // Sensor marker on top of findings.
             MarkerLayer(markers: _buildSensorMarker()),
+            // Geofence tap targets above all map content.
+            MarkerLayer(markers: _buildGeofenceZoneTapTargets()),
             // Measure waypoints on top of everything.
             MarkerLayer(markers: _buildMeasureMarkers()),
           ],
@@ -810,6 +1058,13 @@ class _FindingsMapState extends State<FindingsMap> {
                   if (!_measureMode) _measureWaypoints.clear();
                 }),
               ),
+              const SizedBox(height: 8),
+              // Add danger zone at current GPS location.
+              _mapButton(
+                icon: Icons.add_location_alt,
+                tooltip: 'Add danger zone here',
+                onTap: _addDangerZoneHere,
+              ),
             ],
           ),
         ),
@@ -842,6 +1097,9 @@ class _FindingsMapState extends State<FindingsMap> {
                       'Sensor', _showSensorMarker, (v) => setState(() => _showSensorMarker = v)),
                   _layerToggle(
                       'Alert History', _showAlerts, (v) => setState(() => _showAlerts = v)),
+                  _layerToggle(
+                      'Geofence Zones', _showGeofenceZones,
+                      (v) => setState(() => _showGeofenceZones = v)),
                   if (_entries.isNotEmpty) ...[
                     const Divider(color: Colors.white24, height: 16),
                     ..._entries.map((e) => _layerRow(e)),

@@ -188,16 +188,16 @@ void main() {
 
       // We test the threshold logic by examining the haversine distances
       // relative to the approaching threshold = radius * 2.0.
-      final approachingThreshold = radius * 2.0;
+      const approachingThreshold = radius * 2.0;
       expect(approachingThreshold, 200.0);
 
       // 150 m away from a 100 m zone: inside approaching band.
-      final distApproaching = 150.0;
+      const distApproaching = 150.0;
       expect(distApproaching > radius, isTrue);
       expect(distApproaching <= approachingThreshold, isTrue);
 
       // 250 m away: outside approaching band.
-      final distOutside = 250.0;
+      const distOutside = 250.0;
       expect(distOutside > approachingThreshold, isTrue);
     });
 

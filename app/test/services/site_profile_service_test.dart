@@ -84,7 +84,7 @@ void main() {
   // ---------------------------------------------------------------------------
 
   group('SiteProfileWithHistory', () {
-    SiteProfileWithHistory _makeSite({
+    SiteProfileWithHistory makeSite({
       List<DeploymentRecord> deployments = const [],
     }) =>
         SiteProfileWithHistory(
@@ -95,7 +95,7 @@ void main() {
         );
 
     test('peakPpvAllTime returns 0.0 for empty deployments', () {
-      expect(_makeSite().peakPpvAllTime, 0.0);
+      expect(makeSite().peakPpvAllTime, 0.0);
     });
 
     test('peakPpvAllTime returns max across deployments', () {
@@ -122,7 +122,7 @@ void main() {
           peakPpv: 0.5,
         ),
       ];
-      expect(_makeSite(deployments: deploys).peakPpvAllTime, 3.7);
+      expect(makeSite(deployments: deploys).peakPpvAllTime, 3.7);
     });
 
     test('totalMonitoringTime sums completed deployment durations', () {
@@ -146,7 +146,7 @@ void main() {
           deviceId: 'x',
         ),
       ];
-      final site = _makeSite(deployments: deploys);
+      final site = makeSite(deployments: deploys);
       expect(site.totalMonitoringTime, const Duration(hours: 5));
     });
 
@@ -156,7 +156,7 @@ void main() {
         startTime: DateTime(2026, 3),
         deviceId: 'dev',
       );
-      final site = _makeSite(deployments: [active]);
+      final site = makeSite(deployments: [active]);
       expect(site.hasActiveDeployment, isTrue);
       expect(site.activeDeployment?.id, 'da');
     });
@@ -168,7 +168,7 @@ void main() {
         endTime: DateTime(2026, 1, 2),
         deviceId: 'dev',
       );
-      final site = _makeSite(deployments: [closed]);
+      final site = makeSite(deployments: [closed]);
       expect(site.hasActiveDeployment, isFalse);
       expect(site.activeDeployment, isNull);
     });

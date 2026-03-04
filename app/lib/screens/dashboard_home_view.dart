@@ -660,7 +660,7 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
                 label: 'Peak PPV',
                 value: _sessionStatsLoading
                     ? '...'
-                    : '${_peakPpvToday.toStringAsFixed(2)}',
+                    : _peakPpvToday.toStringAsFixed(2),
                 color: const Color(0xFFFFC107),
               ),
             ),
@@ -1047,7 +1047,7 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
+                      const Text(
                         'Total Events',
                         style: TextStyle(
                           color: Colors.white38,
@@ -1070,7 +1070,7 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
+                      const Text(
                         'Peak PPV',
                         style: TextStyle(
                           color: Colors.white38,
@@ -1093,7 +1093,7 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
+                      const Text(
                         'Time Since',
                         style: TextStyle(
                           color: Colors.white38,

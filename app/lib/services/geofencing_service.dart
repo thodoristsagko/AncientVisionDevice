@@ -307,7 +307,7 @@ class GeofencingService {
     for (final zone in _zones.values) {
       if (!zone.isActive) continue;
       if (zone.severity != GeofenceSeverity.danger &&
-          zone.severity != GeofenceSeverity.critical) continue;
+          zone.severity != GeofenceSeverity.critical) { continue; }
       final dist = _distanceMeters(location, zone.center);
       if (dist <= zone.radiusMeters) return true;
     }
