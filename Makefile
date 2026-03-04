@@ -15,7 +15,8 @@
         ensemble-train gen-precursor hyperparameter-search merge-sessions model-comparison \
         plot-session reset pipeline run-pipeline send-alert simulate-anomaly \
         threshold-optimize train-autoencoder training-smoke visualize-features visualize-latent \
-        field-report calibrate drift-check retrain-advisor
+        field-report calibrate drift-check retrain-advisor \
+        session-risk ppv-trend
 
 # ---------------------------------------------------------------------------
 # Help
@@ -113,6 +114,8 @@ help:
 	@echo "  calibrate             Interactive device calibration"
 	@echo "  drift-check           Check for data drift between collected data and training baseline"
 	@echo "  retrain-advisor       Evaluate whether ML model retraining is recommended"
+	@echo "  session-risk          Generate per-session risk assessment report"
+	@echo "  ppv-trend             Analyze PPV trend acceleration in field data"
 	@echo ""
 
 
@@ -774,3 +777,9 @@ drift-check: ## Check for data drift between collected data and training baselin
 
 retrain-advisor: ## Evaluate whether ML model retraining is recommended
 	python scripts/retrain_advisor.py
+
+session-risk: ## Generate per-session risk assessment report
+	python scripts/session_risk_report.py
+
+ppv-trend: ## Analyze PPV trend acceleration in field data
+	python scripts/ppv_trend_analysis.py

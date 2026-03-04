@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
+import 'inference_timing_service.dart';
 
 /// Classifies vibration patterns into precursor categories.
 class PrecursorClassifierService {
@@ -12,6 +13,7 @@ class PrecursorClassifierService {
   List<double> _scalerMean = [];
   List<double> _scalerStd = [];
   static const int _inputDim = 17;
+  String _modelFingerprint = '';
 
   // Error tracking for inference health monitoring
   String? _lastError;
@@ -70,10 +72,36 @@ class PrecursorClassifierService {
 
   Future<bool> initialize() async {
     try {
-      _interpreter = await Interpreter.fromAsset('ml/precursor_classifier.tflite');
+      // Load raw bytes first to compute fingerprint before building the interpreter.
+      final modelBytes = await rootBundle.load('assets/ml/precursor_classifier.tflite');
+      final byteList = modelBytes.buffer.asUint8List();
+      final modelByteLen = byteList.length;
+      final prefix = byteList.sublist(0, byteList.length < 16 ? byteList.length : 16);
+      final prefixHex = prefix.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+      _modelFingerprint = '${modelByteLen}_$prefixHex';
+      if (kDebugMode) {
+        debugPrint('[ML] PrecursorClassifier: model loaded $modelByteLen bytes, fingerprint=$_modelFingerprint');
+      }
+
+      _interpreter = Interpreter.fromBuffer(byteList);
+
       final configJson = await rootBundle.loadString('assets/ml/precursor_classifier_config.json');
       final config = jsonDecode(configJson) as Map<String, dynamic>;
       _classNames = (config['class_names'] as List).map((e) => e.toString()).toList();
+
+      // P70: fingerprint check against config (if present)
+      final expectedFingerprint = config['model_fingerprint']?.toString();
+      if (expectedFingerprint != null && expectedFingerprint.isNotEmpty) {
+        if (_modelFingerprint != expectedFingerprint) {
+          if (kDebugMode) {
+            debugPrint('[WARNING] PrecursorClassifier: model fingerprint mismatch '
+                '— model may have changed. '
+                'Expected=$expectedFingerprint actual=$_modelFingerprint');
+          }
+        } else {
+          if (kDebugMode) debugPrint('[ML] PrecursorClassifier: fingerprint OK');
+        }
+      }
 
       // Load scaler for input normalization
       try {
@@ -135,7 +163,10 @@ class PrecursorClassifierService {
                   : raw[i])
           : raw;
       final outputTensor = [List<double>.filled(_classNames.length, 0.0)];
+      final inferenceSw = Stopwatch()..start();
       _interpreter!.run([input], outputTensor);
+      inferenceSw.stop();
+      InferenceTimingService.instance.record(inferenceSw.elapsedMilliseconds.toDouble());
 
       final probs = outputTensor[0];
       int maxIdx = 0;

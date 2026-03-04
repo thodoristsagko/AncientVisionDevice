@@ -204,6 +204,10 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
   Timer? _uiRefreshTimer; // Throttled UI refresh at fixed rate
   bool _uiDirty = false; // Flag: new data arrived since last refresh
 
+  // Connection attempt timeout feedback — show "Still connecting..." after 5 s
+  bool _connectingSlowly = false; // ignore: unused_field
+  Timer? _connectingSlowTimer;
+
   // Simple/Detailed view mode toggle (simple by default for archaeologist UX)
   bool _simpleMode = true;
   bool _hasReceivedVibData = false; // Latches true once PPV/RMS data arrives
@@ -325,6 +329,7 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
     _uiRefreshTimer?.cancel();
     _staleTimer?.cancel();
     _sessionTimer?.cancel();
+    _connectingSlowTimer?.cancel();
     _dspService.dispose();
     _anomalyService.dispose();
     super.dispose();
@@ -524,9 +529,18 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
     debugPrint('>>> _connectToDevice START: ${device.remoteId}');
     setState(() {
       _isConnecting = true;
+      _connectingSlowly = false;
       _connectionStatus = 'Connecting...';
     });
     _reconnectTimer?.cancel();
+
+    // After 5 s without a connection, surface "Still connecting..." to the user.
+    _connectingSlowTimer?.cancel();
+    _connectingSlowTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted && _isConnecting) {
+        setState(() => _connectingSlowly = true);
+      }
+    });
 
     try {
       await device.connect(
@@ -534,11 +548,13 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
         autoConnect: false,
       );
       debugPrint('>>> device.connect() SUCCEEDED');
+      _connectingSlowTimer?.cancel();
 
       setState(() {
         _connectedDevice = device;
         _isConnecting = false;
         _isScanning = false;
+        _connectingSlowly = false;
         _connectionStatus = 'Connected';
         _reconnectAttempts = 0;
         _isReconnecting = false;
@@ -590,9 +606,11 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
 
       await _discoverAndSubscribe(device);
     } catch (e) {
+      _connectingSlowTimer?.cancel();
       if (mounted) {
         setState(() {
           _isConnecting = false;
+          _connectingSlowly = false;
           _connectionStatus = 'Connection failed';
         });
         // Auto-retry with exponential backoff
@@ -2134,6 +2152,34 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
                           ),
                         ],
                       ),
+                      // Connection attempt slow feedback — shown when connect takes >5 s
+                      if (_connectingSlowly) ...[
+                        const SizedBox(height: 4),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            SizedBox(
+                              width: 10,
+                              height: 10,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 1.5,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  Colors.amber.withAlpha(200),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              'Still connecting — please wait\u2026',
+                              style: TextStyle(
+                                color: Colors.amber.withAlpha(200),
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+
                       const SizedBox(height: 4),
 
                       // Action row

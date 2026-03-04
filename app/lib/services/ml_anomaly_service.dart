@@ -7,6 +7,7 @@ import 'package:tflite_flutter/tflite_flutter.dart';
 import 'dart:io';
 import '../models/site_profile.dart';
 import '../utils/circular_buffer.dart';
+import 'inference_timing_service.dart';
 
 /// Manages the autoencoder TFLite model for anomaly detection.
 ///
@@ -28,6 +29,7 @@ class MlAnomalyService {
   double _thresholdLow = 1.0;
   double _thresholdHigh = 2.5;
   String _modelVersion = 'unknown';
+  String _modelFingerprint = '';
 
   bool _isCalibrating = false;
   final List<List<double>> _calibrationSamples = [];
@@ -89,7 +91,20 @@ class MlAnomalyService {
 
   Future<bool> initialize() async {
     try {
-      _interpreter = await Interpreter.fromAsset('ml/vibration_anomaly.tflite');
+      // Load raw bytes first so we can compute a fingerprint before building the interpreter.
+      final modelBytes = await rootBundle.load('assets/ml/vibration_anomaly.tflite');
+      final byteList = modelBytes.buffer.asUint8List();
+      final modelByteLen = byteList.length;
+      // Fingerprint: byte length + hex of first 16 bytes
+      final prefix = byteList.sublist(0, byteList.length < 16 ? byteList.length : 16);
+      final prefixHex = prefix.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+      _modelFingerprint = '${modelByteLen}_$prefixHex';
+      if (kDebugMode) {
+        debugPrint('[ML] MlAnomalyService: model loaded $modelByteLen bytes, fingerprint=$_modelFingerprint');
+      }
+
+      _interpreter = Interpreter.fromBuffer(byteList);
+
       final scalerJson = await rootBundle.loadString('assets/ml/vibration_scaler.json');
       final scaler = jsonDecode(scalerJson) as Map<String, dynamic>;
       _scalerMean = (scaler['mean'] as List).map((e) => (e as num).toDouble()).toList();
@@ -101,6 +116,20 @@ class MlAnomalyService {
       final thresholds = config['thresholds'] as Map<String, dynamic>? ?? {};
       _thresholdLow = (thresholds['threshold_low'] as num?)?.toDouble() ?? 1.0;
       _thresholdHigh = (thresholds['threshold_high'] as num?)?.toDouble() ?? 2.5;
+
+      // P70: fingerprint check against config (if present)
+      final expectedFingerprint = config['model_fingerprint']?.toString();
+      if (expectedFingerprint != null && expectedFingerprint.isNotEmpty) {
+        if (_modelFingerprint != expectedFingerprint) {
+          if (kDebugMode) {
+            debugPrint('[WARNING] MlAnomalyService: model fingerprint mismatch '
+                '— model may have changed. '
+                'Expected=$expectedFingerprint actual=$_modelFingerprint');
+          }
+        } else {
+          if (kDebugMode) debugPrint('[ML] MlAnomalyService: fingerprint OK');
+        }
+      }
 
       // Validate scaler dimensions match model input
       if (_scalerMean.length != inputDim || _scalerStd.length != inputDim) {
@@ -145,7 +174,10 @@ class MlAnomalyService {
       }
       final inputTensor = [input];
       final outputTensor = [List<double>.filled(inputDim, 0.0)];
+      final inferenceSw = Stopwatch()..start();
       _interpreter!.run(inputTensor, outputTensor);
+      inferenceSw.stop();
+      InferenceTimingService.instance.record(inferenceSw.elapsedMilliseconds.toDouble());
 
       double mse = 0;
       for (int i = 0; i < inputDim; i++) {

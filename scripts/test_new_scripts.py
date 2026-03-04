@@ -1510,3 +1510,491 @@ class TestTrainingPipelineDryRun:
         assert result.returncode in (0, 1), (
             f"Unexpected exit code: {result.returncode}. Output: {combined!r}"
         )
+
+
+# ===========================================================================
+# TestSensorNoiseFloor
+# ===========================================================================
+
+class TestSensorNoiseFloor:
+    """Tests for sensor_noise_floor.py."""
+
+    def _run(self, args):
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "sensor_noise_floor.py")] + args,
+            capture_output=True,
+            text=True,
+        )
+
+    def _noise_row(self, ppv: float, ax: float, ay: float, az: float,
+                   device_id: str = "dev-A") -> dict:
+        return {
+            "device_id": device_id,
+            "timestamp": "2026-03-03T10:00:00Z",
+            "ppv": str(ppv),
+            "ax": str(ax),
+            "ay": str(ay),
+            "az": str(az),
+        }
+
+    def test_no_data(self, tmp_path):
+        """Exits 0 gracefully when directory is empty."""
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        result = self._run(["--data-dir", str(empty_dir)])
+        assert result.returncode == 0, (
+            f"Expected exit 0 on empty dir, got {result.returncode}. "
+            f"stdout: {result.stdout} stderr: {result.stderr}"
+        )
+
+    def test_low_noise(self, tmp_path):
+        """Clean sensor with low noise shows OK status."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        # Write quiet samples with tiny accelerometer values (0.005 g — within MEMS range)
+        rows = [self._noise_row(ppv=0.001, ax=0.005, ay=0.004, az=0.006)
+                for _ in range(20)]
+        _write_csv(data_dir / "session.csv", rows)
+
+        result = self._run(["--data-dir", str(data_dir)])
+        assert result.returncode == 0, (
+            f"Expected exit 0, got {result.returncode}. "
+            f"stdout: {result.stdout} stderr: {result.stderr}"
+        )
+        combined = result.stdout + result.stderr
+        assert "OK" in combined, f"Expected OK status for low-noise sensor: {combined!r}"
+        assert "FLAGGED" not in combined, (
+            f"Should not flag low-noise sensor: {combined!r}"
+        )
+
+    def test_high_noise(self, tmp_path):
+        """Noisy sensor (RMS > 0.05 g in quiet state) gets FLAGGED."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        # quiet ppv but very high accelerometer noise (0.1 g — above 0.05g threshold)
+        rows = [self._noise_row(ppv=0.001, ax=0.1, ay=0.12, az=0.09)
+                for _ in range(20)]
+        _write_csv(data_dir / "session.csv", rows)
+
+        result = self._run(["--data-dir", str(data_dir)])
+        assert result.returncode == 0, (
+            f"Expected exit 0, got {result.returncode}. "
+            f"stdout: {result.stdout} stderr: {result.stderr}"
+        )
+        combined = result.stdout + result.stderr
+        assert "FLAGGED" in combined, (
+            f"Expected FLAGGED for high-noise sensor: {combined!r}"
+        )
+        assert "RECOMMENDATION" in combined or "recommend" in combined.lower(), (
+            f"Expected recommendation message for flagged device: {combined!r}"
+        )
+
+
+# ===========================================================================
+# TestEventDurationAnalysis
+# ===========================================================================
+
+class TestEventDurationAnalysis:
+    """Tests for event_duration_analysis.py."""
+
+    def _run(self, args):
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "event_duration_analysis.py")] + args,
+            capture_output=True,
+            text=True,
+        )
+
+    def _event_row(self, timestamp: str, ppv: float, device_id: str = "dev-A") -> dict:
+        return {
+            "device_id": device_id,
+            "timestamp": timestamp,
+            "ppv": str(ppv),
+            "rms": str(ppv * 0.7),
+        }
+
+    def test_no_data(self, tmp_path):
+        """Exits 0 gracefully when directory is empty."""
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        result = self._run(["--data-dir", str(empty_dir)])
+        assert result.returncode == 0, (
+            f"Expected exit 0 on empty dir, got {result.returncode}. "
+            f"stdout: {result.stdout} stderr: {result.stderr}"
+        )
+
+    def test_impulsive_event(self, tmp_path):
+        """Short event (< 1s total) classified as IMPULSIVE."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        # 3 readings within 0.5 seconds total — impulsive
+        rows = [
+            self._event_row("2026-03-03T10:00:00.000Z", ppv=0.5),
+            self._event_row("2026-03-03T10:00:00.200Z", ppv=0.8),
+            self._event_row("2026-03-03T10:00:00.450Z", ppv=0.3),
+        ]
+        _write_csv(data_dir / "session.csv", rows)
+
+        result = self._run(["--data-dir", str(data_dir), "--min-ppv", "0.1"])
+        assert result.returncode == 0, (
+            f"Expected exit 0, got {result.returncode}. "
+            f"stdout: {result.stdout} stderr: {result.stderr}"
+        )
+        combined = result.stdout + result.stderr
+        assert "IMPULSIVE" in combined, (
+            f"Expected IMPULSIVE classification for short event: {combined!r}"
+        )
+
+    def test_sustained_event(self, tmp_path):
+        """Long event (> 5s total) classified as SUSTAINED."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        # 7 readings spanning 6 seconds — sustained
+        base_ts = [
+            "2026-03-03T10:00:00Z",
+            "2026-03-03T10:00:01Z",
+            "2026-03-03T10:00:02Z",
+            "2026-03-03T10:00:03Z",
+            "2026-03-03T10:00:04Z",
+            "2026-03-03T10:00:05Z",
+            "2026-03-03T10:00:06Z",
+        ]
+        rows = [self._event_row(ts, ppv=0.3) for ts in base_ts]
+        _write_csv(data_dir / "session.csv", rows)
+
+        result = self._run(["--data-dir", str(data_dir), "--min-ppv", "0.1"])
+        assert result.returncode == 0, (
+            f"Expected exit 0, got {result.returncode}. "
+            f"stdout: {result.stdout} stderr: {result.stderr}"
+        )
+        combined = result.stdout + result.stderr
+        assert "SUSTAINED" in combined, (
+            f"Expected SUSTAINED classification for long event: {combined!r}"
+        )
+
+
+# ===========================================================================
+# session_risk_report tests
+# ===========================================================================
+
+def _make_risk_csv(path: Path, rows: list) -> None:
+    """Write list-of-dicts as CSV for session_risk_report tests."""
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _risk_row(ts: datetime, ppv: float, anomaly_level: str = "normal") -> dict:
+    """Single CSV row for session_risk_report tests."""
+    return {
+        "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ppv": str(ppv),
+        "rms": str(ppv * 0.7),
+        "anomaly_level": anomaly_level,
+        "device_id": "test-device",
+    }
+
+
+class TestSessionRiskReport:
+    """Tests for session_risk_report.py."""
+
+    def _run(self, args: list) -> "subprocess.CompletedProcess":
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "session_risk_report.py")] + args,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_no_data(self, tmp_path):
+        """Empty data dir exits 0 and prints 'No sessions found'."""
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        result = self._run(["--data-dir", str(empty_dir)])
+        assert result.returncode == 0
+        assert "No sessions found" in result.stdout
+
+    def test_single_session(self, tmp_path):
+        """Consecutive readings produce exactly one session."""
+        import session_risk_report as srr
+
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_risk_row(base_ts + timedelta(seconds=i * 5), 0.05) for i in range(20)]
+        _make_risk_csv(tmp_path / "session.csv", rows)
+
+        all_rows = srr.load_csv_files(str(tmp_path))
+        sessions = srr.group_sessions(all_rows, session_gap_s=300)
+        assert len(sessions) == 1
+
+    def test_multiple_sessions(self, tmp_path):
+        """Gap > session_gap between readings splits into 2 sessions."""
+        import session_risk_report as srr
+
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        # First block: 10 readings every 5 seconds
+        rows1 = [_risk_row(base_ts + timedelta(seconds=i * 5), 0.05) for i in range(10)]
+        # Second block starts 600s later (> default 300s gap)
+        gap_start = base_ts + timedelta(seconds=600)
+        rows2 = [_risk_row(gap_start + timedelta(seconds=i * 5), 0.05) for i in range(10)]
+        _make_risk_csv(tmp_path / "session.csv", rows1 + rows2)
+
+        all_rows = srr.load_csv_files(str(tmp_path))
+        sessions = srr.group_sessions(all_rows, session_gap_s=300)
+        assert len(sessions) == 2
+
+    def test_risk_levels(self, tmp_path):
+        """PPV > 1.0 → HIGH risk; < 0.3 → LOW risk."""
+        import session_risk_report as srr
+
+        # LOW risk session
+        assert srr._ppv_risk_level(0.1) == "LOW"
+        # MEDIUM risk session
+        assert srr._ppv_risk_level(0.5) == "MEDIUM"
+        # HIGH risk session
+        assert srr._ppv_risk_level(1.5) == "HIGH"
+
+    def test_output_contains_table(self, tmp_path):
+        """Report with data prints a table containing 'Risk' and 'MaxPPV'."""
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_risk_row(base_ts + timedelta(seconds=i * 5), 0.05) for i in range(20)]
+        _make_risk_csv(tmp_path / "session.csv", rows)
+
+        result = self._run(["--data-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "Risk" in result.stdout
+        assert "MaxPPV" in result.stdout
+
+    def test_summary_line_present(self, tmp_path):
+        """Summary line with session counts is printed."""
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_risk_row(base_ts + timedelta(seconds=i * 5), 0.05) for i in range(20)]
+        _make_risk_csv(tmp_path / "session.csv", rows)
+
+        result = self._run(["--data-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "Total:" in result.stdout
+        assert "sessions" in result.stdout
+
+    def test_high_risk_appears_first(self, tmp_path):
+        """HIGH-risk sessions appear before LOW-risk ones in output."""
+        import session_risk_report as srr
+
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+
+        # Session 1: LOW risk (PPV 0.05), readings every 5s
+        rows1 = [_risk_row(base_ts + timedelta(seconds=i * 5), 0.05) for i in range(10)]
+        # Session 2: HIGH risk (PPV 2.0), starts 600s later
+        gap_start = base_ts + timedelta(seconds=600)
+        rows2 = [_risk_row(gap_start + timedelta(seconds=i * 5), 2.0) for i in range(10)]
+        _make_risk_csv(tmp_path / "session.csv", rows1 + rows2)
+
+        all_rows = srr.load_csv_files(str(tmp_path))
+        sessions = srr.group_sessions(all_rows, session_gap_s=300)
+        records = srr.build_session_records(sessions)
+        sorted_records = srr.sort_records(records)
+
+        assert sorted_records[0]["risk_level"] == "HIGH"
+        assert sorted_records[-1]["risk_level"] == "LOW"
+
+    def test_alert_count_increments(self, tmp_path):
+        """Rows with non-normal anomaly_level are counted as alerts."""
+        import session_risk_report as srr
+
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [
+            _risk_row(base_ts + timedelta(seconds=i * 5),
+                      0.05,
+                      "soil_creep" if i < 5 else "normal")
+            for i in range(10)
+        ]
+        _make_risk_csv(tmp_path / "session.csv", rows)
+
+        all_rows = srr.load_csv_files(str(tmp_path))
+        sessions = srr.group_sessions(all_rows, session_gap_s=300)
+        assert len(sessions) == 1
+        assert sessions[0]["alert_count"] == 5
+
+    def test_session_gap_argument(self, tmp_path):
+        """--session-gap 60 splits readings with 120s gap into 2 sessions."""
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows1 = [_risk_row(base_ts + timedelta(seconds=i * 5), 0.05) for i in range(5)]
+        gap_start = base_ts + timedelta(seconds=200)  # 200s gap > 60, but < 300
+        rows2 = [_risk_row(gap_start + timedelta(seconds=i * 5), 0.05) for i in range(5)]
+        _make_risk_csv(tmp_path / "session.csv", rows1 + rows2)
+
+        result = self._run(["--data-dir", str(tmp_path), "--session-gap", "60"])
+        assert result.returncode == 0
+        # Should show 2 sessions in summary
+        assert "2 sessions" in result.stdout
+
+
+# ===========================================================================
+# ppv_trend_analysis tests
+# ===========================================================================
+
+def _make_trend_csv(path: Path, rows: list) -> None:
+    """Write list-of-dicts as CSV for ppv_trend_analysis tests."""
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _trend_row(ts: datetime, ppv: float) -> dict:
+    """Single CSV row for ppv_trend_analysis tests."""
+    return {
+        "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ppv": str(ppv),
+        "rms": str(ppv * 0.7),
+        "device_id": "test-device",
+    }
+
+
+class TestPpvTrendAnalysis:
+    """Tests for ppv_trend_analysis.py."""
+
+    def _run(self, args: list) -> "subprocess.CompletedProcess":
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "ppv_trend_analysis.py")] + args,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_no_data(self, tmp_path):
+        """Empty data dir exits 0 gracefully."""
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        result = self._run(["--data-dir", str(empty_dir)])
+        assert result.returncode == 0
+        assert "No data found" in result.stdout
+
+    def test_stable_trend(self, tmp_path):
+        """Constant PPV across all windows → STABLE trend."""
+        import ppv_trend_analysis as pta
+
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        # 60 readings, one per minute, constant PPV=0.05
+        rows = [_trend_row(base_ts + timedelta(minutes=i), 0.05) for i in range(60)]
+        _make_trend_csv(tmp_path / "session.csv", rows)
+
+        all_rows = pta.load_csv_files(str(tmp_path))
+        series = pta.prepare_series(all_rows)
+        window_means = pta.compute_window_means(series, window_s=10 * 60)
+        trend = pta.classify_trend(window_means)
+        assert trend == "STABLE"
+
+    def test_accelerating_trend(self, tmp_path):
+        """Doubling PPV each window → ACCELERATING trend."""
+        import ppv_trend_analysis as pta
+
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        # 5 windows of 10 min each, PPV doubles every window: 0.1, 0.2, 0.4, 0.8, 1.6
+        rows = []
+        for window_i, ppv in enumerate([0.1, 0.2, 0.4, 0.8, 1.6]):
+            for minute in range(10):
+                ts = base_ts + timedelta(minutes=window_i * 10 + minute)
+                rows.append(_trend_row(ts, ppv))
+        _make_trend_csv(tmp_path / "session.csv", rows)
+
+        all_rows = pta.load_csv_files(str(tmp_path))
+        series = pta.prepare_series(all_rows)
+        window_means = pta.compute_window_means(series, window_s=10 * 60)
+        trend = pta.classify_trend(window_means)
+        assert trend == "ACCELERATING"
+
+    def test_increasing_trend(self, tmp_path):
+        """Slowly rising PPV → INCREASING trend (not ACCELERATING)."""
+        import ppv_trend_analysis as pta
+
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        # 5 windows, PPV rises 10% each time: 0.1, 0.11, 0.121, 0.133, 0.146
+        rows = []
+        ppv = 0.1
+        for window_i in range(5):
+            for minute in range(10):
+                ts = base_ts + timedelta(minutes=window_i * 10 + minute)
+                rows.append(_trend_row(ts, ppv))
+            ppv *= 1.10  # 10% increase < 20% ACCELERATING threshold
+        _make_trend_csv(tmp_path / "session.csv", rows)
+
+        all_rows = pta.load_csv_files(str(tmp_path))
+        series = pta.prepare_series(all_rows)
+        window_means = pta.compute_window_means(series, window_s=10 * 60)
+        trend = pta.classify_trend(window_means)
+        assert trend == "INCREASING"
+
+    def test_output_contains_chart(self, tmp_path):
+        """With data, output contains ASCII chart markers and trend summary."""
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_trend_row(base_ts + timedelta(minutes=i), 0.05) for i in range(60)]
+        _make_trend_csv(tmp_path / "session.csv", rows)
+
+        result = self._run(["--data-dir", str(tmp_path), "--window", "10"])
+        assert result.returncode == 0
+        assert "Trend:" in result.stdout
+        # Chart has time axis
+        assert "Time -->" in result.stdout
+
+    def test_accelerating_warning_in_output(self, tmp_path):
+        """ACCELERATING trend prints a WARNING line in output."""
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = []
+        for window_i, ppv in enumerate([0.1, 0.2, 0.4, 0.8, 1.6]):
+            for minute in range(10):
+                ts = base_ts + timedelta(minutes=window_i * 10 + minute)
+                rows.append(_trend_row(ts, ppv))
+        _make_trend_csv(tmp_path / "session.csv", rows)
+
+        result = self._run(["--data-dir", str(tmp_path), "--window", "10"])
+        assert result.returncode == 0
+        assert "ACCELERATING" in result.stdout
+        assert "WARNING" in result.stdout
+
+    def test_classify_trend_single_window(self, tmp_path):
+        """Single window returns STABLE (no change to compare)."""
+        import ppv_trend_analysis as pta
+
+        # Only 5 readings, all within one window
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_trend_row(base_ts + timedelta(seconds=i * 30), 0.5) for i in range(5)]
+        _make_trend_csv(tmp_path / "session.csv", rows)
+
+        all_rows = pta.load_csv_files(str(tmp_path))
+        series = pta.prepare_series(all_rows)
+        # Very large window → all in one bucket
+        window_means = pta.compute_window_means(series, window_s=3600)
+        trend = pta.classify_trend(window_means)
+        assert trend == "STABLE"
+
+    def test_decreasing_trend(self, tmp_path):
+        """Steadily falling PPV → DECREASING trend."""
+        import ppv_trend_analysis as pta
+
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = []
+        ppv = 1.0
+        for window_i in range(5):
+            for minute in range(10):
+                ts = base_ts + timedelta(minutes=window_i * 10 + minute)
+                rows.append(_trend_row(ts, ppv))
+            ppv *= 0.85  # 15% decrease per window
+        _make_trend_csv(tmp_path / "session.csv", rows)
+
+        all_rows = pta.load_csv_files(str(tmp_path))
+        series = pta.prepare_series(all_rows)
+        window_means = pta.compute_window_means(series, window_s=10 * 60)
+        trend = pta.classify_trend(window_means)
+        assert trend == "DECREASING"
+
+    def test_cli_help(self, tmp_path):
+        """--help flag exits with 0."""
+        result = subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "ppv_trend_analysis.py"), "--help"],
+            capture_output=True, text=True
+        )
+        assert result.returncode == 0
