@@ -537,6 +537,143 @@ def create_app():
         ]
         return Response("\n".join(lines), mimetype="text/plain; version=0.0.4")
 
+    # --- Sessions endpoints ---
+
+    sessions_dir = data_dir / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    SESSION_REQUIRED_FIELDS = ["device_id", "start_time", "end_time"]
+    SESSION_CSV_HEADER = [
+        "session_id", "device_id", "start_time", "end_time",
+        "duration_min", "peak_ppv", "sample_count", "anomaly_events",
+    ]
+
+    @app.route("/sessions", methods=["POST"])
+    def ingest_session():
+        """Accept a session summary from the phone app."""
+        body = request.get_json(silent=True) or {}
+
+        missing = [f for f in SESSION_REQUIRED_FIELDS if f not in body]
+        if missing:
+            jlog("warning", "session_rejected", reason="missing_fields", missing=missing)
+            return jsonify({"error": f"missing fields: {missing}"}), 400
+
+        device_id = body["device_id"]
+        now_ts = datetime.now(timezone.utc)
+        timestamp_str = now_ts.strftime("%Y%m%dT%H%M%S%f")
+        session_id = f"session_{device_id}_{timestamp_str}"
+        filename = f"{session_id}.json"
+
+        session_data = {
+            "session_id": session_id,
+            "device_id": device_id,
+            "start_time": body["start_time"],
+            "end_time": body["end_time"],
+            "peak_ppv": body.get("peak_ppv"),
+            "sample_count": body.get("sample_count"),
+            "anomaly_events": body.get("anomaly_events"),
+            "session_export": body.get("session_export"),
+            "received_at": now_ts.isoformat(),
+        }
+
+        session_path = sessions_dir / filename
+        try:
+            session_path.write_text(json.dumps(session_data, indent=2))
+        except Exception as exc:
+            jlog("warning", "session_write_error", session_id=session_id, error=str(exc))
+            return jsonify({"error": "failed to store session"}), 500
+
+        jlog("info", "session_ingested", session_id=session_id, device_id=device_id)
+        return jsonify({"status": "ok", "session_id": session_id})
+
+    @app.route("/sessions", methods=["GET"])
+    def list_sessions():
+        """Return list of session summaries (one per JSON file in sessions/ directory)."""
+        summaries = []
+        for session_path in sorted(sessions_dir.glob("session_*.json")):
+            try:
+                raw = json.loads(session_path.read_text())
+                # Return summary without the (potentially large) session_export
+                summaries.append({k: raw.get(k) for k in [
+                    "session_id", "device_id", "start_time", "end_time",
+                    "peak_ppv", "sample_count", "anomaly_events", "received_at",
+                ]})
+            except Exception as exc:
+                jlog("warning", "session_read_error", file=session_path.name, error=str(exc))
+
+        return jsonify({"sessions": summaries, "count": len(summaries)})
+
+    @app.route("/sessions/<session_id>", methods=["GET"])
+    def get_session(session_id):
+        """Return the full session JSON for a specific session."""
+        # Prevent path traversal
+        if ".." in session_id or "/" in session_id or "\\" in session_id:
+            return jsonify({"error": "invalid session_id"}), 400
+
+        session_path = sessions_dir / f"{session_id}.json"
+        if not session_path.exists():
+            return jsonify({"error": "session not found"}), 404
+
+        try:
+            data = json.loads(session_path.read_text())
+        except Exception as exc:
+            jlog("warning", "session_read_error", file=session_path.name, error=str(exc))
+            return jsonify({"error": "failed to read session"}), 500
+
+        return jsonify(data)
+
+    @app.route("/sessions/export", methods=["GET"])
+    def export_sessions():
+        """Return all sessions as a CSV download."""
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        filename = f"sessions_{date_str}.csv"
+
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=SESSION_CSV_HEADER, extrasaction="ignore")
+        header_written = False
+
+        for session_path in sorted(sessions_dir.glob("session_*.json")):
+            try:
+                raw = json.loads(session_path.read_text())
+
+                # Compute duration_min from start_time and end_time
+                duration_min = None
+                try:
+                    start = datetime.fromisoformat(raw["start_time"].replace("Z", "+00:00"))
+                    end = datetime.fromisoformat(raw["end_time"].replace("Z", "+00:00"))
+                    duration_min = round((end - start).total_seconds() / 60.0, 3)
+                except Exception:
+                    pass
+
+                row = {
+                    "session_id": raw.get("session_id", ""),
+                    "device_id": raw.get("device_id", ""),
+                    "start_time": raw.get("start_time", ""),
+                    "end_time": raw.get("end_time", ""),
+                    "duration_min": duration_min,
+                    "peak_ppv": raw.get("peak_ppv", ""),
+                    "sample_count": raw.get("sample_count", ""),
+                    "anomaly_events": raw.get("anomaly_events", ""),
+                }
+
+                if not header_written:
+                    writer.writeheader()
+                    header_written = True
+                writer.writerow(row)
+
+            except Exception as exc:
+                jlog("warning", "session_export_error", file=session_path.name, error=str(exc))
+
+        if not header_written:
+            writer.writeheader()
+
+        csv_content = buf.getvalue()
+        return Response(
+            csv_content,
+            mimetype="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     # --- Task 7: /export/stream endpoint (NDJSON) ---
 
     @app.route("/export/stream")

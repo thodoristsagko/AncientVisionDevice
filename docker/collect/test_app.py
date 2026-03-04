@@ -241,6 +241,129 @@ def test_quality_returns_json(client):
 # P88: Concurrent CSV write stress test
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Sessions endpoints
+# ---------------------------------------------------------------------------
+
+BASE_SESSION = {
+    "device_id": "m5stick-01",
+    "start_time": "2026-03-04T08:00:00Z",
+    "end_time": "2026-03-04T08:30:00Z",
+    "peak_ppv": 0.42,
+    "sample_count": 450,
+    "anomaly_events": 2,
+    "session_export": [[0.01, 15.0], [0.02, 16.0]],
+}
+
+
+def test_ingest_session_success(client):
+    """POST a valid session — must return 200 with status=ok and a session_id."""
+    c, data_dir = client
+    r = c.post("/sessions", json=BASE_SESSION)
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["status"] == "ok"
+    assert "session_id" in body
+    session_id = body["session_id"]
+    # File must exist on disk
+    session_files = list((data_dir / "sessions").glob("session_*.json"))
+    assert len(session_files) == 1
+    import json
+    stored = json.loads(session_files[0].read_text())
+    assert stored["device_id"] == "m5stick-01"
+    assert stored["peak_ppv"] == 0.42
+    assert stored["session_id"] == session_id
+
+
+def test_ingest_session_missing_fields(client):
+    """POST with missing required fields must return 400."""
+    c, _ = client
+    # Missing start_time and end_time
+    r = c.post("/sessions", json={"device_id": "m5stick-01"})
+    assert r.status_code == 400
+    body = r.get_json()
+    assert "error" in body
+    assert "missing fields" in body["error"]
+
+
+def test_list_sessions(client):
+    """POST two sessions, GET /sessions — both must appear in the list."""
+    c, _ = client
+    session_a = {**BASE_SESSION, "device_id": "dev-a"}
+    session_b = {**BASE_SESSION, "device_id": "dev-b",
+                 "start_time": "2026-03-04T09:00:00Z",
+                 "end_time": "2026-03-04T09:45:00Z"}
+    c.post("/sessions", json=session_a)
+    c.post("/sessions", json=session_b)
+
+    r = c.get("/sessions")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert "sessions" in body
+    assert "count" in body
+    assert body["count"] == 2
+    device_ids = {s["device_id"] for s in body["sessions"]}
+    assert "dev-a" in device_ids
+    assert "dev-b" in device_ids
+    # session_export must not be in the summary
+    for s in body["sessions"]:
+        assert "session_export" not in s
+
+
+def test_get_session(client):
+    """POST a session, retrieve it by session_id — full JSON including session_export."""
+    c, _ = client
+    r = c.post("/sessions", json=BASE_SESSION)
+    session_id = r.get_json()["session_id"]
+
+    r2 = c.get(f"/sessions/{session_id}")
+    assert r2.status_code == 200
+    body = r2.get_json()
+    assert body["session_id"] == session_id
+    assert body["device_id"] == "m5stick-01"
+    assert body["session_export"] == [[0.01, 15.0], [0.02, 16.0]]
+
+
+def test_get_session_not_found(client):
+    """GET /sessions/<nonexistent> must return 404."""
+    c, _ = client
+    r = c.get("/sessions/session_nonexistent_00000000T000000000000")
+    assert r.status_code == 404
+
+
+def test_sessions_export_csv(client):
+    """POST a session, GET /sessions/export — must return valid CSV with correct columns."""
+    c, _ = client
+    c.post("/sessions", json=BASE_SESSION)
+
+    r = c.get("/sessions/export")
+    assert r.status_code == 200
+    assert r.content_type.startswith("text/csv")
+
+    text = r.data.decode("utf-8")
+    lines = [l for l in text.strip().splitlines() if l]
+    # Header + at least one data row
+    assert len(lines) >= 2
+    header = lines[0].split(",")
+    assert "device_id" in header
+    assert "start_time" in header
+    assert "end_time" in header
+    assert "duration_min" in header
+    assert "peak_ppv" in header
+    assert "sample_count" in header
+    assert "anomaly_events" in header
+
+    import csv as csv_mod
+    import io
+    reader = csv_mod.DictReader(io.StringIO(text))
+    rows = list(reader)
+    assert len(rows) >= 1
+    row = rows[0]
+    assert row["device_id"] == "m5stick-01"
+    assert float(row["duration_min"]) == pytest.approx(30.0, abs=0.01)
+    assert float(row["peak_ppv"]) == pytest.approx(0.42, abs=0.001)
+
+
 class TestConcurrentWrites:
 
     def test_concurrent_ingest_no_data_loss(self, tmp_path, monkeypatch):
