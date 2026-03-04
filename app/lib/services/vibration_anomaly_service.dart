@@ -66,6 +66,17 @@ class VibrationAnomalyService {
   Duration _maxInferenceInterval = const Duration(milliseconds: 500); // default 2 Hz
   DateTime _lastInferenceTime = DateTime(2000); // sentinel: always allow first call
 
+  // PPV trend window — last N readings for rising/falling detection
+  static const int _trendWindowSize = 10;
+  final List<double> _ppvTrendWindow = [];
+
+  // Consecutive readings at ANOMALY or above
+  int _consecutiveAnomalyReadings = 0;
+
+  // Duration tracking at current anomaly level
+  AnomalyLevel _currentLevel = AnomalyLevel.normal;
+  DateTime? _levelChangedAt;
+
   // P70: Model fingerprint (sum of first 64 bytes of .tflite file)
   int _modelFingerprint = 0;
 
@@ -87,6 +98,118 @@ class VibrationAnomalyService {
 
   /// P69: Average TFLite inference time in milliseconds.
   double get avgInferenceMs => _avgInferenceMs;
+
+  // ---------------------------------------------------------------------------
+  // PPV trend analysis
+  // ---------------------------------------------------------------------------
+
+  /// PPV trend direction over the last [_trendWindowSize] readings.
+  ///
+  /// Compares the mean of the first half of the window to the mean of the
+  /// second half. Returns 'rising' / 'falling' / 'stable'.
+  String get ppvTrend {
+    if (_ppvTrendWindow.length < 3) return 'stable';
+    final half = _ppvTrendWindow.length ~/ 2;
+    final first = _ppvTrendWindow.sublist(0, half).reduce((a, b) => a + b) / half;
+    final last = _ppvTrendWindow.sublist(half).reduce((a, b) => a + b) /
+        (_ppvTrendWindow.length - half);
+    final delta = last - first;
+    if (delta > 0.05) return 'rising';
+    if (delta < -0.05) return 'falling';
+    return 'stable';
+  }
+
+  /// Rate of change of PPV between the two most recent readings (mm/s per sample).
+  ///
+  /// Positive means PPV is increasing; negative means decreasing.
+  double get ppvRateOfChange {
+    if (_ppvTrendWindow.length < 2) return 0.0;
+    return _ppvTrendWindow.last - _ppvTrendWindow[_ppvTrendWindow.length - 2];
+  }
+
+  // ---------------------------------------------------------------------------
+  // Consecutive anomaly readings
+  // ---------------------------------------------------------------------------
+
+  /// Number of consecutive [detect] calls that returned ANOMALY or above.
+  int get consecutiveAnomalyReadings => _consecutiveAnomalyReadings;
+
+  // ---------------------------------------------------------------------------
+  // Prediction confidence
+  // ---------------------------------------------------------------------------
+
+  /// Confidence in the current anomaly assessment (0.0–1.0).
+  ///
+  /// Scales with the number of consecutive readings that support the current
+  /// level, reaching full confidence at 5+ readings:
+  ///   1 reading  → 0.4
+  ///   3 readings → 0.8
+  ///   5+ readings → 1.0
+  double get predictionConfidence {
+    final n = _consecutiveAnomalyReadings;
+    if (n <= 0) return 0.4; // no anomaly streak — low but non-zero confidence
+    if (n == 1) return 0.4;
+    if (n >= 5) return 1.0;
+    if (n >= 3) {
+      // linear 0.8 → 1.0 from 3 to 5
+      return 0.8 + (n - 3) * (1.0 - 0.8) / (5 - 3);
+    }
+    // linear 0.4 → 0.8 from 1 to 3
+    return 0.4 + (n - 1) * (0.8 - 0.4) / (3 - 1);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Human-readable anomaly description
+  // ---------------------------------------------------------------------------
+
+  /// One-line plain-English description of the current anomaly state.
+  ///
+  /// When a precursor pattern is available (from the last detect result stored
+  /// via [_lastPrecursorPattern]) a pattern-specific suffix is appended.
+  String get anomalyDescription {
+    String base;
+    switch (_currentLevel) {
+      case AnomalyLevel.normal:
+        base = 'Normal background vibration';
+        break;
+      case AnomalyLevel.unusual:
+        base = 'Elevated vibration \u2014 monitoring closely';
+        break;
+      case AnomalyLevel.anomaly:
+        base = 'Anomalous pattern \u2014 alert active';
+        break;
+      case AnomalyLevel.unknown:
+        base = 'Initializing sensor data';
+        break;
+    }
+    final pattern = _lastPrecursorPattern;
+    if (pattern != null && pattern.isNotEmpty) {
+      switch (pattern) {
+        case 'soil_creep':
+          return '$base (soil creep detected)';
+        case 'crack_propagation':
+          return '$base (crack propagation detected)';
+        case 'imminent_failure':
+          return '$base (imminent failure signature)';
+        default:
+          return '$base (pattern: $pattern)';
+      }
+    }
+    return base;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Duration at current anomaly level
+  // ---------------------------------------------------------------------------
+
+  /// How long the service has been at the current [_currentLevel].
+  Duration get durationAtCurrentLevel {
+    if (_levelChangedAt == null) return Duration.zero;
+    return DateTime.now().difference(_levelChangedAt!);
+  }
+
+  // Last precursor pattern from the most recent detect() call (nullable).
+  String? _lastPrecursorPattern;
 
   /// P68: Attempt to re-enable ML inference if it previously failed.
   ///
@@ -224,6 +347,15 @@ class VibrationAnomalyService {
     // ALWAYS feed the adaptive baseline so it keeps learning
     _adaptiveService.updateBaseline(features);
 
+    // Track PPV trend — update window with incoming PPV value
+    final incomingPpv = features['ppv'] ?? 0.0;
+    _ppvTrendWindow.add(incomingPpv);
+    if (_ppvTrendWindow.length > _trendWindowSize) {
+      _ppvTrendWindow.removeAt(0);
+    }
+
+    late AnomalyResult result;
+
     if (!_isInitialized || _interpreter == null || _useRuleBased) {
       // Try adaptive statistical detection first
       final adaptiveResult = _adaptiveService.detect(features);
@@ -241,19 +373,24 @@ class VibrationAnomalyService {
             level = AnomalyLevel.anomaly;
             break;
         }
-        return AnomalyResult(
+        result = AnomalyResult(
           score: adaptiveResult.score,
           level: level,
           rawError: adaptiveResult.rmsZScore,
         );
+      } else {
+        // Still calibrating — fall back to rule-based
+        result = _ruleBasedDetect(features);
       }
-      // Still calibrating — fall back to rule-based
-      return _ruleBasedDetect(features);
+      _updateLevelTracking(result);
+      return result;
     }
 
     // Rate-limit ML inference according to the configured max Hz
     if (!_inferenceAllowed) {
-      return _ruleBasedDetect(features);
+      result = _ruleBasedDetect(features);
+      _updateLevelTracking(result);
+      return result;
     }
     _lastInferenceTime = DateTime.now();
 
@@ -338,7 +475,7 @@ class VibrationAnomalyService {
         }
       }
 
-      return AnomalyResult(
+      result = AnomalyResult(
         score: score.clamp(0.0, 1.0),
         level: level,
         rawError: anomalyScore,
@@ -355,8 +492,29 @@ class VibrationAnomalyService {
         debugPrint('VibrationAnomalyService: Inference error ($e) — '
             'rule-based fallback (failCount=$_ruleBasedFailCount, max=$_maxMlRetries)');
       }
-      return _ruleBasedDetect(features);
+      result = _ruleBasedDetect(features);
     }
+
+    _updateLevelTracking(result);
+    return result;
+  }
+
+  /// Update level-tracking state after each [detect] call.
+  ///
+  /// - Keeps [_currentLevel] in sync and records [_levelChangedAt] on change.
+  /// - Maintains [_consecutiveAnomalyReadings].
+  /// - Caches [_lastPrecursorPattern] for [anomalyDescription].
+  void _updateLevelTracking(AnomalyResult result) {
+    if (result.level != _currentLevel) {
+      _currentLevel = result.level;
+      _levelChangedAt = DateTime.now();
+    }
+    if (result.level == AnomalyLevel.anomaly) {
+      _consecutiveAnomalyReadings++;
+    } else {
+      _consecutiveAnomalyReadings = 0;
+    }
+    _lastPrecursorPattern = result.precursorPattern;
   }
 
   /// Extract vibration features from a BLE data map.
