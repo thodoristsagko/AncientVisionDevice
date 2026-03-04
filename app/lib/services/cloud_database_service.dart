@@ -5,6 +5,16 @@ import 'package:flutter/foundation.dart';
 /// Central service for Firestore cloud database operations
 /// Hybrid approach: Cloud when logged in, local SharedPreferences when not
 /// All user data is stored under users/{userId}/... in Firestore
+///
+/// Connectivity health tracking:
+/// Call `ConnectivityMonitorService.instance.recordFirestoreResult(success: …)`
+/// after each write attempt so the health score and failure counter stay
+/// accurate.  This is intentionally left to callers rather than wired
+/// directly here to avoid a circular service dependency.  Example:
+/// ```dart
+/// await cloudDb.saveProgressStats(data);
+/// ConnectivityMonitorService.instance.recordFirestoreResult(success: true);
+/// ```
 class CloudDatabaseService {
   static final CloudDatabaseService _instance = CloudDatabaseService._internal();
   factory CloudDatabaseService() => _instance;
