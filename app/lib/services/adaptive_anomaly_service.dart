@@ -515,6 +515,7 @@ class AdaptiveAnomalyService {
     // Final score = max of instantaneous, trend, precursor, and change point
     // This way EITHER a sudden event OR a slow buildup OR a physics pattern OR change points triggers
     final finalScore = max(instantScore, max(trendScore, max(precursorScore, changePointScore))).clamp(0.0, 1.0);
+    _lastScore = rmsZ; // store rmsZ (Mahalanobis-like distance) for anomalyProbability
     final isTrendDriven = trendScore > instantScore && trendScore >= precursorScore;
     final isPrecursorDriven = precursorScore > instantScore && precursorScore > trendScore;
 
@@ -696,6 +697,8 @@ class AdaptiveAnomalyService {
     _inverseVelocityHistory.clear();
     _inverseVelocityTimes.clear();
     _lastPsdSlope = null;
+    _lastScore = null;
+    _lastFeatureVector = null;
     if (kDebugMode) {
       debugPrint('AdaptiveAnomalyService: Baseline reset (forces recalibration)');
     }
