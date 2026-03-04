@@ -626,6 +626,17 @@ def test_archive_endpoint_respects_days_threshold(client):
         assert csv_15.exists()  # Should still be there
 
 
+def test_metrics_endpoint(client):
+    """Test /metrics endpoint returns key Prometheus metrics including uptime."""
+    c, _ = client
+    response = c.get("/metrics")
+    assert response.status_code == 200
+    text = response.data.decode()
+    assert "ancientvision_samples_total" in text
+    assert "ancientvision_devices_active" in text
+    assert "ancientvision_uptime_seconds" in text
+
+
 def test_metrics_endpoint_format(client):
     """Test /metrics endpoint returns valid Prometheus format."""
     c, _ = client

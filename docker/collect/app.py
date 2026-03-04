@@ -59,6 +59,9 @@ _config: dict = {
 _rate_limit_hits: int = 0
 _rate_limit_hits_lock = threading.Lock()
 
+# Module-level service start time for uptime metric
+_start_time: float = time.time()
+
 
 def create_app():
     app = Flask(__name__)
@@ -746,6 +749,11 @@ def create_app():
         for device_id in sorted(device_counts.keys()):
             count = device_counts[device_id]
             lines.append(f'ancientvision_samples_by_device{{device_id="{device_id}"}} {count}')
+
+        # Uptime
+        lines.append("# HELP ancientvision_uptime_seconds Service uptime in seconds")
+        lines.append("# TYPE ancientvision_uptime_seconds gauge")
+        lines.append(f"ancientvision_uptime_seconds {(time.time() - _start_time):.1f}")
 
         lines.append("")
         return Response("\n".join(lines), mimetype="text/plain; version=0.0.4")
