@@ -1136,8 +1136,11 @@ class _QuickCaptureScreenState extends State<QuickCaptureScreen> {
   /// Returns color for GPS accuracy: green <10m, amber 10-50m, red >50m.
   Color _gpsAccuracyColor() {
     double acc = double.infinity;
-    if (_gpsLocation != null) acc = _gpsLocation!.accuracy;
-    else if (_currentPosition != null) acc = _currentPosition!.accuracy;
+    if (_gpsLocation != null) {
+      acc = _gpsLocation!.accuracy;
+    } else if (_currentPosition != null) {
+      acc = _currentPosition!.accuracy;
+    }
     if (acc < 10) return AppColors.success;
     if (acc <= 50) return AppColors.warning;
     return AppColors.error;
