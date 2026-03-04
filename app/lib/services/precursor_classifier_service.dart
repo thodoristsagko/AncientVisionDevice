@@ -12,7 +12,19 @@ class PrecursorClassifierService {
   List<double> _scalerStd = [];
   static const int _inputDim = 17;
 
+  // Error tracking for inference health monitoring
+  String? _lastError;
+  bool _lastInferenceSucceeded = true;
+  int _errorCount = 0;
+  static const int _maxErrorCount = 3;
+
   bool get isLoaded => _isLoaded;
+
+  /// Most recent inference error message, or null if last inference succeeded.
+  String? get lastError => _lastError;
+
+  /// True if the last inference completed without error.
+  bool get isHealthy => _lastInferenceSucceeded;
 
   Future<bool> initialize() async {
     try {
@@ -77,13 +89,49 @@ class PrecursorClassifierService {
       for (int i = 1; i < probs.length; i++) {
         if (probs[i] > maxProb) { maxProb = probs[i]; maxIdx = i; }
       }
+
+      // Inference succeeded — clear error state
+      _lastInferenceSucceeded = true;
+      _lastError = null;
+      _errorCount = 0;
+
       return PrecursorResult(
         pattern: _classNames[maxIdx],
         confidence: maxProb.clamp(0.0, 1.0),
         probabilities: Map.fromIterables(_classNames, probs),
       );
     } catch (e) {
-      if (kDebugMode) debugPrint('PrecursorClassifier: inference error: $e');
+      _lastInferenceSucceeded = false;
+      _errorCount++;
+
+      // Categorise error type for actionable diagnostics
+      String errorType;
+      if (e.toString().contains('not allocated') || e.toString().contains('InterpreterNotAllocated')) {
+        errorType = 'interpreter not allocated';
+      } else if (e.toString().contains('shape') || e.toString().contains('dimension')) {
+        errorType = 'input shape mismatch (expected $_inputDim features, '
+            '${_classNames.length} output classes)';
+      } else if (e.toString().contains('null')) {
+        errorType = 'null interpreter handle';
+      } else {
+        errorType = e.toString();
+      }
+      _lastError = errorType;
+
+      if (kDebugMode) {
+        debugPrint('PrecursorClassifier: inference error [$errorType] '
+            '(count=$_errorCount/$_maxErrorCount)');
+      }
+
+      // Disable after repeated failures to avoid log spam and trigger re-init
+      if (_errorCount >= _maxErrorCount) {
+        _isLoaded = false;
+        if (kDebugMode) {
+          debugPrint('PrecursorClassifier: disabled after $_errorCount consecutive '
+              'errors — call initialize() to reload');
+        }
+      }
+
       return null;
     }
   }

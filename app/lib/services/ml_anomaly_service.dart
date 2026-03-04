@@ -34,6 +34,12 @@ class MlAnomalyService {
 
   SiteProfile? _activeSiteProfile;
 
+  // Error tracking for inference health monitoring
+  String? _lastError;
+  bool _lastInferenceSucceeded = true;
+  int _errorCount = 0;
+  static const int _maxErrorCount = 3;
+
   bool get isLoaded => _isLoaded;
   bool get isCalibrating => _isCalibrating;
   bool get isCalibrated => _activeSiteProfile != null;
@@ -41,6 +47,12 @@ class MlAnomalyService {
   double get calibrationProgress =>
       (_calibrationSamples.length / minCalibrationSamples).clamp(0.0, 1.0);
   SiteProfile? get activeSiteProfile => _activeSiteProfile;
+
+  /// Most recent inference error message, or null if last inference succeeded.
+  String? get lastError => _lastError;
+
+  /// True if the last inference completed without error.
+  bool get isHealthy => _lastInferenceSucceeded;
 
   Future<bool> initialize() async {
     try {
@@ -97,6 +109,11 @@ class MlAnomalyService {
       }
       mse /= inputDim;
 
+      // Inference succeeded — clear error state
+      _lastInferenceSucceeded = true;
+      _lastError = null;
+      _errorCount = 0;
+
       if (mse < _thresholdLow) {
         return (mse / _thresholdLow).clamp(0.0, 1.0);
       } else if (mse < _thresholdHigh) {
@@ -105,7 +122,36 @@ class MlAnomalyService {
         return min(1.0, mse / (_thresholdHigh * 2));
       }
     } catch (e) {
-      if (kDebugMode) debugPrint('MlAnomalyService: inference error: $e');
+      _lastInferenceSucceeded = false;
+      _errorCount++;
+
+      // Categorise error type for actionable diagnostics
+      String errorType;
+      if (e.toString().contains('not allocated') || e.toString().contains('InterpreterNotAllocated')) {
+        errorType = 'interpreter not allocated';
+      } else if (e.toString().contains('shape') || e.toString().contains('dimension')) {
+        errorType = 'input shape mismatch (expected $inputDim features)';
+      } else if (e.toString().contains('null')) {
+        errorType = 'null interpreter handle';
+      } else {
+        errorType = e.toString();
+      }
+      _lastError = errorType;
+
+      if (kDebugMode) {
+        debugPrint('MlAnomalyService: inference error [$errorType] '
+            '(count=$_errorCount/$_maxErrorCount)');
+      }
+
+      // Disable after repeated failures to avoid log spam and trigger re-init
+      if (_errorCount >= _maxErrorCount) {
+        _isLoaded = false;
+        if (kDebugMode) {
+          debugPrint('MlAnomalyService: disabled after $_errorCount consecutive '
+              'errors — call initialize() to reload');
+        }
+      }
+
       return null;
     }
   }
