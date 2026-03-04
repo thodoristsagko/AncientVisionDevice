@@ -1,8 +1,11 @@
 import csv
+import importlib.util
 import json
 import logging
 import os
+import sys
 import time
+import threading
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 import pytest
@@ -15,6 +18,10 @@ from watch import (
     SampleRateMonitor,
     _log_json,
     _check_data_quality,
+    jlog,
+    _HealthHandler,
+    HEALTH_PORT,
+    start_health_server,
 )
 
 
@@ -267,7 +274,7 @@ def test_quality_gate_rejects_imbalanced_data(tmp_path):
 def test_quality_gate_accepts_balanced_data(tmp_path):
     """Quality gate accepts data with reasonable class balance."""
     rows = []
-    # 50 samples each for 3 classes — perfectly balanced, well above 20 min
+    # 50 samples each for 3 classes -- perfectly balanced, well above 20 min
     for cls in ("normal", "soil_creep", "crack_propagation"):
         for i in range(50):
             rows.append({
@@ -282,3 +289,178 @@ def test_quality_gate_accepts_balanced_data(tmp_path):
     ok, reason = _check_data_quality(tmp_path)
     assert ok is True
     assert reason == "OK"
+
+
+# ============================================================================
+# Tests for watcher.py module importability
+# ============================================================================
+
+
+def test_watcher_imports():
+    """watch.py is importable via importlib."""
+    spec = importlib.util.spec_from_file_location(
+        "watch",
+        str(Path(__file__).parent / "watch.py"),
+    )
+    assert spec is not None
+
+
+# ============================================================================
+# Tests for jlog() structured logging
+# ============================================================================
+
+
+def test_jlog_output_is_valid_json(capsys):
+    """jlog() emits a valid JSON line to stderr."""
+    jlog("INFO", "test message", key="value", count=42)
+    captured = capsys.readouterr()
+    data = json.loads(captured.err.strip())
+    assert data["level"] == "INFO"
+    assert data["msg"] == "test message"
+    assert data["key"] == "value"
+    assert data["count"] == 42
+    assert "ts" in data
+    assert isinstance(data["ts"], float)
+
+
+def test_jlog_timestamp_is_current(capsys):
+    """jlog() timestamp is within a reasonable window of the current time."""
+    before = time.time()
+    jlog("DEBUG", "ts check")
+    after = time.time()
+    captured = capsys.readouterr()
+    data = json.loads(captured.err.strip())
+    assert before <= data["ts"] <= after
+
+
+def test_jlog_level_field_preserved(capsys):
+    """jlog() preserves arbitrary level strings."""
+    jlog("WARNING", "warn msg")
+    captured = capsys.readouterr()
+    data = json.loads(captured.err.strip())
+    assert data["level"] == "WARNING"
+
+
+def test_jlog_extra_fields(capsys):
+    """jlog() includes all extra keyword arguments."""
+    jlog("INFO", "fields test", threshold=100, poll_interval=60, cooldown=300, data_dir="/tmp")
+    captured = capsys.readouterr()
+    data = json.loads(captured.err.strip())
+    assert data["threshold"] == 100
+    assert data["poll_interval"] == 60
+    assert data["cooldown"] == 300
+    assert data["data_dir"] == "/tmp"
+
+
+# ============================================================================
+# Tests for _triggers_fired counter
+# ============================================================================
+
+
+def test_triggers_fired_increments_on_success(tmp_path):
+    """_triggers_fired increments each time write_trigger_with_retry succeeds."""
+    import watch as watch_module
+    initial = watch_module._triggers_fired
+
+    trigger_file = tmp_path / "t1.trigger"
+    write_trigger_with_retry(trigger_file, threshold=100, sample_count=150)
+
+    assert watch_module._triggers_fired == initial + 1
+
+
+def test_triggers_fired_not_incremented_on_failure(tmp_path):
+    """_triggers_fired does NOT increment when trigger write fails."""
+    import watch as watch_module
+    initial = watch_module._triggers_fired
+
+    trigger_file = tmp_path / "fail.trigger"
+    with patch.object(Path, "mkdir", side_effect=OSError("Disk full")):
+        write_trigger_with_retry(trigger_file, threshold=100, sample_count=150)
+
+    assert watch_module._triggers_fired == initial
+
+
+def test_triggers_fired_multiple_writes(tmp_path):
+    """_triggers_fired counts multiple successful writes."""
+    import watch as watch_module
+    initial = watch_module._triggers_fired
+
+    for i in range(3):
+        trigger_file = tmp_path / f"t{i}.trigger"
+        write_trigger_with_retry(trigger_file, threshold=100, sample_count=150 + i)
+
+    assert watch_module._triggers_fired == initial + 3
+
+
+# ============================================================================
+# Tests for HTTP health endpoint
+# ============================================================================
+
+
+def test_health_handler_ok_response(tmp_path):
+    """_HealthHandler returns 200 with JSON body for GET /health."""
+    from http.server import HTTPServer
+    from io import BytesIO
+
+    # Use a free port for the test
+    server = HTTPServer(("127.0.0.1", 0), _HealthHandler)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.handle_request, daemon=True)
+    t.start()
+
+    import urllib.request
+    url = f"http://127.0.0.1:{port}/health"
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        assert resp.status == 200
+        body = json.loads(resp.read().decode())
+    assert body["status"] == "ok"
+    assert "triggers_fired" in body
+    assert "last_check_ts" in body
+
+    server.server_close()
+
+
+def test_health_handler_404_for_unknown_path(tmp_path):
+    """_HealthHandler returns 404 for non-/health paths."""
+    from http.server import HTTPServer
+    import urllib.error
+
+    server = HTTPServer(("127.0.0.1", 0), _HealthHandler)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.handle_request, daemon=True)
+    t.start()
+
+    import urllib.request
+    url = f"http://127.0.0.1:{port}/unknown"
+    try:
+        urllib.request.urlopen(url, timeout=5)
+        assert False, "Expected 404 HTTPError"
+    except urllib.error.HTTPError as e:
+        assert e.code == 404
+
+    server.server_close()
+
+
+def test_health_response_reflects_triggers_fired(tmp_path):
+    """Health endpoint triggers_fired value matches the global counter."""
+    from http.server import HTTPServer
+    import urllib.request
+    import watch as watch_module
+
+    server = HTTPServer(("127.0.0.1", 0), _HealthHandler)
+    port = server.server_address[1]
+
+    # Fire one trigger so counter is non-zero
+    trigger_file = tmp_path / "health_test.trigger"
+    write_trigger_with_retry(trigger_file, threshold=100, sample_count=200)
+    expected_count = watch_module._triggers_fired
+
+    t = threading.Thread(target=server.handle_request, daemon=True)
+    t.start()
+
+    url = f"http://127.0.0.1:{port}/health"
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        body = json.loads(resp.read().decode())
+
+    assert body["triggers_fired"] == expected_count
+    server.server_close()

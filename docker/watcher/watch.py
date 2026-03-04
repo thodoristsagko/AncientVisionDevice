@@ -16,6 +16,10 @@ Improvements
 - Graceful shutdown handling with SIGTERM.
 - Data quality gate: validates class balance and CSV integrity before triggering retraining.
 - Anomaly spike detection: warns when recent anomaly-labeled samples exceed threshold.
+- HTTP health endpoint on port 8766 (/health) -- reports triggers_fired + last_check_ts.
+- Trigger count tracking (_triggers_fired global, incremented on each successful trigger write).
+- jlog() structured logging to stderr matching collector format (ts/level/msg/fields).
+- Startup summary via jlog().
 """
 import csv
 import json
@@ -24,8 +28,10 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 # Setup logging
@@ -42,7 +48,70 @@ TRIGGER_COOLDOWN_SECS = int(os.environ.get("TRIGGER_COOLDOWN_SECS", "300"))
 TRIGGER_WRITE_MAX_RETRIES = 3
 SAMPLE_RATE_HISTORY_SIZE = 600  # 10 minutes of 1-minute windows
 ANOMALY_SPIKE_THRESHOLD = int(os.environ.get("ANOMALY_SPIKE_THRESHOLD", "10"))
+HEALTH_PORT = int(os.environ.get("HEALTH_PORT", "8766"))
 
+# ---------------------------------------------------------------------------
+# Global state for health endpoint
+# ---------------------------------------------------------------------------
+_triggers_fired: int = 0
+_last_check_ts: float = 0.0
+_health_lock = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# Structured logging -- matches collector format: ts/level/msg + extra fields
+# ---------------------------------------------------------------------------
+
+def jlog(level: str, msg: str, **fields) -> None:
+    """Emit a structured JSON log line to stderr, matching the collector format."""
+    print(
+        json.dumps({"ts": time.time(), "level": level, "msg": msg, **fields}),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# HTTP health endpoint (background daemon thread, port HEALTH_PORT)
+# ---------------------------------------------------------------------------
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    """Minimal HTTP handler serving GET /health."""
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path != "/health":
+            self.send_response(404)
+            self.end_headers()
+            return
+        with _health_lock:
+            payload = {
+                "status": "ok",
+                "triggers_fired": _triggers_fired,
+                "last_check_ts": _last_check_ts,
+            }
+        body = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args) -> None:  # noqa: N802
+        """Silence access logs -- we use jlog() instead."""
+        pass
+
+
+def start_health_server(port: int = HEALTH_PORT) -> None:
+    """Start the HTTP health server in a daemon thread."""
+    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    jlog("INFO", "Health endpoint started", port=port, path="/health")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _read_int(path: Path, default: int = 0) -> int:
     try:
@@ -56,7 +125,7 @@ def _iso_now() -> str:
 
 
 def _log_json(event: str, **kwargs) -> None:
-    """Log an event as structured JSON."""
+    """Log an event as structured JSON (stdout via logging module)."""
     payload = {"event": event, "ts": time.time(), **kwargs}
     logging.info(json.dumps(payload))
 
@@ -213,16 +282,28 @@ def write_trigger_with_retry(trigger_file: Path, threshold: int, sample_count: i
     Write trigger file with exponential backoff on failure.
 
     Returns True on success, False if all retries exhausted.
+    Increments the global _triggers_fired counter on success.
     """
+    global _triggers_fired
     for attempt in range(1, TRIGGER_WRITE_MAX_RETRIES + 1):
         try:
             trigger_file.parent.mkdir(parents=True, exist_ok=True)
             trigger_file.touch()
+            with _health_lock:
+                _triggers_fired += 1
+                current_count = _triggers_fired
             _log_json(
                 "trigger_written",
                 sample_count=sample_count,
                 threshold=threshold,
                 attempt=attempt,
+            )
+            jlog(
+                "INFO",
+                "Trigger detected",
+                count=current_count,
+                threshold=threshold,
+                sample_count=sample_count,
             )
             return True
         except (OSError, PermissionError) as exc:
@@ -306,7 +387,7 @@ class SampleRateMonitor:
                 reason="no_new_samples_10min",
                 device_status="possibly_offline",
             )
-            logging.warning("No new samples for 10 minutes — device may be offline")
+            logging.warning("No new samples for 10 minutes -- device may be offline")
 
         # Check for spike: if last reading >100/min
         if self.history[-1] > 100:
@@ -316,7 +397,7 @@ class SampleRateMonitor:
                 samples_per_min=self.history[-1],
                 possible_cause="replay_or_attack",
             )
-            logging.warning(f"Unusual sample rate: {self.history[-1]}/min — possible replay or attack")
+            logging.warning(f"Unusual sample rate: {self.history[-1]}/min -- possible replay or attack")
 
 
 # ---------------------------------------------------------------------------
@@ -337,17 +418,21 @@ def main() -> None:
     last_trigger_time: float = 0.0  # epoch seconds
     rate_monitor = SampleRateMonitor(SAMPLE_RATE_HISTORY_SIZE)
 
+    # Start HTTP health endpoint on HEALTH_PORT (default 8766)
+    start_health_server(HEALTH_PORT)
+
     # Graceful shutdown handler
     def handle_shutdown(sig, frame):
         logging.info("Shutdown signal received, flushing logs...")
         _log_json("watcher_shutdown", signal=sig)
+        jlog("INFO", "Watcher shutdown", signal=sig)
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
 
     logging.info(
-        f"Watching {data_dir} — trigger at {TRIGGER_THRESHOLD} new samples, "
+        f"Watching {data_dir} -- trigger at {TRIGGER_THRESHOLD} new samples, "
         f"poll={POLL_INTERVAL}s, cooldown={TRIGGER_COOLDOWN_SECS}s"
     )
     _log_json(
@@ -357,8 +442,22 @@ def main() -> None:
         poll_interval=POLL_INTERVAL,
         cooldown_secs=TRIGGER_COOLDOWN_SECS,
     )
+    # Startup summary -- jlog format matching collector
+    jlog(
+        "INFO",
+        "Watcher started",
+        threshold=TRIGGER_THRESHOLD,
+        poll_interval=POLL_INTERVAL,
+        cooldown=TRIGGER_COOLDOWN_SECS,
+        data_dir=str(data_dir),
+    )
 
     while True:
+        # Update last-check timestamp for health endpoint
+        global _last_check_ts
+        with _health_lock:
+            _last_check_ts = time.time()
+
         total = _read_int(data_dir / "field" / ".sample_count")
         delta = sample_delta(data_dir)
         need = max(0, TRIGGER_THRESHOLD - delta)
@@ -392,7 +491,7 @@ def main() -> None:
         now = time.monotonic()
         if delta >= TRIGGER_THRESHOLD:
             if lock_file.exists():
-                logging.info("Lock file exists — trainer already running; skipping trigger.")
+                logging.info("Lock file exists -- trainer already running; skipping trigger.")
                 _log_json("trigger_skipped", reason="lock_file_exists")
             elif now < backoff_until:
                 remaining = int(backoff_until - now)
@@ -419,10 +518,10 @@ def main() -> None:
                     remaining_secs=remaining,
                 )
             else:
-                # Check anomaly spike — warn but don't block retraining trigger
+                # Check anomaly spike -- warn but don't block retraining trigger
                 if _check_anomaly_spike(data_dir):
                     logging.warning(
-                        "Anomaly spike detected in the last 5 minutes — "
+                        "Anomaly spike detected in the last 5 minutes -- "
                         "consider labelling samples before retraining."
                     )
                     _log_json(
@@ -431,7 +530,7 @@ def main() -> None:
                         threshold=ANOMALY_SPIKE_THRESHOLD,
                     )
 
-                # Data quality gate — only trigger retraining if data is clean
+                # Data quality gate -- only trigger retraining if data is clean
                 quality_ok, quality_reason = _check_data_quality(data_dir)
                 _log_json(
                     "data_quality_check",
@@ -440,7 +539,7 @@ def main() -> None:
                 )
                 if not quality_ok:
                     logging.warning(
-                        f"Data quality gate FAILED — skipping retraining: {quality_reason}"
+                        f"Data quality gate FAILED -- skipping retraining: {quality_reason}"
                     )
                     _log_json(
                         "trigger_skipped",
@@ -460,7 +559,7 @@ def main() -> None:
                     logging.error("Failed to write trigger file after all retries.")
                     _log_json("trigger_launch_aborted", reason="trigger_file_write_failed")
                 else:
-                    logging.info("Threshold reached — launching trainer.")
+                    logging.info("Threshold reached -- launching trainer.")
                     last_trigger_time = now
 
                     write_status(
