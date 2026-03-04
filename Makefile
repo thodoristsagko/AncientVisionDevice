@@ -8,7 +8,7 @@
         label replay schedule playback sync annotate analyze apk quantize benchmark load-test \
         validate-data e2e status health augment online-learn tune onnx \
         live-dashboard ab-test augmentation-report \
-        serve-model session-report calibration-check confidence-analysis
+        serve-model session-report calibration-check confidence-analysis monitor-model
 
 # ---------------------------------------------------------------------------
 # Help
@@ -70,7 +70,9 @@ help:
 	@echo "  session-report        Generate Markdown report from a session CSV (set SESSION_CSV=)"
 	@echo "  calibration-check     Verify device calibration quality from field CSVs"
 	@echo "  confidence-analysis   Analyze model confidence distribution and calibration (ECE)"
+	@echo "  monitor-model         Check deployed model accuracy against labeled field data"
 	@echo ""
+
 
 # ---------------------------------------------------------------------------
 # Build targets
@@ -403,3 +405,12 @@ confidence-analysis:
 		$(if $(N_SAMPLES),--n-samples "$(N_SAMPLES)",) \
 		$(if $(OUTPUT),--output "$(OUTPUT)",) \
 		$(if $(SEED),--seed "$(SEED)",)
+
+monitor-model:
+	@echo "==> Checking model performance against field data..."
+	python scripts/model_monitor.py \
+		--assets-dir app/assets/ml \
+		--data-dir ./data/field \
+		--once \
+		$(if $(SET_BASELINE),--set-baseline,) \
+		$(if $(OUTPUT),--output "$(OUTPUT)",)
