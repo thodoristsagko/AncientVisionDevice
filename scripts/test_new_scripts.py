@@ -5,10 +5,13 @@ Covers: ab_test_models, data_augmentation_report, device_calibration_check,
         session_report (import-only and functional).
 """
 import csv
+import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import unittest
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
@@ -679,3 +682,123 @@ class TestLiveDashboardImport:
         assert hasattr(live_dashboard, "LABELS")
         assert "normal" in live_dashboard.LABELS
         assert "imminent_failure" in live_dashboard.LABELS
+
+
+# ===========================================================================
+# model_monitor.py tests
+# ===========================================================================
+
+class TestModelMonitorImport(unittest.TestCase):
+    """model_monitor.py is importable and has expected API."""
+
+    def test_module_importable(self):
+        """model_monitor can be imported."""
+        spec = importlib.util.spec_from_file_location("model_monitor", "scripts/model_monitor.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertIsNotNone(mod)
+
+    def test_has_main(self):
+        """model_monitor has main function or check_degradation."""
+        spec = importlib.util.spec_from_file_location("model_monitor", "scripts/model_monitor.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertTrue(hasattr(mod, "main") or hasattr(mod, "check_degradation"))
+
+    def test_check_degradation_no_alerts_good_metrics(self):
+        """check_degradation returns no alerts for good metrics."""
+        spec = importlib.util.spec_from_file_location("model_monitor", "scripts/model_monitor.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        metrics = {"accuracy": 0.90, "avg_confidence": 0.85, "low_confidence_fraction": 0.10, "n_samples": 50}
+        alerts = mod.check_degradation(metrics, baseline=None)
+        self.assertEqual(len(alerts), 0)
+
+    def test_check_degradation_alerts_on_low_confidence(self):
+        """check_degradation alerts when avg_confidence is low."""
+        spec = importlib.util.spec_from_file_location("model_monitor", "scripts/model_monitor.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        metrics = {"accuracy": 0.50, "avg_confidence": 0.40, "low_confidence_fraction": 0.60, "n_samples": 50}
+        alerts = mod.check_degradation(metrics, baseline=None)
+        self.assertGreater(len(alerts), 0)
+
+    def test_check_degradation_alerts_on_accuracy_drop(self):
+        """check_degradation alerts when accuracy drops from baseline."""
+        spec = importlib.util.spec_from_file_location("model_monitor", "scripts/model_monitor.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        metrics = {"accuracy": 0.70, "avg_confidence": 0.75, "low_confidence_fraction": 0.10, "n_samples": 50}
+        baseline = {"accuracy": 0.90}
+        alerts = mod.check_degradation(metrics, baseline=baseline)
+        self.assertGreater(len(alerts), 0)
+
+    def test_cli_help(self):
+        """--help flag exits with 0."""
+        result = subprocess.run(
+            [sys.executable, "scripts/model_monitor.py", "--help"],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+
+
+# ===========================================================================
+# seismic_frequency_analysis.py tests
+# ===========================================================================
+
+class TestSeismicFrequencyAnalysis(unittest.TestCase):
+    """seismic_frequency_analysis.py is importable and classifies frequencies."""
+
+    def _load(self):
+        """Load seismic_frequency_analysis module."""
+        spec = importlib.util.spec_from_file_location(
+            "seismic_freq", "scripts/seismic_frequency_analysis.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_module_importable(self):
+        """seismic_frequency_analysis can be imported."""
+        self._load()
+
+    def test_classify_microseismic(self):
+        """classify_frequency returns 'microseismic' for 0.5 Hz."""
+        mod = self._load()
+        self.assertEqual(mod.classify_frequency(0.5), "microseismic")
+
+    def test_classify_low_seismic(self):
+        """classify_frequency returns 'low_seismic' for 5.0 Hz."""
+        mod = self._load()
+        self.assertEqual(mod.classify_frequency(5.0), "low_seismic")
+
+    def test_classify_construction(self):
+        """classify_frequency returns 'construction' for 25.0 Hz."""
+        mod = self._load()
+        self.assertEqual(mod.classify_frequency(25.0), "construction")
+
+    def test_classify_high_freq(self):
+        """classify_frequency returns 'high_freq' for 75.0 Hz."""
+        mod = self._load()
+        self.assertEqual(mod.classify_frequency(75.0), "high_freq")
+
+    def test_bands_dict_has_four_entries(self):
+        """BANDS constant has 4 frequency bands."""
+        mod = self._load()
+        self.assertEqual(len(mod.BANDS), 4)
+
+    def test_cli_help(self):
+        """--help flag exits with 0."""
+        result = subprocess.run(
+            [sys.executable, "scripts/seismic_frequency_analysis.py", "--help"],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+
+    def test_analyze_empty_dir(self):
+        """analyze_csv returns error dict for missing file."""
+        mod = self._load()
+        with tempfile.TemporaryDirectory() as td:
+            result = mod.analyze_csv(Path(td) / "nonexistent.csv")
+            # Should return dict (possibly with error key), not raise
+            self.assertIsInstance(result, dict)
