@@ -28,22 +28,50 @@ class _FindingDetailsPageState extends State<FindingDetailsPage> {
     _loadRiskData();
   }
 
-  /// Load critical events and filter to those near this finding (within ~500 m).
+  /// Load critical events and filter to those near this finding (within ~500 m and ±30 s window).
   Future<void> _loadRiskData() async {
     try {
       final svc = CriticalEventLogService.instance;
       // ensureLoaded is handled internally by the service
       final events = svc.events;
 
-      // Filter events that have a GPS location and are within ~500 m of the finding.
+      // Parse finding date (assumed format: "YYYY-MM-DD" or ISO 8601).
+      // If time-of-day is unknown, we assume the whole day is the recording window.
+      DateTime? findingDateTime;
+      try {
+        findingDateTime = DateTime.parse(widget.finding.date);
+      } catch (_) {
+        // If date parsing fails, use current date as fallback
+        findingDateTime = DateTime.now();
+      }
+
+      // Filter events that have a GPS location and are within ~500 m of the finding,
+      // and occurred within ±30 seconds of the finding's recorded time.
       // We use a simple bounding-box filter (0.005 deg ≈ 500 m).
       const threshold = 0.005;
+      const timeWindowSeconds = 30;
+
       final nearby = events.where((e) {
         final loc = e.location;
         if (loc == null) return false;
+
+        // GPS proximity check
         final dLat = (loc.latitude - widget.finding.latitude).abs();
         final dLon = (loc.longitude - widget.finding.longitude).abs();
-        return dLat <= threshold && dLon <= threshold;
+        if (dLat > threshold || dLon > threshold) return false;
+
+        // Time window check: if date string has no time component, use whole-day window.
+        // Otherwise, check ±30 seconds from the parsed timestamp.
+        if (widget.finding.date.length <= 10) {
+          // Date only (YYYY-MM-DD), so include any event on that day
+          return e.timestamp.year == findingDateTime!.year &&
+              e.timestamp.month == findingDateTime.month &&
+              e.timestamp.day == findingDateTime.day;
+        } else {
+          // Has time component; check ±30 second window
+          final diff = e.timestamp.difference(findingDateTime!).abs();
+          return diff.inSeconds <= timeWindowSeconds;
+        }
       }).toList();
 
       if (mounted) {
@@ -54,6 +82,33 @@ class _FindingDetailsPageState extends State<FindingDetailsPage> {
       }
     } catch (_) {
       if (mounted) setState(() => _riskLoaded = true);
+    }
+  }
+
+  /// Check if any critical events occurred very close in time (±5 seconds) to this finding.
+  bool get _recordedDuringAnomaly {
+    if (!_riskLoaded || widget.finding.date.isEmpty) return false;
+
+    // Only return true if there are nearby events within a tight 5-second window
+    try {
+      DateTime? findingDateTime;
+      try {
+        findingDateTime = DateTime.parse(widget.finding.date);
+      } catch (_) {
+        findingDateTime = DateTime.now();
+      }
+
+      // If only date is available (no time), we can't determine tight correlation
+      if (widget.finding.date.length <= 10) return false;
+
+      // Check for events within ±5 seconds
+      const tightWindowSeconds = 5;
+      return _nearbyEvents.any((e) {
+        final diff = e.timestamp.difference(findingDateTime!).abs();
+        return diff.inSeconds <= tightWindowSeconds;
+      });
+    } catch (_) {
+      return false;
     }
   }
 
@@ -379,6 +434,13 @@ class _FindingDetailsPageState extends State<FindingDetailsPage> {
 
             const SizedBox(height: 12),
 
+            // "Recorded During" warning if applicable
+            if (_recordedDuringAnomaly)
+              _buildRecordedDuringWarning(),
+
+            if (_recordedDuringAnomaly)
+              const SizedBox(height: 12),
+
             // Location card
             _buildDetailCard(
               icon: Icons.location_on,
@@ -650,6 +712,70 @@ class _FindingDetailsPageState extends State<FindingDetailsPage> {
     if (diff.inMinutes < 60) return '${diff.inMinutes} min ago';
     if (diff.inHours < 24) return '${diff.inHours} h ago';
     return '${diff.inDays} days ago';
+  }
+
+  /// Build warning card if finding was recorded during ANOMALY event.
+  Widget _buildRecordedDuringWarning() {
+    final tightEvent = _nearbyEvents.firstWhere(
+      (e) {
+        try {
+          DateTime findingDateTime;
+          try {
+            findingDateTime = DateTime.parse(widget.finding.date);
+          } catch (_) {
+            findingDateTime = DateTime.now();
+          }
+          final diff = e.timestamp.difference(findingDateTime).abs();
+          return diff.inSeconds <= 5;
+        } catch (_) {
+          return false;
+        }
+      },
+      orElse: () => _nearbyEvents.first,
+    );
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFE53935).withAlpha(25),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: const Color(0xFFE53935).withAlpha(128),
+          width: 2,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Color(0xFFE53935), size: 20),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Recorded During ANOMALY',
+                  style: TextStyle(
+                    color: Color(0xFFE53935),
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'This finding was recorded within seconds of a critical vibration anomaly (PPV: ${tightEvent.ppv.toStringAsFixed(3)} mm/s). '
+            'Site conditions may have been unstable at the time of discovery.',
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 13,
+              height: 1.5,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   // ---------------------------------------------------------------------------
