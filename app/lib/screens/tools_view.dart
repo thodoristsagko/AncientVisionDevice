@@ -541,25 +541,23 @@ class _ToolsViewState extends State<ToolsView> {
               context,
               icon: Icons.ios_share_rounded,
               title: 'Export Session Data',
-              description: 'Share current session as CSV',
+              description: SessionExportService.instance.hasData
+                  ? '${SessionExportService.instance.eventCount} events ready to export'
+                  : 'Share current session as CSV',
               lastUsedLabel: _formatLastUsed('export_session'),
               color: const Color(0xFF607D8B),
               onTap: () async {
                 _recordLastUsed('export_session');
-                try {
-                  // Export an empty/placeholder session when called standalone;
-                  // the real export with actual data is triggered from safety_view.
-                  await SessionExportService.instance.exportSession([]);
-                } catch (e) {
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text(
-                          'No active session data to export. Start monitoring first.',
-                        ),
-                      ),
-                    );
-                  }
+                final path = await SessionExportService.instance
+                    .exportCriticalEvents();
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(path != null
+                          ? 'Session exported successfully'
+                          : 'No events recorded yet'),
+                    ),
+                  );
                 }
               },
             ),
