@@ -15,6 +15,18 @@ const String _kBlePrefixKey = 'vibmon_ble_prefix';
 const String _kPpvThresholdKey = 'vibmon_ppv_threshold';
 const String _kInferenceFreqKey = 'vibmon_inference_freq';
 
+// Notification prefs keys
+const String _kNotificationsEnabledKey = 'notificationsEnabled';
+const String _kAlertSoundEnabledKey = 'alertSoundEnabled';
+
+// BLE prefs keys
+const String _kAutoConnectKey = 'autoConnect';
+const String _kScanTimeoutSecondsKey = 'scanTimeoutSeconds';
+
+// Data / collector prefs keys
+const String _kAutoUploadKey = 'autoUpload';
+const String _kCollectorUrlKey = 'collectorUrl';
+
 /// Settings Screen - Simplified for essential features
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -41,6 +53,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _blePrefixController = TextEditingController(text: 'ancientvision');
   double _ppvAlertThreshold = 0.3;
   String _inferenceFreq = '2Hz';
+
+  // Notification settings
+  bool _notificationsEnabled = true;
+  bool _alertSoundEnabled = true;
+
+  // BLE settings
+  bool _autoConnect = true;
+  int _scanTimeoutSeconds = 10;
+
+  // Data / collector settings
+  bool _autoUpload = false;
+  String _collectorUrl = 'http://192.168.1.100:8765';
 
   @override
   void initState() {
@@ -71,6 +95,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _blePrefixController.text = prefs.getString(_kBlePrefixKey) ?? 'ancientvision';
     _ppvAlertThreshold = prefs.getDouble(_kPpvThresholdKey) ?? 0.3;
     _inferenceFreq = prefs.getString(_kInferenceFreqKey) ?? '2Hz';
+
+    // Notification settings
+    _notificationsEnabled = prefs.getBool(_kNotificationsEnabledKey) ?? true;
+    _alertSoundEnabled = prefs.getBool(_kAlertSoundEnabledKey) ?? true;
+
+    // BLE settings
+    _autoConnect = prefs.getBool(_kAutoConnectKey) ?? true;
+    _scanTimeoutSeconds = prefs.getInt(_kScanTimeoutSecondsKey) ?? 10;
+
+    // Data / collector settings
+    _autoUpload = prefs.getBool(_kAutoUploadKey) ?? false;
+    _collectorUrl = prefs.getString(_kCollectorUrlKey) ?? 'http://192.168.1.100:8765';
   }
 
   Future<void> _saveVibmonSettings() async {
@@ -193,6 +229,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       _buildVibmonPpvThresholdTile(),
                       const Divider(height: 1, color: Colors.white12),
                       _buildVibmonInferenceFreqTile(),
+                    ]),
+                    const SizedBox(height: AppSpacing.xxl),
+
+                    // === NOTIFICATIONS ===
+                    _buildSection('Notifications', Icons.notifications_active, [
+                      _buildNotificationsEnabledTile(),
+                      const Divider(height: 1, color: Colors.white12),
+                      _buildAlertSoundTile(),
+                    ]),
+                    const SizedBox(height: AppSpacing.xxl),
+
+                    // === BLUETOOTH ===
+                    _buildSection('Bluetooth', Icons.bluetooth_searching, [
+                      _buildAutoConnectTile(),
+                      const Divider(height: 1, color: Colors.white12),
+                      _buildScanTimeoutTile(),
+                    ]),
+                    const SizedBox(height: AppSpacing.xxl),
+
+                    // === DATA ===
+                    _buildSection('Data', Icons.storage, [
+                      _buildAutoUploadTile(),
+                      const Divider(height: 1, color: Colors.white12),
+                      _buildCollectorUrlTile(),
                     ]),
                     const SizedBox(height: AppSpacing.xxl),
 
@@ -819,14 +879,159 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Widget _buildNotificationsEnabledTile() {
+    return SwitchListTile(
+      secondary: const Icon(Icons.notifications, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('Critical alert notifications', style: AppTextStyles.body),
+      subtitle: const Text('OS-level alerts for hazard events', style: AppTextStyles.subtitleSmall),
+      value: _notificationsEnabled,
+      activeColor: AppColors.accent,
+      onChanged: (value) async {
+        setState(() => _notificationsEnabled = value);
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool(_kNotificationsEnabledKey, value);
+      },
+    );
+  }
+
+  Widget _buildAlertSoundTile() {
+    return SwitchListTile(
+      secondary: const Icon(Icons.volume_up, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('Alert sound', style: AppTextStyles.body),
+      subtitle: const Text('Play sound with critical alerts', style: AppTextStyles.subtitleSmall),
+      value: _alertSoundEnabled,
+      activeColor: AppColors.accent,
+      onChanged: (value) async {
+        setState(() => _alertSoundEnabled = value);
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool(_kAlertSoundEnabledKey, value);
+      },
+    );
+  }
+
+  Widget _buildAutoConnectTile() {
+    return SwitchListTile(
+      secondary: const Icon(Icons.bluetooth_connected, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('Auto-connect to last device', style: AppTextStyles.body),
+      subtitle: const Text('Reconnect automatically on app start', style: AppTextStyles.subtitleSmall),
+      value: _autoConnect,
+      activeColor: AppColors.accent,
+      onChanged: (value) async {
+        setState(() => _autoConnect = value);
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool(_kAutoConnectKey, value);
+      },
+    );
+  }
+
+  Widget _buildScanTimeoutTile() {
+    const options = [5, 10, 30];
+    return ListTile(
+      leading: const Icon(Icons.timer, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('BLE scan timeout', style: AppTextStyles.body),
+      subtitle: const Text('How long to scan before stopping', style: AppTextStyles.subtitleSmall),
+      trailing: DropdownButton<int>(
+        value: _scanTimeoutSeconds,
+        dropdownColor: AppColors.primaryDark,
+        underline: const SizedBox.shrink(),
+        style: AppTextStyles.body,
+        items: options
+            .map((s) => DropdownMenuItem(value: s, child: Text('${s}s')))
+            .toList(),
+        onChanged: (value) async {
+          if (value != null) {
+            setState(() => _scanTimeoutSeconds = value);
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setInt(_kScanTimeoutSecondsKey, value);
+          }
+        },
+      ),
+    );
+  }
+
+  Widget _buildAutoUploadTile() {
+    return SwitchListTile(
+      secondary: const Icon(Icons.cloud_upload, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('Auto-upload sessions', style: AppTextStyles.body),
+      subtitle: const Text('Send session data to collector after each session', style: AppTextStyles.subtitleSmall),
+      value: _autoUpload,
+      activeColor: AppColors.accent,
+      onChanged: (value) async {
+        setState(() => _autoUpload = value);
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool(_kAutoUploadKey, value);
+      },
+    );
+  }
+
+  Widget _buildCollectorUrlTile() {
+    return ListTile(
+      leading: const Icon(Icons.dns, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('Collector URL', style: AppTextStyles.body),
+      subtitle: Text(
+        _collectorUrl,
+        style: AppTextStyles.subtitleSmall,
+        overflow: TextOverflow.ellipsis,
+      ),
+      trailing: const Icon(Icons.edit, color: AppColors.textSecondary, size: 18),
+      onTap: () {
+        final controller = TextEditingController(text: _collectorUrl);
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: AppColors.primaryDark,
+            title: const Text('Collector URL', style: AppTextStyles.h3),
+            content: TextField(
+              controller: controller,
+              style: AppTextStyles.body,
+              keyboardType: TextInputType.url,
+              decoration: InputDecoration(
+                labelText: 'URL',
+                labelStyle: AppTextStyles.subtitleSmall,
+                hintText: 'http://192.168.1.100:8765',
+                hintStyle: AppTextStyles.caption,
+                enabledBorder: OutlineInputBorder(
+                  borderSide: const BorderSide(color: AppColors.cardBorder),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderSide: const BorderSide(color: AppColors.accent),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: Text('Cancel', style: AppTextStyles.button.copyWith(color: AppColors.textSecondary)),
+              ),
+              TextButton(
+                onPressed: () async {
+                  final url = controller.text.trim();
+                  if (url.isNotEmpty) {
+                    setState(() => _collectorUrl = url);
+                    final prefs = await SharedPreferences.getInstance();
+                    await prefs.setString(_kCollectorUrlKey, url);
+                  }
+                  Navigator.pop(ctx);
+                },
+                child: Text('Save', style: AppTextStyles.button.copyWith(color: AppColors.accent)),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildResetButton() {
     return Center(
-      child: OutlinedButton.icon(
+      child: TextButton.icon(
         onPressed: _showResetConfirmation,
-        icon: const Icon(Icons.restore, color: AppColors.warning, size: AppSizes.iconSmall),
-        label: Text('Reset All Settings', style: AppTextStyles.button.copyWith(color: AppColors.warning)),
-        style: OutlinedButton.styleFrom(
-          side: const BorderSide(color: AppColors.warning),
+        icon: const Icon(Icons.restore, color: AppColors.error, size: AppSizes.iconSmall),
+        label: Text('Reset all settings to defaults', style: AppTextStyles.button.copyWith(color: AppColors.error)),
+        style: TextButton.styleFrom(
+          foregroundColor: AppColors.error,
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
         ),
       ),
@@ -986,14 +1191,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onPressed: () async {
               Navigator.pop(context);
               await _settingsService.resetToDefaults();
+              // Reset new SharedPreferences-backed settings to defaults
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setBool(_kNotificationsEnabledKey, true);
+              await prefs.setBool(_kAlertSoundEnabledKey, true);
+              await prefs.setBool(_kAutoConnectKey, true);
+              await prefs.setInt(_kScanTimeoutSecondsKey, 10);
+              await prefs.setBool(_kAutoUploadKey, false);
+              await prefs.setString(_kCollectorUrlKey, 'http://192.168.1.100:8765');
               if (mounted) {
-                setState(() {});
+                setState(() {
+                  _notificationsEnabled = true;
+                  _alertSoundEnabled = true;
+                  _autoConnect = true;
+                  _scanTimeoutSeconds = 10;
+                  _autoUpload = false;
+                  _collectorUrl = 'http://192.168.1.100:8765';
+                });
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text('Settings reset to defaults', style: AppTextStyles.body)),
                 );
               }
             },
-            child: Text('Reset', style: AppTextStyles.button.copyWith(color: AppColors.warning)),
+            child: Text('Reset', style: AppTextStyles.button.copyWith(color: AppColors.error)),
           ),
         ],
       ),
