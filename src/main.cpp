@@ -37,6 +37,7 @@
 #include <Wire.h>
 #include "esp_task_wdt.h"
 #include "esp_system.h"  // P101: esp_reset_reason()
+#include "esp_sleep.h"   // P210: deep sleep wake-up source configuration
 #include "nvs_flash.h"   // P180: NVS persistent settings
 #include "nvs.h"         // P180: NVS read/write API
 #include "SPIFFS.h"      // P198: SPIFFS data logging
@@ -113,6 +114,7 @@ const float TEMP_REF = 25.0f;           // Reference temperature
 #define CHAR_BATTERY_UUID   "beb5483e-36e1-4688-b7f5-ea07361b26ab"
 #define CHAR_FFT_UUID       "beb5483e-36e1-4688-b7f5-ea07361b26ac"  // Now used for raw accel binary
 #define CHAR_CMD_UUID       "beb5483e-36e1-4688-b7f5-ea07361b26ad"  // P79: writable command characteristic
+#define CHAR_DUMP_UUID      "beb5483e-36e1-4688-b7f5-ea07361b26ae"  // P207: BLE data dump notify characteristic
 
 // ===================== P197: DEEP SLEEP CONFIGURATION =====================
 #define DEEP_SLEEP_ENABLED       1
@@ -192,6 +194,9 @@ uint32_t g_calibStartMs = 0;     // millis() when calibration started
 // ===================== P80: AUTOMATIC GAIN CONTROL =====================
 static bool g_highGainMode = false;  // True when IMU is in ±16g range
 
+// ===================== P212: CUSTOM DEVICE NAME =====================
+char g_deviceName[21] = "AncientVision";  // BLE advertisement name, loadable from NVS
+
 // ===================== GLOBALS =====================
 BLEServer* pServer = NULL;
 BLECharacteristic* pIMUChar = NULL;
@@ -200,6 +205,7 @@ BLECharacteristic* pAlertChar = NULL;
 BLECharacteristic* pBatteryChar = NULL;
 BLECharacteristic* pFFTChar = NULL;  // Now used for raw accel binary
 BLECharacteristic* pCmdChar = NULL;  // P79: writable command characteristic
+BLECharacteristic* pDumpChar = NULL; // P207: SPIFFS data dump notify characteristic
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
 
@@ -403,6 +409,19 @@ void loadNvsSettings() {
     Serial.println("NVS load: g_highGainMode default=false");
   }
 
+  // P212: Load custom device name (if set by BLE CMD NAME:xxx)
+  char devNameBuf[21] = "AncientVision";
+  size_t devNameLen = sizeof(devNameBuf);
+  err = nvs_get_str(handle, "devName", devNameBuf, &devNameLen);
+  if (err == ESP_OK) {
+    strncpy(g_deviceName, devNameBuf, sizeof(g_deviceName) - 1);
+    g_deviceName[sizeof(g_deviceName) - 1] = '\0';
+    Serial.printf("NVS load: g_deviceName=%s\n", g_deviceName);
+  } else {
+    // Keep default "AncientVision" already set at declaration
+    Serial.println("NVS load: g_deviceName default=AncientVision");
+  }
+
   nvs_close(handle);
 }
 
@@ -538,25 +557,78 @@ class CmdCharCallbacks: public BLECharacteristicCallbacks {
       g_rtcSetMs = millis();
       Serial.printf("BLE CMD: TIME set to %lu (millis=%lu)\n",
         (unsigned long)g_rtcEpoch, (unsigned long)g_rtcSetMs);
+    } else if (value.startsWith("WIFI:")) {
+      // P211: Connect to WiFi at runtime — "WIFI:ssid:password"
+      #if WIFI_ENABLED
+      String rest = value.substring(5);  // "ssid:password"
+      int colon = rest.indexOf(':');
+      if (colon > 0) {
+        String ssid = rest.substring(0, colon);
+        String pass = rest.substring(colon + 1);
+        WiFi.disconnect();
+        WiFi.begin(ssid.c_str(), pass.c_str());
+        Serial.printf("BLE CMD: WiFi connecting to %s\n", ssid.c_str());
+      }
+      #else
+      Serial.println("BLE CMD: WIFI ignored (WIFI_ENABLED=0)");
+      #endif
+    } else if (value.startsWith("NAME:")) {
+      // P212: Set custom BLE device name, stored in NVS
+      String newName = value.substring(5);
+      newName.trim();
+      if (newName.length() > 0 && newName.length() <= 20) {
+        nvs_handle_t h;
+        esp_err_t e = nvs_open("ancientvision", NVS_READWRITE, &h);
+        if (e == ESP_OK) {
+          nvs_set_str(h, "devName", newName.c_str());
+          nvs_commit(h);
+          nvs_close(h);
+        }
+        // Also update the in-memory name for the next reboot banner
+        strncpy(g_deviceName, newName.c_str(), sizeof(g_deviceName) - 1);
+        g_deviceName[sizeof(g_deviceName) - 1] = '\0';
+        Serial.printf("BLE CMD: Device renamed to %s (takes effect after restart)\n", g_deviceName);
+      }
     }
 #if SD_LOGGING_ENABLED
     else if (value == "DUMP") {
-      // P198: Dump /data.csv over Serial in 256-byte chunks
+      // P207: Dump /data.csv over BLE notify in 500-byte chunks
       if (!g_spiffsOk) {
         Serial.println("DUMP: SPIFFS not available");
+        if (pDumpChar) {
+          pDumpChar->setValue((uint8_t*)"DUMP:ERROR:SPIFFS", 17);
+          pDumpChar->notify();
+        }
       } else {
         File f = SPIFFS.open("/data.csv", FILE_READ);
         if (!f) {
           Serial.println("DUMP: /data.csv not found");
+          if (pDumpChar) {
+            pDumpChar->setValue((uint8_t*)"DUMP:ERROR:NOFILE", 17);
+            pDumpChar->notify();
+          }
         } else {
-          Serial.println("DUMP: BEGIN /data.csv");
-          uint8_t chunk[256];
-          while (f.available()) {
-            int n = f.read(chunk, sizeof(chunk));
-            Serial.write(chunk, n);
+          Serial.println("DUMP: BEGIN /data.csv via BLE");
+          if (pDumpChar) {
+            // Send begin marker
+            pDumpChar->setValue((uint8_t*)"DUMP:BEGIN", 10);
+            pDumpChar->notify();
+            delay(20);
+            // Send file in 500-byte chunks
+            uint8_t chunk[500];
+            while (f.available()) {
+              int n = f.read(chunk, sizeof(chunk));
+              pDumpChar->setValue(chunk, n);
+              pDumpChar->notify();
+              esp_task_wdt_reset();
+              delay(20);
+            }
+            // Send end marker
+            pDumpChar->setValue((uint8_t*)"DUMP:END", 8);
+            pDumpChar->notify();
           }
           f.close();
-          Serial.println("\nDUMP: END");
+          Serial.println("DUMP: END");
         }
       }
     }
@@ -695,7 +767,7 @@ void setup() {
   // P81: Serial diagnostic banner for field operators
   Serial.println("=== AncientVision v" FW_VERSION " ===");
   Serial.printf("Boot count: %lu\n", (unsigned long)g_bootCount);
-  Serial.printf("BLE name: AncientVision\n");
+  Serial.printf("BLE name: %s\n", g_deviceName);
   Serial.println("IMU: OK");
   Serial.println("Ready.");
 
@@ -705,14 +777,14 @@ void setup() {
 void setupBLE() {
   DBG_PRINTLN("Starting BLE...");
 
-  BLEDevice::init("AncientVision-Sensor");
+  BLEDevice::init(g_deviceName);
   BLEDevice::setMTU(517); // Allow large payloads
 
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
 
-  // 6 characteristics × 3 handles each (decl+value+CCCD) + 1 service = 19 minimum; 24 for margin
-  BLEService *pService = pServer->createService(BLEUUID(SERVICE_UUID), 24);
+  // 7 characteristics × 3 handles each (decl+value+CCCD) + 1 service = 22 minimum; 27 for margin
+  BLEService *pService = pServer->createService(BLEUUID(SERVICE_UUID), 27);
 
   pIMUChar = pService->createCharacteristic(
     CHAR_IMU_UUID,
@@ -756,6 +828,14 @@ void setupBLE() {
     BLECharacteristic::PROPERTY_WRITE_NR
   );
   pCmdChar->setCallbacks(new CmdCharCallbacks());
+
+  // P207: SPIFFS data dump notify characteristic
+  pDumpChar = pService->createCharacteristic(
+    CHAR_DUMP_UUID,
+    BLECharacteristic::PROPERTY_READ |
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
+  pDumpChar->addDescriptor(new BLE2902());
 
   pService->start();
 
@@ -819,7 +899,10 @@ void loop() {
     M5.Lcd.setCursor(30, 50);
     M5.Lcd.print("ZZZ");
     delay(1000);
-    M5.Power.deepSleep((uint64_t)DEEP_SLEEP_DURATION_S * 1000000ULL);
+    // P210: Wake on timer OR Button A (GPIO 37, active-low on M5StickC Plus 2)
+    esp_sleep_enable_ext0_wakeup(GPIO_NUM_37, 0);  // Button A, active low
+    esp_sleep_enable_timer_wakeup((uint64_t)DEEP_SLEEP_DURATION_S * 1000000ULL);
+    esp_deep_sleep_start();
   }
 #endif
 
@@ -903,6 +986,27 @@ void loop() {
   if (M5.BtnA.wasReleased()) {
     if (!longPressHandled) testAlert();
     longPressHandled = false;
+  }
+
+  // P209: Button B — 2s hold = force noise floor recalibration
+  static bool btnBLongHandled = false;
+  if (M5.BtnB.pressedFor(2000) && !btnBLongHandled) {
+    btnBLongHandled = true;
+    ppvCalibrated = false;
+    ppvNoiseFloor = 0.0f;
+    calibrationSum = 0.0f;
+    calibrationWindows = 0;
+    g_calibrating = true;
+    g_calibStartMs = millis();
+    Serial.println("BTN B: Force recalibrate");
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.println("RECAL...");
+    delay(500);
+  }
+  if (M5.BtnB.wasReleased()) {
+    btnBLongHandled = false;
   }
 
   // P150: Yield to FreeRTOS scheduler — prevents WiFi/BLE stack starvation
@@ -1223,7 +1327,7 @@ void readBattery() {
   batteryCharging = M5.Power.isCharging();
 }
 
-// ===================== DISPLAY (Archaeologist-friendly) =====================
+// ===================== DISPLAY (P208: Compact 4-line layout) =====================
 void updateDisplay() {
   uint16_t bgColor;
   switch (currentAlert) {
@@ -1234,106 +1338,53 @@ void updateDisplay() {
 
   M5.Lcd.fillScreen(bgColor);
   M5.Lcd.setTextColor(WHITE, bgColor);
+  M5.Lcd.setTextSize(1);
 
-  // Row 1: Title + BLE + Battery %
-  M5.Lcd.setTextSize(2);
-  M5.Lcd.setCursor(5, 2);
-  if (lowPowerMode) {
-    M5.Lcd.setTextColor(YELLOW, bgColor);
-    M5.Lcd.print("LOW POWER");
-    M5.Lcd.setTextColor(WHITE, bgColor);
-  } else {
-    M5.Lcd.print("AncientVision");
-  }
-  M5.Lcd.setCursor(175, 2);
-  M5.Lcd.printf("%s%d%%", deviceConnected ? "BT" : "--", batteryPercent);
-
-  // Row 2: Large safety status word
-  M5.Lcd.setTextSize(3);
-  M5.Lcd.setCursor(5, 24);
-  if (!ppvCalibrated) {
-    M5.Lcd.setTextColor(YELLOW, bgColor);
-    M5.Lcd.print("CALIBRATING");
-    M5.Lcd.setTextColor(WHITE, bgColor);
-  } else if (currentAlert == CRITICAL) {
-    M5.Lcd.setTextColor(YELLOW, bgColor);
-    M5.Lcd.print("DANGER!");
-  } else if (currentAlert == WARNING) {
-    M5.Lcd.print("CAUTION");
-  } else {
-    M5.Lcd.print("SAFE");
-  }
-  M5.Lcd.setTextColor(WHITE, bgColor);
-
-  // Row 3: Vibration level with visual bar and trend arrow
-  // P77: compute trend character based on previous PPV reading
+  // P208: Compute trend arrow from previous PPV reading
+  // Uses Unicode-safe ASCII arrows: up='^' down='v' flat='>'
   char trendChar = (vibrationPPV > g_lastPpv * 1.05f) ? '^' :
-                   (vibrationPPV < g_lastPpv * 0.95f) ? 'v' : '-';
+                   (vibrationPPV < g_lastPpv * 0.95f) ? 'v' : '>';
   g_lastPpv = vibrationPPV;
 
-  M5.Lcd.setTextSize(2);
-  M5.Lcd.setCursor(5, 52);
-  M5.Lcd.print("Vibr:");
-  const int barX = 65, barW = 110, barH = 12;
-  int filled = constrain((int)(vibrationPPV / PPV_STRUCTURAL_DAMAGE * barW), 0, barW);
-  uint16_t barColor = (vibrationPPV < 3.0f) ? TFT_GREEN :
-                      (vibrationPPV < PPV_STRUCTURAL_DAMAGE) ? YELLOW : RED;
-  M5.Lcd.fillRect(barX, 54, filled, barH, barColor);
-  M5.Lcd.fillRect(barX + filled, 54, barW - filled, barH, TFT_DARKGREY);
-  M5.Lcd.setTextSize(1);
-  M5.Lcd.setCursor(180, 54);
-  M5.Lcd.printf("%.1f%c", vibrationPPV, trendChar);
-
-  // Row 4: Alert description or all-clear
-  M5.Lcd.setTextSize(2);
-  M5.Lcd.setCursor(5, 74);
-  if (currentAlert != SAFE) {
-    if (currentAlert == CRITICAL) M5.Lcd.setTextColor(YELLOW, bgColor);
-    String displayMsg = alertMessage;
-    if (displayMsg.length() > 20) displayMsg = displayMsg.substring(0, 20);
-    M5.Lcd.print(displayMsg);
-    M5.Lcd.setTextColor(WHITE, bgColor);
-  } else {
-    M5.Lcd.print("No hazards detected");
+  // Determine safety label string
+  const char* safeLabel = "SAFE";
+  if (!ppvCalibrated) {
+    safeLabel = "CAL";
+  } else if (currentAlert == CRITICAL) {
+    safeLabel = "DANGER";
+  } else if (currentAlert == WARNING) {
+    safeLabel = "CAUTION";
   }
 
-  // Row 5: Soil moisture + Temperature
-  M5.Lcd.setCursor(5, 96);
-  M5.Lcd.printf("Soil:%d%%", moisturePercent);
-  if (moisturePercent < MOISTURE_MIN_SAFE) {
-    M5.Lcd.setTextColor(YELLOW, bgColor);
-    M5.Lcd.print(" DRY");
-  } else if (moisturePercent > MOISTURE_MAX_SAFE) {
-    M5.Lcd.setTextColor(YELLOW, bgColor);
-    M5.Lcd.print(" WET!");
-  } else {
-    M5.Lcd.print(" OK");
-  }
-  M5.Lcd.setTextColor(WHITE, bgColor);
-  M5.Lcd.printf("  %.0fC", imuTemp);
+  // Line 1: "AV 5.1.0  [W] 85%"
+  // WiFi dot: 'W' if WIFI_ENABLED and connected, '-' otherwise
+  #if WIFI_ENABLED
+  bool wifiOk = (WiFi.status() == WL_CONNECTED);
+  #else
+  bool wifiOk = false;
+  #endif
+  M5.Lcd.setCursor(0, 0);
+  M5.Lcd.printf("AV " FW_VERSION "  %c  %d%%",
+    wifiOk ? 'W' : '-', batteryPercent);
 
-  // Row 6: Four-line info strip (size 1 = 8px per line, fits 4 lines 118..134)
-  // P77: PPV with trend, events, firmware version, boot count
-  M5.Lcd.setTextSize(1);
-  M5.Lcd.setTextColor(WHITE, bgColor);
+  // Line 2: "PPV: 0.123^  SAFE"
+  M5.Lcd.setCursor(0, 10);
+  M5.Lcd.printf("PPV: %.3f%c  %s", vibrationPPV, trendChar, safeLabel);
 
-  // Line 1: PPV with trend arrow
-  M5.Lcd.setCursor(5, 110);
-  M5.Lcd.printf("PPV:%.1fmm/s %c  Bat:%d%%%s",
-    vibrationPPV, trendChar,
-    batteryPercent, batteryCharging ? "+" : "");
+  // Line 3: "Tmp:23.4C  Evt:12  Seq:4521"
+  M5.Lcd.setCursor(0, 20);
+  M5.Lcd.printf("Tmp:%.1fC  Evt:%lu  Seq:%lu",
+    imuTemp, (unsigned long)g_sessionEvts, (unsigned long)g_seq);
 
-  // Line 2: Event count for this session
-  M5.Lcd.setCursor(5, 119);
-  M5.Lcd.printf("Events: %lu", (unsigned long)g_sessionEvts);
-
-  // Line 3: Firmware version
-  M5.Lcd.setCursor(5, 128);
-  M5.Lcd.printf("FW: " FW_VERSION);
-
-  // Line 4: Boot count (persists across deep sleep)
-  M5.Lcd.setCursor(120, 128);
-  M5.Lcd.printf("Boot:%lu", (unsigned long)g_bootCount);
+  // Line 4: "Boots:3  ZZZ" (ZZZ shown if deep sleep countdown is running)
+  M5.Lcd.setCursor(0, 30);
+  #if DEEP_SLEEP_ENABLED
+  bool sleepingSoon = (g_deepSleepCountdownMs > 0 && ppvCalibrated &&
+    (millis() - g_deepSleepCountdownMs > (unsigned long)(DEEP_SLEEP_SAFE_MINUTES - 1) * 60000UL));
+  M5.Lcd.printf("Boots:%lu  %s", (unsigned long)g_bootCount, sleepingSoon ? "ZZZ" : "   ");
+  #else
+  M5.Lcd.printf("Boots:%lu", (unsigned long)g_bootCount);
+  #endif
 }
 
 // ===================== BLE FUNCTIONS =====================
