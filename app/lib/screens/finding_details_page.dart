@@ -1,26 +1,190 @@
+// ignore_for_file: use_build_context_synchronously
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import '../models/finding_model.dart';
+import '../services/critical_event_log_service.dart';
 
 /// Full-screen details page for a finding
-class FindingDetailsPage extends StatelessWidget {
+class FindingDetailsPage extends StatefulWidget {
   final Finding finding;
 
   const FindingDetailsPage({super.key, required this.finding});
 
   @override
+  State<FindingDetailsPage> createState() => _FindingDetailsPageState();
+}
+
+class _FindingDetailsPageState extends State<FindingDetailsPage> {
+  // Vibration risk data loaded from CriticalEventLogService
+  List<CriticalEvent> _nearbyEvents = [];
+  bool _riskLoaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadRiskData();
+  }
+
+  /// Load critical events and filter to those near this finding (within ~500 m).
+  Future<void> _loadRiskData() async {
+    try {
+      final svc = CriticalEventLogService.instance;
+      // ensureLoaded is handled internally by the service
+      final events = svc.events;
+
+      // Filter events that have a GPS location and are within ~500 m of the finding.
+      // We use a simple bounding-box filter (0.005 deg ≈ 500 m).
+      const threshold = 0.005;
+      final nearby = events.where((e) {
+        final loc = e.location;
+        if (loc == null) return false;
+        final dLat = (loc.latitude - widget.finding.latitude).abs();
+        final dLon = (loc.longitude - widget.finding.longitude).abs();
+        return dLat <= threshold && dLon <= threshold;
+      }).toList();
+
+      if (mounted) {
+        setState(() {
+          _nearbyEvents = nearby;
+          _riskLoaded = true;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _riskLoaded = true);
+    }
+  }
+
+  /// Compute risk badge label from nearby CRITICAL events.
+  String get _riskLabel {
+    if (_nearbyEvents.isEmpty) return 'LOW';
+    final maxPpv = _nearbyEvents.map((e) => e.ppv).reduce((a, b) => a > b ? a : b);
+    if (maxPpv >= 2.0) return 'HIGH';
+    if (maxPpv >= 0.5) return 'MEDIUM';
+    return 'LOW';
+  }
+
+  Color get _riskColor {
+    switch (_riskLabel) {
+      case 'HIGH':
+        return const Color(0xFFE53935);
+      case 'MEDIUM':
+        return const Color(0xFFFFC107);
+      default:
+        return const Color(0xFF4CAF50);
+    }
+  }
+
+  double get _peakPpv {
+    if (_nearbyEvents.isEmpty) return 0.0;
+    return _nearbyEvents.map((e) => e.ppv).reduce((a, b) => a > b ? a : b);
+  }
+
+  CriticalEvent? get _lastEvent =>
+      _nearbyEvents.isEmpty ? null : _nearbyEvents.first; // list is newest-first
+
+  /// Export finding details as JSON and share via OS share sheet.
+  Future<void> _exportAsJson() async {
+    try {
+      final f = widget.finding;
+      final data = <String, dynamic>{
+        'id': f.id,
+        'name': f.name,
+        'type': f.type,
+        'site': f.site,
+        'date': f.date,
+        'description': f.description,
+        'latitude': f.latitude,
+        'longitude': f.longitude,
+        'source': f.source.label,
+        'photos_count':
+            f.photoGallery.length + (f.imageUrl != null && f.imageUrl!.isNotEmpty ? 1 : 0),
+        'model3d_available': f.model3dUrl != null,
+        'vibration_risk': {
+          'risk_level': _riskLabel,
+          'peak_ppv_mm_s': _peakPpv,
+          'nearby_critical_events': _nearbyEvents.length,
+          'last_critical_event': _lastEvent?.timestamp.toIso8601String(),
+        },
+        'exported_at': DateTime.now().toIso8601String(),
+      };
+
+      final json = const JsonEncoder.withIndent('  ').convert(data);
+      final dir = await getTemporaryDirectory();
+      final ts = DateTime.now()
+          .toIso8601String()
+          .replaceAll(':', '-')
+          .split('.')
+          .first;
+      final file = File('${dir.path}/finding_${f.id}_$ts.json');
+      await file.writeAsString(json);
+
+      await Share.shareXFiles(
+        [XFile(file.path, mimeType: 'application/json')],
+        subject: 'AncientVision Finding — ${f.id}: ${f.name}',
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Export failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  /// Show a detailed explanation dialog for a measurement row.
+  void _showMeasurementDialog(String label, String value) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1C2523),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(
+          label,
+          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        ),
+        content: Text(
+          value,
+          style: const TextStyle(color: Colors.white70, fontSize: 14, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close', style: TextStyle(color: Color(0xFFFFC107))),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final typeColor = Finding.getTypeColor(finding.type);
+    final typeColor = Finding.getTypeColor(widget.finding.type);
+    final f = widget.finding;
+    final totalPhotos = f.photoGallery.length + (f.imageUrl != null && f.imageUrl!.isNotEmpty ? 1 : 0);
 
     return Scaffold(
       backgroundColor: const Color(0xFF0D3A39),
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        title: Text(finding.id, style: const TextStyle(color: Colors.white)),
+        title: Text(f.id, style: const TextStyle(color: Colors.white)),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back, color: Colors.white),
           onPressed: () => Navigator.pop(context),
         ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.ios_share, color: Colors.white),
+            tooltip: 'Export as JSON',
+            onPressed: _exportAsJson,
+          ),
+        ],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
@@ -51,7 +215,7 @@ class FindingDetailsPage extends StatelessWidget {
                           const SizedBox(width: 12),
                           Expanded(
                             child: Text(
-                              finding.name,
+                              f.name,
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 22,
@@ -71,7 +235,7 @@ class FindingDetailsPage extends StatelessWidget {
                           border: Border.all(color: typeColor, width: 1),
                         ),
                         child: Text(
-                          finding.type,
+                          f.type,
                           style: TextStyle(
                             color: typeColor,
                             fontSize: 12,
@@ -97,11 +261,11 @@ class FindingDetailsPage extends StatelessWidget {
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Text(
-                          finding.description.isNotEmpty
-                              ? finding.description
+                          f.description.isNotEmpty
+                              ? f.description
                               : 'No description available',
                           style: TextStyle(
-                            color: finding.description.isNotEmpty
+                            color: f.description.isNotEmpty
                                 ? Colors.white
                                 : Colors.white54,
                             fontSize: 14,
@@ -113,16 +277,16 @@ class FindingDetailsPage extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 16),
-                // Right: Photo
+                // Right: Photo + photo count badge
                 Expanded(
                   flex: 2,
                   child: Column(
                     children: [
                       ClipRRect(
                         borderRadius: BorderRadius.circular(16),
-                        child: finding.imageUrl != null && finding.imageUrl!.isNotEmpty
+                        child: f.imageUrl != null && f.imageUrl!.isNotEmpty
                             ? Image.network(
-                                finding.imageUrl!,
+                                f.imageUrl!,
                                 height: 180,
                                 width: double.infinity,
                                 fit: BoxFit.cover,
@@ -142,21 +306,50 @@ class FindingDetailsPage extends StatelessWidget {
                                 ),
                               ),
                       ),
-                      // Photo gallery thumbnails
-                      if (finding.photoGallery.isNotEmpty) ...[
+                      // Photo gallery header with count badge
+                      if (f.photoGallery.isNotEmpty) ...[
                         const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            const Text(
+                              'Gallery',
+                              style: TextStyle(color: Colors.white54, fontSize: 11),
+                            ),
+                            const SizedBox(width: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFFC107).withAlpha(51),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: const Color(0xFFFFC107).withAlpha(128),
+                                  width: 1,
+                                ),
+                              ),
+                              child: Text(
+                                '$totalPhotos photos',
+                                style: const TextStyle(
+                                  color: Color(0xFFFFC107),
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
                         SizedBox(
                           height: 50,
                           child: ListView.builder(
                             scrollDirection: Axis.horizontal,
-                            itemCount: finding.photoGallery.length,
+                            itemCount: f.photoGallery.length,
                             itemBuilder: (context, index) {
                               return Padding(
                                 padding: const EdgeInsets.only(right: 8),
                                 child: ClipRRect(
                                   borderRadius: BorderRadius.circular(8),
                                   child: Image.network(
-                                    finding.photoGallery[index],
+                                    f.photoGallery[index],
                                     width: 50,
                                     height: 50,
                                     fit: BoxFit.cover,
@@ -181,14 +374,21 @@ class FindingDetailsPage extends StatelessWidget {
 
             const SizedBox(height: 24),
 
-            // Bottom section: Details cards
+            // Vibration Risk Assessment section
+            _buildVibrationRiskCard(),
+
+            const SizedBox(height: 12),
+
             // Location card
             _buildDetailCard(
               icon: Icons.location_on,
               title: 'Location',
               children: [
-                _buildDetailRow('Site', finding.site),
-                _buildDetailRow('Coordinates', '${finding.latitude.toStringAsFixed(6)}, ${finding.longitude.toStringAsFixed(6)}'),
+                _buildDetailRow('Site', f.site),
+                _buildDetailRow(
+                  'Coordinates',
+                  '${f.latitude.toStringAsFixed(6)}, ${f.longitude.toStringAsFixed(6)}',
+                ),
               ],
             ),
 
@@ -199,63 +399,71 @@ class FindingDetailsPage extends StatelessWidget {
               icon: Icons.info_outline,
               title: 'Information',
               children: [
-                _buildDetailRow('Date Found', finding.date),
-                _buildDetailRow('Source', finding.source.label),
-                if (finding.model3dUrl != null)
+                _buildDetailRow('Date Found', f.date),
+                _buildDetailRow('Source', f.source.label),
+                if (f.model3dUrl != null)
                   _buildDetailRow('3D Model', 'Available'),
               ],
             ),
 
             // Coin details card (shown only for coins)
-            if (finding.isCoin && _hasCoinData()) ...[
+            if (f.isCoin && _hasCoinData()) ...[
               const SizedBox(height: 12),
               _buildDetailCard(
                 icon: Icons.paid,
                 title: 'Coin Details',
                 children: [
-                  if (finding.denomination != null)
-                    _buildDetailRow('Denomination', finding.denomination!),
-                  if (finding.mint != null)
-                    _buildDetailRow('Mint', finding.mint!),
-                  if (finding.ruler != null)
-                    _buildDetailRow('Ruler/Authority', finding.ruler!),
-                  if (finding.obverseLegend != null)
-                    _buildDetailRow('Obverse Legend', finding.obverseLegend!),
-                  if (finding.reverseLegend != null)
-                    _buildDetailRow('Reverse Legend', finding.reverseLegend!),
-                  if (finding.dieAxis != null)
-                    _buildDetailRow('Die Axis', '${finding.dieAxis} o\'clock'),
-                  if (finding.obverseDescription != null)
-                    _buildDetailRow('Obverse Desc.', finding.obverseDescription!),
-                  if (finding.reverseDescription != null)
-                    _buildDetailRow('Reverse Desc.', finding.reverseDescription!),
+                  if (f.denomination != null)
+                    _buildDetailRow('Denomination', f.denomination!),
+                  if (f.mint != null)
+                    _buildDetailRow('Mint', f.mint!),
+                  if (f.ruler != null)
+                    _buildDetailRow('Ruler/Authority', f.ruler!),
+                  if (f.obverseLegend != null)
+                    _buildDetailRow('Obverse Legend', f.obverseLegend!),
+                  if (f.reverseLegend != null)
+                    _buildDetailRow('Reverse Legend', f.reverseLegend!),
+                  if (f.dieAxis != null)
+                    _buildDetailRow('Die Axis', "${f.dieAxis} o'clock"),
+                  if (f.obverseDescription != null)
+                    _buildDetailRow('Obverse Desc.', f.obverseDescription!),
+                  if (f.reverseDescription != null)
+                    _buildDetailRow('Reverse Desc.', f.reverseDescription!),
                 ],
               ),
             ],
 
             // Fragment details card (shown only for fragments)
-            if (finding.isFragment && _hasFragmentData()) ...[
+            if (f.isFragment && _hasFragmentData()) ...[
               const SizedBox(height: 12),
               _buildDetailCard(
                 icon: Icons.broken_image,
                 title: 'Fragment Details',
                 children: [
-                  if (finding.vesselPart != null)
-                    _buildDetailRow('Vessel Part', finding.vesselPart!),
-                  if (finding.wareType != null)
-                    _buildDetailRow('Ware Type', finding.wareType!),
-                  if (finding.decorationStyle != null)
-                    _buildDetailRow('Decoration', finding.decorationStyle!),
-                  if (finding.rimDiameter != null)
-                    _buildDetailRow('Rim Diameter', '${finding.rimDiameter} mm'),
-                  if (finding.wallThickness != null)
-                    _buildDetailRow('Wall Thickness', '${finding.wallThickness} mm'),
-                  if (finding.fabricColorInt != null)
-                    _buildDetailRow('Interior Color', finding.fabricColorInt!),
-                  if (finding.fabricColorExt != null)
-                    _buildDetailRow('Exterior Color', finding.fabricColorExt!),
-                  if (finding.surfaceTreatment != null)
-                    _buildDetailRow('Surface Treatment', finding.surfaceTreatment!),
+                  if (f.vesselPart != null)
+                    _buildDetailRow('Vessel Part', f.vesselPart!),
+                  if (f.wareType != null)
+                    _buildDetailRow('Ware Type', f.wareType!),
+                  if (f.decorationStyle != null)
+                    _buildDetailRow('Decoration', f.decorationStyle!),
+                  if (f.rimDiameter != null)
+                    _buildTappableMeasurementRow(
+                      'Rim Diameter',
+                      '${f.rimDiameter} mm',
+                      'Rim Diameter: ${f.rimDiameter} mm\n\nThe outer diameter of the vessel opening, measured in millimetres. Used for vessel typology and capacity estimation.',
+                    ),
+                  if (f.wallThickness != null)
+                    _buildTappableMeasurementRow(
+                      'Wall Thickness',
+                      '${f.wallThickness} mm',
+                      'Wall Thickness: ${f.wallThickness} mm\n\nThe thickness of the ceramic wall at the measurement point. Thinner walls often indicate wheel-thrown fine ware; thicker walls suggest coarser hand-built vessels.',
+                    ),
+                  if (f.fabricColorInt != null)
+                    _buildDetailRow('Interior Color', f.fabricColorInt!),
+                  if (f.fabricColorExt != null)
+                    _buildDetailRow('Exterior Color', f.fabricColorExt!),
+                  if (f.surfaceTreatment != null)
+                    _buildDetailRow('Surface Treatment', f.surfaceTreatment!),
                 ],
               ),
             ],
@@ -267,16 +475,16 @@ class FindingDetailsPage extends StatelessWidget {
                 icon: Icons.layers,
                 title: 'Stratigraphic Context',
                 children: [
-                  if (finding.locusNumber != null)
-                    _buildDetailRow('Locus/Context', finding.locusNumber!),
-                  if (finding.soilType != null)
-                    _buildDetailRow('Soil Type', finding.soilType!),
-                  if (finding.matrixDescription != null)
-                    _buildDetailRow('Matrix', finding.matrixDescription!),
-                  if (finding.harrisPosition != null)
-                    _buildDetailRow('Harris Position', finding.harrisPosition!),
-                  if (finding.associatedFeatures != null && finding.associatedFeatures!.isNotEmpty)
-                    _buildDetailRow('Associated', finding.associatedFeatures!.join(', ')),
+                  if (f.locusNumber != null)
+                    _buildDetailRow('Locus/Context', f.locusNumber!),
+                  if (f.soilType != null)
+                    _buildDetailRow('Soil Type', f.soilType!),
+                  if (f.matrixDescription != null)
+                    _buildDetailRow('Matrix', f.matrixDescription!),
+                  if (f.harrisPosition != null)
+                    _buildDetailRow('Harris Position', f.harrisPosition!),
+                  if (f.associatedFeatures != null && f.associatedFeatures!.isNotEmpty)
+                    _buildDetailRow('Associated', f.associatedFeatures!.join(', ')),
                 ],
               ),
             ],
@@ -284,7 +492,7 @@ class FindingDetailsPage extends StatelessWidget {
             const SizedBox(height: 12),
 
             // 3D Model button if available
-            if (finding.model3dUrl != null)
+            if (f.model3dUrl != null)
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.all(16),
@@ -327,6 +535,126 @@ class FindingDetailsPage extends StatelessWidget {
       ),
     );
   }
+
+  // ---------------------------------------------------------------------------
+  // Vibration Risk Assessment card
+  // ---------------------------------------------------------------------------
+
+  Widget _buildVibrationRiskCard() {
+    final riskColor = _riskColor;
+    final label = _riskLabel;
+    final lastEvt = _lastEvent;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: riskColor.withAlpha(20),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: riskColor.withAlpha(128), width: 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.vibration, color: riskColor, size: 20),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'Vibration Risk Assessment',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              // Risk badge
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: riskColor.withAlpha(51),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: riskColor, width: 1),
+                ),
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    color: riskColor,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (!_riskLoaded)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white38),
+                  ),
+                  SizedBox(width: 8),
+                  Text('Loading risk data...', style: TextStyle(color: Colors.white54, fontSize: 13)),
+                ],
+              ),
+            )
+          else ...[
+            _buildRiskRow(
+              'Nearby CRITICAL events',
+              _nearbyEvents.isEmpty ? 'None recorded' : '${_nearbyEvents.length}',
+            ),
+            _buildRiskRow(
+              'Peak PPV near finding',
+              _peakPpv > 0 ? '${_peakPpv.toStringAsFixed(3)} mm/s' : 'No data',
+            ),
+            _buildRiskRow(
+              'Last event',
+              lastEvt != null
+                  ? _formatEventTime(lastEvt.timestamp)
+                  : 'No events recorded',
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRiskRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 160,
+            child: Text(label, style: const TextStyle(color: Colors.white54, fontSize: 13)),
+          ),
+          Expanded(
+            child: Text(value, style: const TextStyle(color: Colors.white, fontSize: 13)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatEventTime(DateTime dt) {
+    final now = DateTime.now();
+    final diff = now.difference(dt);
+    if (diff.inMinutes < 60) return '${diff.inMinutes} min ago';
+    if (diff.inHours < 24) return '${diff.inHours} h ago';
+    return '${diff.inDays} days ago';
+  }
+
+  // ---------------------------------------------------------------------------
+  // Shared card / row helpers
+  // ---------------------------------------------------------------------------
 
   Widget _buildDetailCard({
     required IconData icon,
@@ -387,36 +715,76 @@ class FindingDetailsPage extends StatelessWidget {
     );
   }
 
-  /// Check if finding has any coin-specific data
+  /// Tappable measurement row: shows a full explanation dialog on tap.
+  Widget _buildTappableMeasurementRow(
+      String label, String value, String explanation) {
+    return InkWell(
+      onTap: () => _showMeasurementDialog(label, explanation),
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 100,
+              child: Text(
+                label,
+                style: const TextStyle(color: Colors.white54, fontSize: 13),
+              ),
+            ),
+            Expanded(
+              child: Row(
+                children: [
+                  Text(
+                    value,
+                    style: const TextStyle(color: Colors.white, fontSize: 13),
+                  ),
+                  const SizedBox(width: 4),
+                  const Icon(Icons.info_outline, color: Colors.white38, size: 14),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Guard predicates (unchanged from original)
+  // ---------------------------------------------------------------------------
+
   bool _hasCoinData() {
-    return finding.denomination != null ||
-        finding.mint != null ||
-        finding.ruler != null ||
-        finding.obverseLegend != null ||
-        finding.reverseLegend != null ||
-        finding.dieAxis != null ||
-        finding.obverseDescription != null ||
-        finding.reverseDescription != null;
+    final f = widget.finding;
+    return f.denomination != null ||
+        f.mint != null ||
+        f.ruler != null ||
+        f.obverseLegend != null ||
+        f.reverseLegend != null ||
+        f.dieAxis != null ||
+        f.obverseDescription != null ||
+        f.reverseDescription != null;
   }
 
-  /// Check if finding has any fragment-specific data
   bool _hasFragmentData() {
-    return finding.vesselPart != null ||
-        finding.wareType != null ||
-        finding.decorationStyle != null ||
-        finding.rimDiameter != null ||
-        finding.wallThickness != null ||
-        finding.fabricColorInt != null ||
-        finding.fabricColorExt != null ||
-        finding.surfaceTreatment != null;
+    final f = widget.finding;
+    return f.vesselPart != null ||
+        f.wareType != null ||
+        f.decorationStyle != null ||
+        f.rimDiameter != null ||
+        f.wallThickness != null ||
+        f.fabricColorInt != null ||
+        f.fabricColorExt != null ||
+        f.surfaceTreatment != null;
   }
 
-  /// Check if finding has any context/stratigraphic data
   bool _hasContextData() {
-    return finding.locusNumber != null ||
-        finding.soilType != null ||
-        finding.matrixDescription != null ||
-        finding.harrisPosition != null ||
-        (finding.associatedFeatures != null && finding.associatedFeatures!.isNotEmpty);
+    final f = widget.finding;
+    return f.locusNumber != null ||
+        f.soilType != null ||
+        f.matrixDescription != null ||
+        f.harrisPosition != null ||
+        (f.associatedFeatures != null && f.associatedFeatures!.isNotEmpty);
   }
 }
