@@ -1,0 +1,47 @@
+# docker/monitoring/alert_rules.yml
+# Supplementary alert rules for AncientVision monitoring.
+#
+# These rules are intentionally kept minimal and human-readable.  The
+# comprehensive production rule set lives in docker/monitoring/prometheus/rules.yml
+# and is loaded by the prometheus container via the prometheus/prometheus.yml config.
+#
+# To use THIS file instead, update docker/monitoring/prometheus.yml to reference
+# /etc/prometheus/alert_rules.yml and adjust the docker-compose.monitoring.yml
+# volume mount accordingly.
+
+groups:
+  - name: ancientvision_alerts
+    rules:
+      # CRITICAL: data collector unreachable for 2 minutes.
+      # Prometheus marks a target as down when the /metrics scrape fails.
+      - alert: CollectorDown
+        expr: up{job="ancientvision-collector"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Data collector is down"
+          description: "The Flask data collector has been unreachable for 2 minutes"
+
+      # WARNING: anomaly detection firing too frequently.
+      # Requires the collector to expose an ancientvision_anomaly_count_total counter
+      # (e.g. via prometheus_flask_exporter + manual increment on each anomaly event).
+      - alert: HighAnomalyRate
+        expr: rate(ancientvision_anomaly_count_total[5m]) > 0.5
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High anomaly detection rate"
+          description: "More than 0.5 anomalies per second in the last 5 minutes"
+
+      # WARNING: devices have gone silent — possible BLE drop or field power loss.
+      # Uses the existing ancientvision_samples_total counter.
+      - alert: LowSampleRate
+        expr: rate(ancientvision_samples_total[10m]) < 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low sample collection rate"
+          description: "Fewer than 0.1 samples per second collected in last 10 minutes"
