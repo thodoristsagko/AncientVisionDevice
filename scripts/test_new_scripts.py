@@ -2620,3 +2620,582 @@ class TestLongTermTrendReport:
         """--help exits 0."""
         result = self._run(["--help"])
         assert result.returncode == 0
+
+
+# ==========================================================================
+
+# ===========================================================================
+# hyperparameter_report tests
+# ===========================================================================
+
+class TestHyperparameterReport:
+    """Tests for scripts/hyperparameter_report.py"""
+
+    def _run(self, args: list) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "hyperparameter_report.py")] + args,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_no_script(self, tmp_path):
+        """Empty directory: exits 0 and prints 'not found' message."""
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "not found" in result.stdout.lower()
+
+    def test_with_actual_script(self):
+        """
+        Runs on the real train_precursor_classifier.py if it exists.
+        If not found, the script exits 0 with 'not found' -- both are valid.
+        """
+        result = self._run([])
+        assert result.returncode == 0
+        assert (
+            "not found" in result.stdout.lower()
+            or "Hyperparameter Report" in result.stdout
+        )
+
+    def test_output_contains_table_headers_when_script_present(self, tmp_path):
+        """Synthetic script with recognisable patterns produces a table."""
+        fake_script = tmp_path / "train_precursor_classifier.py"
+        lines = [
+            "EPOCHS = 200",
+            "BATCH_SIZE = 64",
+            "learning_rate = 0.001",
+            "PATIENCE = 15",
+            "n_splits = 5",
+            "Dense(128, activation='relu')",
+            "Dense(64, activation='relu')",
+            "l2(0.001)",
+        ]
+        fake_script.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "Parameter" in result.stdout
+        assert "Current Value" in result.stdout
+        assert "Status" in result.stdout
+        assert "epochs" in result.stdout
+        assert "200" in result.stdout
+
+    def test_good_config_reports_good(self, tmp_path):
+        """Well-tuned hyperparameters produce 'GOOD' in summary."""
+        fake_script = tmp_path / "train_precursor_classifier.py"
+        lines = [
+            "EPOCHS = 300",
+            "BATCH_SIZE = 64",
+            "learning_rate = 0.001",
+            "PATIENCE = 20",
+            "n_splits = 5",
+            "Dense(128)",
+            "l2(0.001)",
+        ]
+        fake_script.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "GOOD" in result.stdout
+
+    def test_bad_config_warns(self, tmp_path):
+        """Out-of-range hyperparameters produce WARN status and NEEDS_REVIEW."""
+        fake_script = tmp_path / "train_precursor_classifier.py"
+        lines = [
+            "EPOCHS = 5",
+            "BATCH_SIZE = 1000",
+            "learning_rate = 0.5",
+            "PATIENCE = 2",
+            "n_splits = 5",
+            "Dense(64)",
+            "l2(0.001)",
+        ]
+        fake_script.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "WARN" in result.stdout
+        assert "NEEDS_REVIEW" in result.stdout
+
+    def test_help_flag(self):
+        """--help exits 0."""
+        result = self._run(["--help"])
+        assert result.returncode == 0
+
+
+# ===========================================================================
+# model_size_report tests
+# ===========================================================================
+
+class TestModelSizeReport:
+    """Tests for scripts/model_size_report.py"""
+
+    def _run(self, args: list) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "model_size_report.py")] + args,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_no_models(self, tmp_path):
+        """Empty directory: exits 0 and prints 'No .tflite files found'."""
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "No .tflite files found" in result.stdout
+
+    def test_nonexistent_dir(self, tmp_path):
+        """Non-existent directory: exits 0 with 'No .tflite files found'."""
+        result = self._run(["--model-dir", str(tmp_path / "does_not_exist")])
+        assert result.returncode == 0
+        assert "No .tflite files found" in result.stdout
+
+    def test_with_synthetic_model(self, tmp_path):
+        """Synthetic .tflite file produces a table with expected columns."""
+        model_file = tmp_path / "test_model.tflite"
+        model_file.write_bytes(bytes(10240))
+
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "test_model.tflite" in result.stdout
+        assert "Model" in result.stdout
+        assert "Size KB" in result.stdout
+        assert "Category" in result.stdout
+        assert "2Hz_OK" in result.stdout
+
+    def test_tiny_model_category(self, tmp_path):
+        """A file under 50 KB is classified as TINY."""
+        (tmp_path / "tiny.tflite").write_bytes(bytes(1024))
+
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "TINY" in result.stdout
+
+    def test_large_model_category(self, tmp_path):
+        """A file over 500 KB is classified as LARGE."""
+        (tmp_path / "big.tflite").write_bytes(bytes(600 * 1024))
+
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "LARGE" in result.stdout
+
+    def test_summary_line_present(self, tmp_path):
+        """Output includes a summary line with model count."""
+        (tmp_path / "m.tflite").write_bytes(bytes(4096))
+
+        result = self._run(["--model-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "1 model(s)" in result.stdout
+
+    def test_with_model(self):
+        """
+        Runs on the real precursor_classifier.tflite if it exists.
+        Skip if model absent.
+        """
+        real_assets = Path(_SCRIPTS_DIR).parent / "app" / "assets" / "ml"
+        tflite = real_assets / "precursor_classifier.tflite"
+        if not tflite.exists():
+            pytest.skip("precursor_classifier.tflite not found -- skipping live test")
+
+        result = self._run(["--model-dir", str(real_assets)])
+        assert result.returncode == 0
+        assert "precursor_classifier.tflite" in result.stdout
+        assert "Size KB" in result.stdout
+
+    def test_help_flag(self):
+        """--help exits 0."""
+        result = self._run(["--help"])
+        assert result.returncode == 0
+
+
+# ===========================================================================
+# export_training_dataset tests
+# ===========================================================================
+
+class TestExportTrainingDataset:
+    def _run(self, args: list):
+        env = {**os.environ, 'PYTHONUTF8': '1'}
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / 'export_training_dataset.py')] + args,
+            capture_output=True, text=True, encoding='utf-8', env=env,
+        )
+
+    def test_no_data(self, tmp_path):
+        data_dir = tmp_path / 'data'
+        data_dir.mkdir()
+        output = tmp_path / 'out.csv'
+        result = self._run(['--data-dir', str(data_dir), '--output', str(output)])
+        assert result.returncode == 0
+        assert output.exists()
+        file_lines = output.read_text(encoding='utf-8').splitlines()
+        assert len(file_lines) == 1
+        assert 'ppv' in file_lines[0]
+
+    def test_label_normalization(self, tmp_path):
+        data_dir = tmp_path / 'data'
+        data_dir.mkdir()
+        output = tmp_path / 'out.csv'
+        rows = [
+            {'ppv': '0.05', 'ax': '0.01', 'ay': '0.01', 'az': '0.02', 'label': 'SAFE'},
+            {'ppv': '0.40', 'ax': '0.10', 'ay': '0.10', 'az': '0.20', 'label': 'ANOMALY'},
+            {'ppv': '0.20', 'ax': '0.05', 'ay': '0.05', 'az': '0.10', 'label': 'WARNING'},
+            {'ppv': '0.08', 'ax': '0.01', 'ay': '0.01', 'az': '0.01', 'label': 'safe'},
+            {'ppv': '0.35', 'ax': '0.10', 'ay': '0.10', 'az': '0.15', 'label': 'anomaly'},
+            {'ppv': '0.06', 'ax': '0.01', 'ay': '0.01', 'az': '0.01', 'label': 'normal'},
+            {'ppv': '0.15', 'ax': '0.05', 'ay': '0.05', 'az': '0.05', 'label': 'soil_creep'},
+        ]
+        _write_csv(data_dir / 'session.csv', rows)
+        result = self._run(['--data-dir', str(data_dir), '--output', str(output)])
+        assert result.returncode == 0
+        with open(output, newline='', encoding='utf-8') as fh:
+            reader = csv.DictReader(fh)
+            out_rows = list(reader)
+        assert len(out_rows) == 7
+        labels = [r['label'] for r in out_rows]
+        assert labels.count('normal') >= 3
+        assert labels.count('anomaly') >= 2
+        assert 'precursor' in labels
+        assert 'soil_creep' in labels
+
+    def test_derived_features_computed(self, tmp_path):
+        data_dir = tmp_path / 'data'
+        data_dir.mkdir()
+        output = tmp_path / 'out.csv'
+        rows = [
+            {'ppv': '0.10', 'ax': '0.03', 'ay': '0.04', 'az': '0.05', 'label': 'normal'},
+            {'ppv': '0.12', 'ax': '0.04', 'ay': '0.03', 'az': '0.06', 'label': 'normal'},
+            {'ppv': '0.08', 'ax': '0.02', 'ay': '0.02', 'az': '0.03', 'label': 'normal'},
+        ]
+        _write_csv(data_dir / 'session.csv', rows)
+        result = self._run(['--data-dir', str(data_dir), '--output', str(output)])
+        assert result.returncode == 0
+        with open(output, newline='', encoding='utf-8') as fh:
+            reader = csv.DictReader(fh)
+            out_rows = list(reader)
+        assert len(out_rows) == 3
+        for row in out_rows:
+            assert row['rms'] != ''
+            assert float(row['rms']) > 0.0
+            assert row['kurtosis'] != ''
+            assert row['sta_lta'] != ''
+            assert float(row['sta_lta']) == 1.0
+
+    def test_min_samples_check(self, tmp_path):
+        data_dir = tmp_path / 'data'
+        data_dir.mkdir()
+        output = tmp_path / 'out.csv'
+        rows = [
+            {'ppv': '0.05', 'ax': '0.01', 'ay': '0.01', 'az': '0.02', 'label': 'normal'},
+            {'ppv': '0.08', 'ax': '0.01', 'ay': '0.01', 'az': '0.01', 'label': 'normal'},
+        ]
+        _write_csv(data_dir / 'session.csv', rows)
+        result = self._run([
+            '--data-dir', str(data_dir),
+            '--output', str(output),
+            '--min-samples', '100',
+        ])
+        assert result.returncode == 1
+        combined = result.stderr + result.stdout
+        assert '100' in combined or 'required' in combined
+
+
+# ===========================================================================
+# label_field_data tests
+# ===========================================================================
+
+class TestLabelFieldData:
+    def _run(self, args: list):
+        env = {**os.environ, 'PYTHONUTF8': '1'}
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / 'label_field_data.py')] + args,
+            capture_output=True, text=True, encoding='utf-8', env=env,
+        )
+
+    def test_no_unlabeled(self, tmp_path):
+        data_dir = tmp_path / 'data'
+        data_dir.mkdir()
+        rows = [
+            {'ppv': '0.05', 'ax': '0.01', 'ay': '0.01', 'az': '0.02', 'label': 'normal'},
+            {'ppv': '0.40', 'ax': '0.10', 'ay': '0.10', 'az': '0.20', 'label': 'precursor'},
+        ]
+        csv_path = data_dir / 'session.csv'
+        _write_csv(csv_path, rows)
+        original_content = csv_path.read_text(encoding='utf-8')
+        result = self._run(['--data-dir', str(data_dir), '--auto'])
+        assert result.returncode == 0
+        assert csv_path.read_text(encoding='utf-8') == original_content
+        assert '0 rows' in result.stdout or 'Labeled 0' in result.stdout
+
+    def test_auto_label(self, tmp_path):
+        data_dir = tmp_path / 'data'
+        data_dir.mkdir()
+        rows = [
+            {'ppv': '0.05', 'ax': '0.01', 'ay': '0.01', 'az': '0.02', 'label': ''},
+            {'ppv': '0.20', 'ax': '0.05', 'ay': '0.05', 'az': '0.10', 'label': 'unknown'},
+            {'ppv': '0.50', 'ax': '0.10', 'ay': '0.10', 'az': '0.20', 'label': ''},
+            {'ppv': '0.90', 'ax': '0.20', 'ay': '0.20', 'az': '0.30', 'label': ''},
+            {'ppv': '1.50', 'ax': '0.40', 'ay': '0.40', 'az': '0.60', 'label': ''},
+        ]
+        csv_path = data_dir / 'session.csv'
+        _write_csv(csv_path, rows)
+        result = self._run(['--data-dir', str(data_dir), '--auto'])
+        assert result.returncode == 0
+        with open(csv_path, newline='', encoding='utf-8') as fh:
+            reader = csv.DictReader(fh)
+            out_rows = list(reader)
+        assert len(out_rows) == 5
+        assert out_rows[0]['label'] == 'normal'
+        assert out_rows[1]['label'] == 'normal'
+        assert out_rows[2]['label'] == 'precursor'
+        assert out_rows[3]['label'] == 'precursor'
+        assert out_rows[4]['label'] == 'imminent_failure'
+        assert 'Labeled 5 rows' in result.stdout
+        assert 'normal' in result.stdout
+        assert 'precursor' in result.stdout
+        assert 'imminent_failure' in result.stdout
+
+    def test_backup_created(self, tmp_path):
+        data_dir = tmp_path / 'data'
+        data_dir.mkdir()
+        rows = [{'ppv': '0.05', 'ax': '0.01', 'ay': '0.01', 'az': '0.02', 'label': ''}]
+        csv_path = data_dir / 'session.csv'
+        _write_csv(csv_path, rows)
+        result = self._run(['--data-dir', str(data_dir), '--auto'])
+        assert result.returncode == 0
+        bak_path = data_dir / 'session.csv.bak'
+        assert bak_path.exists()
+
+
+# ===========================================================================
+# TestGenerateFullReport
+# ===========================================================================
+
+class TestGenerateFullReport:
+    """Tests for generate_full_report.py — master batch report generator."""
+
+    def _run(self, args: list):
+        env = {**os.environ, 'PYTHONUTF8': '1'}
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / 'generate_full_report.py')] + args,
+            capture_output=True, text=True, encoding='utf-8', env=env,
+        )
+
+    def test_no_data(self, tmp_path):
+        """Runs without crash even when data-dir has no CSVs; creates output file."""
+        output_path = tmp_path / 'report.md'
+        result = self._run([
+            '--data-dir', str(tmp_path),
+            '--output', str(output_path),
+        ])
+        assert result.returncode == 0
+        assert output_path.exists()
+
+    def test_output_file_created(self, tmp_path):
+        """Output .md file is created after a successful run."""
+        output_path = tmp_path / 'out.md'
+        self._run([
+            '--data-dir', str(tmp_path),
+            '--output', str(output_path),
+        ])
+        assert output_path.exists()
+        content = output_path.read_text(encoding='utf-8')
+        assert len(content) > 0
+
+    def test_sections_present(self, tmp_path):
+        """Each expected section header appears in the generated report."""
+        output_path = tmp_path / 'report.md'
+        self._run([
+            '--data-dir', str(tmp_path),
+            '--output', str(output_path),
+        ])
+        content = output_path.read_text(encoding='utf-8')
+        # Only check headers for scripts that actually exist in the scripts dir.
+        script_to_title = {
+            'field_report.py':        'Field Summary',
+            'session_risk_report.py': 'Session Risk Table',
+            'ppv_trend_analysis.py':  'PPV Trend Analysis',
+            'alert_correlation.py':   'Alert Correlation',
+            'sensor_noise_floor.py':  'Sensor Noise Floor',
+            'retrain_advisor.py':     'Retraining Recommendation',
+            'data_drift_detector.py': 'Data Drift Check',
+            'training_history.py':    'ML Training History',
+            'model_size_report.py':   'Model Sizes',
+            'site_summary_report.py': 'Site Summary',
+        }
+        for script_name, title in script_to_title.items():
+            if (_SCRIPTS_DIR / script_name).exists():
+                assert f'## {title}' in content, (
+                    f"Expected section '## {title}' not found in report"
+                )
+
+    def test_custom_output_path(self, tmp_path):
+        """--output flag writes the report to the specified path."""
+        custom_path = tmp_path / 'subdir' / 'my_report.md'
+        custom_path.parent.mkdir(parents=True, exist_ok=True)
+        result = self._run([
+            '--data-dir', str(tmp_path),
+            '--output', str(custom_path),
+        ])
+        assert result.returncode == 0
+        assert custom_path.exists()
+        content = custom_path.read_text(encoding='utf-8')
+        assert 'AncientVision Field Report' in content
+
+
+# ===========================================================================
+# ppv_forecast tests
+# ===========================================================================
+
+def _ppv_row(ts, ppv: float, label: str = "normal") -> dict:
+    import datetime as _dt
+    if isinstance(ts, _dt.datetime):
+        ts_str = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        ts_str = str(ts)
+    return {
+        "timestamp": ts_str,
+        "ppv": str(ppv),
+        "rms": str(ppv * 0.7),
+        "anomaly_level": label,
+        "device_id": "test-device",
+    }
+
+
+class TestPpvForecast:
+    import subprocess as _sp
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    def _run(self, extra_args):
+        import subprocess, sys
+        from pathlib import Path
+        script = str(Path(__file__).parent / "ppv_forecast.py")
+        return subprocess.run([sys.executable, script] + extra_args,
+                               capture_output=True, text=True)
+
+    def test_no_data(self, tmp_path):
+        result = self._run(["--data-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "No data" in result.stdout
+
+    def test_flat_series(self, tmp_path):
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_ppv_row(base_ts + timedelta(seconds=i * 5), 0.1) for i in range(30)]
+        _write_csv(tmp_path / "session.csv", rows)
+        result = self._run(["--data-dir", str(tmp_path), "--horizon", "5", "--alpha", "0.3"])
+        assert result.returncode == 0
+        assert "FLAT" in result.stdout
+        assert "0.1" in result.stdout
+
+    def test_increasing_series(self, tmp_path):
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_ppv_row(base_ts + timedelta(seconds=i * 5), 0.05 + i * 0.013)
+                for i in range(20)]
+        _write_csv(tmp_path / "session.csv", rows)
+        result = self._run(["--data-dir", str(tmp_path), "--horizon", "5", "--alpha", "0.5"])
+        assert result.returncode == 0
+        assert "INCREASING" in result.stdout
+
+    def test_alpha_clamping(self, tmp_path):
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_ppv_row(base_ts + timedelta(seconds=i * 5), 0.05) for i in range(10)]
+        _write_csv(tmp_path / "session.csv", rows)
+        result = self._run(["--data-dir", str(tmp_path), "--alpha", "9.9"])
+        assert result.returncode == 0
+
+    def test_horizon_clamping(self, tmp_path):
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_ppv_row(base_ts + timedelta(seconds=i * 5), 0.05) for i in range(10)]
+        _write_csv(tmp_path / "session.csv", rows)
+        result = self._run(["--data-dir", str(tmp_path), "--horizon", "999"])
+        assert result.returncode == 0
+
+    def test_output_contains_ci(self, tmp_path):
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_ppv_row(base_ts + timedelta(seconds=i * 5), 0.1) for i in range(20)]
+        _write_csv(tmp_path / "session.csv", rows)
+        result = self._run(["--data-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "95% CI" in result.stdout
+
+    def test_threshold_eta_shown_for_rising_trend(self, tmp_path):
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_ppv_row(base_ts + timedelta(seconds=i * 5), 0.01 + i * 0.02)
+                for i in range(20)]
+        _write_csv(tmp_path / "session.csv", rows)
+        result = self._run(["--data-dir", str(tmp_path), "--alpha", "0.5"])
+        assert result.returncode == 0
+        assert "DIN 4150" in result.stdout
+
+
+# ===========================================================================
+# anomaly_scoring tests
+# ===========================================================================
+
+class TestAnomalyScoring:
+    def _run(self, extra_args):
+        import subprocess, sys
+        from pathlib import Path
+        script = str(Path(__file__).parent / "anomaly_scoring.py")
+        return subprocess.run([sys.executable, script] + extra_args,
+                               capture_output=True, text=True)
+
+    def test_no_data(self, tmp_path):
+        result = self._run(["--data-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "No data" in result.stdout
+
+    def test_all_normal(self, tmp_path):
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_ppv_row(base_ts + timedelta(seconds=i * 5), 0.01, "normal")
+                for i in range(60)]
+        _write_csv(tmp_path / "session.csv", rows)
+        result = self._run(["--data-dir", str(tmp_path), "--window", "5"])
+        assert result.returncode == 0
+        assert "SAFE" in result.stdout
+        assert "WARNING" not in result.stdout
+        assert "CRITICAL" not in result.stdout
+
+    def test_all_critical(self, tmp_path):
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_ppv_row(base_ts + timedelta(seconds=i * 5), 4.5, "imminent_failure")
+                for i in range(60)]
+        _write_csv(tmp_path / "session.csv", rows)
+        result = self._run(["--data-dir", str(tmp_path), "--window", "5"])
+        assert result.returncode == 0
+        assert ("WARNING" in result.stdout or "CRITICAL" in result.stdout)
+
+    def test_output_contains_summary(self, tmp_path):
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_ppv_row(base_ts + timedelta(seconds=i * 5), 0.05) for i in range(30)]
+        _write_csv(tmp_path / "session.csv", rows)
+        result = self._run(["--data-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "Summary" in result.stdout
+
+    def test_output_contains_bar_chart(self, tmp_path):
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = [_ppv_row(base_ts + timedelta(seconds=i * 5), 0.05) for i in range(30)]
+        _write_csv(tmp_path / "session.csv", rows)
+        result = self._run(["--data-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert "[" in result.stdout and "]" in result.stdout
+
+    def test_stalta_column_used_when_present(self, tmp_path):
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = []
+        for i in range(30):
+            row = _ppv_row(base_ts + timedelta(seconds=i * 5), 0.05, "normal")
+            row["sta_lta"] = "4.5"
+            rows.append(row)
+        _write_csv(tmp_path / "session.csv", rows)
+        result = self._run(["--data-dir", str(tmp_path)])
+        assert result.returncode == 0
+        assert ("MONITOR" in result.stdout or "WARNING" in result.stdout
+                or "CRITICAL" in result.stdout)

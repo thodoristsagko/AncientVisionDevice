@@ -18,7 +18,10 @@
         field-report calibrate drift-check retrain-advisor \
         session-risk ppv-trend \
         noise-floor event-duration \
-        training-history feature-importance-report
+        training-history feature-importance-report \
+        full-report \
+        hyperparams model-size \
+        export-dataset label-data
 
 # ---------------------------------------------------------------------------
 # Help
@@ -118,6 +121,8 @@ help:
 	@echo "  retrain-advisor       Evaluate whether ML model retraining is recommended"
 	@echo "  session-risk          Generate per-session risk assessment report"
 	@echo "  ppv-trend             Analyze PPV trend acceleration in field data"
+	@echo "  hyperparams           Report ML hyperparameters and compare to best practices"
+	@echo "  model-size            Analyze TFLite model sizes and deployment suitability"
 	@echo ""
 
 
@@ -797,3 +802,18 @@ training-history: ## Show ML training run history and accuracy trends
 
 feature-importance-report: ## Analyze feature importance using permutation method
 	python scripts/feature_importance_report.py
+
+full-report: ## Generate comprehensive field report combining all analysis outputs
+	python scripts/generate_full_report.py
+
+hyperparams: ## Report ML hyperparameters and compare to best practices
+	python scripts/hyperparameter_report.py
+
+model-size: ## Analyze TFLite model sizes and deployment suitability
+	python scripts/model_size_report.py
+
+export-dataset: ## Export collected data in ML training format
+	python scripts/export_training_dataset.py
+
+label-data: ## Auto-label collected field data by PPV thresholds
+	python scripts/label_field_data.py --auto
