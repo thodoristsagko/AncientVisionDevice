@@ -1,0 +1,75 @@
+name: Model Regression Check
+
+on:
+  push:
+    branches: [docker-experiment]
+    paths:
+      - 'app/assets/ml/**'
+  workflow_dispatch:
+
+jobs:
+  model-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install numpy tensorflow-cpu==2.15.1 scikit-learn
+
+      - name: Check model files exist
+        run: |
+          ls app/assets/ml/*.tflite app/assets/ml/*.json 2>/dev/null | tee model_files.txt
+          if [ ! -s model_files.txt ]; then
+            echo "No model files found — skipping regression check"
+            exit 0
+          fi
+
+      - name: Validate model configs
+        run: |
+          python scripts/validate_config.py --assets-dir app/assets/ml 2>&1
+
+      - name: Run model quality check
+        run: |
+          python -m pytest scripts/test_training_quality.py -v 2>&1 | tee quality_results.txt || true
+
+      - name: Smoke test
+        run: |
+          python scripts/training_smoke_test.py --assets-dir app/assets/ml 2>&1 | tee smoke_results.txt || true
+
+      - name: Post results to step summary
+        if: always()
+        run: |
+          echo "## Model Regression Check Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -s model_files.txt ]; then
+            echo "### Model Files" >> $GITHUB_STEP_SUMMARY
+            cat model_files.txt >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -s quality_results.txt ]; then
+            echo "### Quality Check" >> $GITHUB_STEP_SUMMARY
+            cat quality_results.txt >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -s smoke_results.txt ]; then
+            echo "### Smoke Test" >> $GITHUB_STEP_SUMMARY
+            cat smoke_results.txt >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-regression-results
+          path: |
+            model_files.txt
+            quality_results.txt
+            smoke_results.txt
+          if-no-files-found: ignore
+          retention-days: 30

@@ -1,0 +1,49 @@
+name: Test Coverage Report
+
+on:
+  push:
+    branches: [docker-experiment]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * 0'
+
+jobs:
+  python-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install pytest pytest-cov flask werkzeug
+
+      - name: Run tests with coverage
+        run: |
+          python -m pytest \
+            docker/collect/test_app.py \
+            docker/watcher/test_watch.py \
+            scripts/test_run_pipeline.py \
+            scripts/test_simulate.py \
+            -v --cov=docker/collect --cov=docker/watcher --cov=scripts \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            2>&1 | tee coverage_output.txt
+
+      - name: Post coverage summary
+        if: always()
+        run: |
+          echo "## Python Test Coverage" >> $GITHUB_STEP_SUMMARY
+          cat coverage_output.txt | grep -E "TOTAL|PASSED|FAILED" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 14
