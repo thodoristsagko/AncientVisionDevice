@@ -1,0 +1,70 @@
+groups:
+  - name: ancientvision
+    interval: 30s
+    rules:
+      # Critical: Data collector is not responding
+      - alert: CollectorDown
+        expr: up{job="ancientvision-collector"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: data-collector
+        annotations:
+          summary: "AncientVision data collector is down"
+          description: "The data collector at {{ $labels.instance }} has not responded for 1+ minutes"
+          runbook_url: "https://github.com/AncientVision/docs/monitoring#collector-down"
+
+      # Warning: High rate of HTTP 5xx errors
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{job="ancientvision-collector",status=~"5.."}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          service: data-collector
+        annotations:
+          summary: "High error rate detected in data collector"
+          description: "Data collector is returning 5xx errors at {{ $value | humanize }} req/s (threshold: 0.1 req/s)"
+
+      # Warning: High rate limiting rejections
+      - alert: HighRateLimitRejections
+        expr: increase(ancientvision_rate_limit_hits_total[5m]) > 50
+        for: 2m
+        labels:
+          severity: warning
+          service: data-collector
+        annotations:
+          summary: "Data collector rejecting many requests due to rate limiting"
+          description: "{{ $value | humanize }} requests were rate-limited in the last 5 minutes"
+
+      # Info: No active devices (low activity)
+      - alert: NoActiveDevices
+        expr: ancientvision_devices_active == 0
+        for: 5m
+        labels:
+          severity: info
+          service: data-collector
+        annotations:
+          summary: "No active devices sending data to collector"
+          description: "The data collector has not received samples from any devices for 5+ minutes"
+
+      # Warning: Low sample ingestion rate
+      - alert: LowSampleIngestionRate
+        expr: rate(ancientvision_samples_total[5m]) < 1
+        for: 5m
+        labels:
+          severity: warning
+          service: data-collector
+        annotations:
+          summary: "Data collector sample ingestion rate is very low"
+          description: "Sample ingestion rate is {{ $value | humanize }} samples/s (expected > 1 sample/s)"
+
+      # Warning: High request latency
+      - alert: HighRequestLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="ancientvision-collector"}[5m])) > 0.5
+        for: 2m
+        labels:
+          severity: warning
+          service: data-collector
+        annotations:
+          summary: "Data collector is experiencing high request latency"
+          description: "95th percentile request latency is {{ $value | humanizeFloat(2) }}s (threshold: 0.5s)"
