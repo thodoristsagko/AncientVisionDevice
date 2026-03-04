@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'adaptive_anomaly_service.dart';
+import 'inference_timing_service.dart';
 import 'ml_anomaly_service.dart';
 import 'precursor_classifier_service.dart';
 
@@ -277,9 +278,12 @@ class VibrationAnomalyService {
       final sw = Stopwatch()..start();
       _interpreter!.run(inputTensor, outputTensor);
       sw.stop();
-      _avgInferenceMs = (_avgInferenceMs * _inferenceCount + sw.elapsedMilliseconds) /
+      final elapsedMs = sw.elapsedMilliseconds.toDouble();
+      _avgInferenceMs = (_avgInferenceMs * _inferenceCount + elapsedMs) /
           (_inferenceCount + 1);
       _inferenceCount++;
+      // P48: report to shared timing service for diagnostics display
+      InferenceTimingService.instance.record(elapsedMs);
 
       // Calculate reconstruction error (MSE)
       double mse = 0;
