@@ -23,7 +23,8 @@
         hyperparams model-size \
         export-dataset label-data \
         ppv-forecast anomaly-scoring \
-        device-health signal-quality
+        device-health signal-quality \
+        compliance deployment-check battery-estimate sync-app clean-docker
 
 # ---------------------------------------------------------------------------
 # Help
@@ -125,6 +126,13 @@ help:
 	@echo "  ppv-trend             Analyze PPV trend acceleration in field data"
 	@echo "  hyperparams           Report ML hyperparameters and compare to best practices"
 	@echo "  model-size            Analyze TFLite model sizes and deployment suitability"
+	@echo ""
+	@echo "  compliance            Check field data against DIN 4150-3 / BS 7385-2 / ISO 4866 standards"
+	@echo "  deployment-check      Verify all ML assets and configs are ready for field deployment"
+	@echo "  battery-estimate      Estimate M5StickC Plus 2 battery life by operating mode"
+	@echo "  full-report           Generate comprehensive field report combining all analysis outputs"
+	@echo "  sync-app              Echo instructions to sync app/lib to standalone AncientVision repo"
+	@echo "  clean-docker          Stop all compose stacks, remove volumes and orphan containers"
 	@echo ""
 
 
@@ -831,3 +839,71 @@ device-health: ## Quick health check for all known devices
 
 signal-quality: ## Analyze BLE signal quality from collected data
 	python scripts/signal_quality_report.py
+
+# ---------------------------------------------------------------------------
+# Compliance & Deployment targets
+# ---------------------------------------------------------------------------
+
+compliance: ## Check field data against DIN 4150-3 / BS 7385-2 / ISO 4866 vibration standards
+	@echo "==> Running compliance report against all vibration standards..."
+	python scripts/compliance_report.py --standard all
+
+deployment-check: ## Verify all ML assets and configs are ready for field deployment
+	@echo "==> Running deployment readiness check..."
+	python scripts/deployment_readiness.py
+
+battery-estimate: ## Estimate M5StickC Plus 2 battery life by operating mode
+	@echo "==> Estimating battery life for all operating modes..."
+	python scripts/battery_life_estimator.py
+
+# ---------------------------------------------------------------------------
+# Full report (wraps generate_full_report.py if present)
+# ---------------------------------------------------------------------------
+
+full-report: ## Generate comprehensive field report combining all analysis outputs
+	@echo "==> Generating full field report..."
+	@if [ -f scripts/generate_full_report.py ]; then \
+		python scripts/generate_full_report.py \
+			$(if $(OUTPUT),--output "$(OUTPUT)",) \
+			$(if $(DATA_DIR),--data-dir "$(DATA_DIR)",); \
+	else \
+		echo "WARNING: scripts/generate_full_report.py not found"; \
+	fi
+
+# ---------------------------------------------------------------------------
+# Sync-app: instructions for copying app/lib to the standalone AncientVision repo
+# NOTE: Paths are machine-specific — this target only echoes guidance.
+#       Do NOT implement the copy here; adjust paths for your environment.
+# ---------------------------------------------------------------------------
+
+sync-app: ## Echo instructions to sync app/lib to the standalone AncientVision repo
+	@echo ""
+	@echo "  sync-app — how to mirror app/lib to the standalone AncientVision Flutter repo"
+	@echo "  -------------------------------------------------------------------------"
+	@echo "  1. Identify your standalone repo path, e.g.:"
+	@echo "       ~/Desktop/FLL_Thodoris/AncientVisionFLL/AncientVision/"
+	@echo ""
+	@echo "  2. Copy lib/ and pubspec files:"
+	@echo "       rsync -av --delete app/lib/ <STANDALONE_REPO>/lib/"
+	@echo "       cp app/pubspec.yaml app/pubspec.lock <STANDALONE_REPO>/"
+	@echo ""
+	@echo "  3. Copy ML assets:"
+	@echo "       rsync -av app/assets/ <STANDALONE_REPO>/assets/"
+	@echo ""
+	@echo "  4. Run flutter pub get in the standalone repo to update dependencies."
+	@echo ""
+	@echo "  Paths are machine-specific — edit this target's recipe if you want"
+	@echo "  to automate the copy for your workstation."
+	@echo ""
+
+# ---------------------------------------------------------------------------
+# Clean-docker: full teardown including volumes
+# ---------------------------------------------------------------------------
+
+clean-docker: ## Stop all compose stacks, remove volumes and orphan containers
+	@echo "==> Stopping and removing all compose stacks (including volumes)..."
+	docker compose -f docker-compose.yml down --volumes --remove-orphans || true
+	docker compose -f docker-compose.collect.yml down --volumes --remove-orphans || true
+	docker compose -f docker-compose.train.yml down --volumes --remove-orphans || true
+	docker compose -f docker-compose.dev.yml down --volumes --remove-orphans || true
+	@echo "==> Done. Run 'make clean' to also prune dangling Docker images/networks."
