@@ -1075,6 +1075,8 @@ void setup() {
       (unsigned long)(ESP.getFlashChipSize() / 1024),
       (unsigned long)esp_get_free_heap_size(),
       psramStr);
+    Serial.printf("[BOOT] Free heap: %d bytes\n", ESP.getFreeHeap());
+    Serial.printf("[BOOT] SDK version: %s\n", ESP.getSdkVersion());
     Serial.printf("Boot reason: %s\n", bootReasonStr);
     Serial.printf("Reboot count: %lu\n", (unsigned long)g_bootCount);
     Serial.printf("Accel bias: X=%.4fg Y=%.4fg Z=%.4fg\n",
@@ -1769,9 +1771,19 @@ void updateDisplay() {
     deviceConnected ? "BLE" : "   ",  // BLE connection status
     wifiOk ? " W" : "  ");            // WiFi connection status
 
-  // Line 2: "PPV: 0.123^  SAFE"
+  // Line 2: "PPV: 0.123^  SAFE" — status label color-coded for at-a-glance field visibility
   M5.Lcd.setCursor(0, 10);
-  M5.Lcd.printf("PPV: %.3f%c  %s", vibrationPPV, trendChar, safeLabel);
+  M5.Lcd.printf("PPV: %.3f%c  ", vibrationPPV, trendChar);
+  // Color-code the status label text (background already set via bgColor)
+  if (currentAlert == CRITICAL || strcmp(safeLabel, "DANGER") == 0) {
+    M5.Lcd.setTextColor(RED, bgColor);
+  } else if (currentAlert == WARNING || strcmp(safeLabel, "CAUTION") == 0) {
+    M5.Lcd.setTextColor(YELLOW, bgColor);
+  } else {
+    M5.Lcd.setTextColor(GREEN, bgColor);
+  }
+  M5.Lcd.print(safeLabel);
+  M5.Lcd.setTextColor(WHITE, bgColor);  // Reset to white for subsequent lines
 
   // Line 3: "Tmp:23.4C  Evt:12  Seq:4521"
   M5.Lcd.setCursor(0, 20);
@@ -1823,9 +1835,9 @@ void sendBLEData() {
 
   // Send simplified IMU JSON (only firmware-computed features)
   // Buffer sized for: existing fields + fw(5) + seq(10) + evtMs(10) + boots(10) + evts(10)
-  //                 + cal(1) + gain(2) + chg(1) + tmp(6) + up(10) + dbg(1) + ts(12) + led(1)
+  //                 + cal(1) + gain(2) + chg(1) + tmp(6) + up(10) + uptime_s(10) + dbg(1) + ts(12) + led(1)
   //                 + alert_ms(10) + bat_low(1) + mcu_tmp(5) + wdt_resets(5) + overhead
-  char imuData[450];
+  char imuData[470];
   uint32_t evtMs = g_evtActive ? (uint32_t)(millis() - g_evtStartMs) : 0u;
   uint32_t alertMs = (uint32_t)(millis() - g_alertStartMs);  // How long current alert level has been active
   uint32_t uptimeSec = millis() / 1000u;  // P146: device uptime in seconds
@@ -1835,12 +1847,12 @@ void sendBLEData() {
     "{\"ppv\":%.1f,\"stalta\":%.2f,\"rms\":%.4f,\"peak\":%.4f,\"crest\":%.1f,\"temp\":%.1f,\"mag\":%.4f"
     ",\"fw\":\"" FW_VERSION "\",\"seq\":%lu,\"evtMs\":%lu,\"boots\":%lu,\"evts\":%lu"
     ",\"cal\":%d,\"gain\":%d,\"chg\":%d"
-    ",\"tmp\":%.1f,\"up\":%lu,\"dbg\":%d,\"ts\":%lu,\"led\":%d,\"alert_ms\":%lu"
+    ",\"tmp\":%.1f,\"up\":%lu,\"uptime_s\":%lu,\"dbg\":%d,\"ts\":%lu,\"led\":%d,\"alert_ms\":%lu"
     ",\"bat_low\":%d,\"mcu_tmp\":%.1f,\"wdt_resets\":%lu}",
     vibrationPPV, staLtaRatio, vibrationRMS, vibrationPeak, crestFactor, imuTemp, vibrationMagnitude,
     (unsigned long)g_seq, (unsigned long)evtMs, (unsigned long)g_bootCount, (unsigned long)g_sessionEvts,
     g_calibrating ? 1 : 0, g_highGainMode ? 16 : 4, batteryCharging ? 1 : 0,
-    imuTemp, (unsigned long)uptimeSec, g_debugMode ? 1 : 0, (unsigned long)tsNow,
+    imuTemp, (unsigned long)uptimeSec, (unsigned long)uptimeSec, g_debugMode ? 1 : 0, (unsigned long)tsNow,
     g_ledState ? 1 : 0,    // P229: current LED state
     (unsigned long)alertMs,  // How long current alert level has been active (supports P59 escalation)
     batLow ? 1 : 0,          // Low battery warning (<20%)
