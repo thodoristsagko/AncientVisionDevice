@@ -1,22 +1,184 @@
-import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:intl/intl.dart';
 
 /// Screen to view and export vibration safety alert history
-class VibrationEventLogScreen extends StatelessWidget {
+class VibrationEventLogScreen extends StatefulWidget {
   const VibrationEventLogScreen({super.key});
+
+  @override
+  State<VibrationEventLogScreen> createState() =>
+      _VibrationEventLogScreenState();
+}
+
+class _VibrationEventLogScreenState extends State<VibrationEventLogScreen> {
+  // Filter state: null means "All"
+  String? _levelFilter;
+
+  // Search state
+  bool _searchActive = false;
+  String _searchQuery = '';
+  final TextEditingController _searchController = TextEditingController();
+
+  static const _levels = ['SAFE', 'CAUTION', 'CRITICAL'];
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  /// Returns true if the document matches the active level filter and search query.
+  bool _matches(Map<String, dynamic> data) {
+    final level = (data['level'] ?? '').toString().toUpperCase();
+    if (_levelFilter != null && level != _levelFilter) return false;
+    if (_searchQuery.isNotEmpty) {
+      final msg = (data['message'] ?? '').toString().toLowerCase();
+      if (!msg.contains(_searchQuery.toLowerCase())) return false;
+    }
+    return true;
+  }
+
+  /// Export the currently-filtered events as a simple CSV via share_plus.
+  Future<void> _exportFilteredCSV(
+      BuildContext context, List<QueryDocumentSnapshot> allDocs) async {
+    try {
+      final filtered =
+          allDocs.where((d) => _matches(d.data() as Map<String, dynamic>)).toList();
+
+      if (filtered.isEmpty) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No events to export')),
+          );
+        }
+        return;
+      }
+
+      final buffer = StringBuffer();
+      buffer.writeln('timestamp,level,ppv,message');
+
+      for (final doc in filtered) {
+        final d = doc.data() as Map<String, dynamic>;
+        final ts = d['timestamp'] as Timestamp?;
+        final time = ts != null
+            ? DateFormat('yyyy-MM-dd HH:mm:ss').format(ts.toDate())
+            : 'Unknown';
+        final level = (d['level'] ?? '').toString();
+        final ppv = d['ppv']?.toStringAsFixed(2) ?? '';
+        final message =
+            '"${(d['message'] ?? '').toString().replaceAll('"', '""')}"';
+        buffer.writeln('$time,$level,$ppv,$message');
+      }
+
+      final csvBytes = Uint8List.fromList(buffer.toString().codeUnits);
+      await Share.shareXFiles(
+        [
+          XFile.fromData(
+            csvBytes,
+            mimeType: 'text/csv',
+            name: 'vibration_events.csv',
+          )
+        ],
+        subject: 'AncientVision Vibration Events',
+      );
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('Export failed: $e'),
+              backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  Widget _buildFilterChips() {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: Row(
+        children: [
+          _FilterChip(
+            label: 'All',
+            selected: _levelFilter == null,
+            color: Colors.white70,
+            onTap: () => setState(() => _levelFilter = null),
+          ),
+          const SizedBox(width: 8),
+          ..._levels.map((lvl) {
+            final color = _chipColor(lvl);
+            return Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: _FilterChip(
+                label: lvl,
+                selected: _levelFilter == lvl,
+                color: color,
+                onTap: () => setState(
+                    () => _levelFilter = _levelFilter == lvl ? null : lvl),
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  Color _chipColor(String level) {
+    switch (level) {
+      case 'CRITICAL':
+        return Colors.red;
+      case 'CAUTION':
+        return Colors.orange;
+      case 'SAFE':
+        return Colors.green;
+      default:
+        return Colors.white70;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF0D3A39),
       appBar: AppBar(
-        title: const Text('Safety Alert History'),
         backgroundColor: Colors.transparent,
         elevation: 0,
+        title: _searchActive
+            ? TextField(
+                controller: _searchController,
+                autofocus: true,
+                style: const TextStyle(color: Colors.white),
+                cursorColor: const Color(0xFFFFC107),
+                decoration: const InputDecoration(
+                  hintText: 'Search messages…',
+                  hintStyle: TextStyle(color: Colors.white38),
+                  border: InputBorder.none,
+                ),
+                onChanged: (v) => setState(() => _searchQuery = v),
+              )
+            : const Text('Safety Alert History'),
+        actions: [
+          // Search toggle
+          IconButton(
+            icon: Icon(
+              _searchActive ? Icons.close : Icons.search,
+              color: Colors.white,
+            ),
+            tooltip: _searchActive ? 'Close search' : 'Search',
+            onPressed: () {
+              setState(() {
+                _searchActive = !_searchActive;
+                if (!_searchActive) {
+                  _searchQuery = '';
+                  _searchController.clear();
+                }
+              });
+            },
+          ),
+        ],
       ),
       body: StreamBuilder<QuerySnapshot>(
         stream: FirebaseFirestore.instance
@@ -40,13 +202,16 @@ class VibrationEventLogScreen extends StatelessWidget {
             );
           }
 
-          final docs = snapshot.data?.docs ?? [];
-          if (docs.isEmpty) {
+          final allDocs = snapshot.data?.docs ?? [];
+
+          // Empty data state (no docs at all)
+          if (allDocs.isEmpty) {
             return const Center(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.check_circle_outline, color: Colors.green, size: 64),
+                  Icon(Icons.check_circle_outline,
+                      color: Colors.green, size: 64),
                   SizedBox(height: 16),
                   Text(
                     'No safety alerts recorded',
@@ -63,85 +228,103 @@ class VibrationEventLogScreen extends StatelessWidget {
             );
           }
 
-          return ListView.builder(
-            padding: const EdgeInsets.all(16),
-            itemCount: docs.length,
-            itemBuilder: (context, index) {
-              final data = docs[index].data() as Map<String, dynamic>;
-              return _AlertTile(data: data);
-            },
+          final filtered = allDocs
+              .where((d) => _matches(d.data() as Map<String, dynamic>))
+              .toList();
+
+          return Column(
+            children: [
+              _buildFilterChips(),
+              // Export icon sits above the list — kept in a row for clarity
+              Align(
+                alignment: Alignment.centerRight,
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 12, bottom: 4),
+                  child: TextButton.icon(
+                    onPressed: () => _exportFilteredCSV(context, allDocs),
+                    icon: const Icon(Icons.download,
+                        color: Color(0xFFFFC107), size: 18),
+                    label: const Text(
+                      'Export CSV',
+                      style: TextStyle(color: Color(0xFFFFC107), fontSize: 13),
+                    ),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: filtered.isEmpty
+                    ? const Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.timeline_outlined,
+                                color: Colors.white38, size: 56),
+                            SizedBox(height: 16),
+                            Text(
+                              'No events match your filter',
+                              style: TextStyle(
+                                  color: Colors.white54, fontSize: 16),
+                            ),
+                          ],
+                        ),
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 88),
+                        itemCount: filtered.length,
+                        itemBuilder: (context, index) {
+                          final data = filtered[index].data()
+                              as Map<String, dynamic>;
+                          return _AlertTile(data: data);
+                        },
+                      ),
+              ),
+            ],
           );
         },
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _exportCSV(context),
-        backgroundColor: const Color(0xFFFFC107),
-        icon: const Icon(Icons.file_download, color: Colors.black),
-        label: const Text('Export CSV', style: TextStyle(color: Colors.black)),
-      ),
     );
   }
+}
 
-  Future<void> _exportCSV(BuildContext context) async {
-    try {
-      final snapshot = await FirebaseFirestore.instance
-          .collection('safety_alerts')
-          .orderBy('timestamp', descending: true)
-          .limit(500)
-          .get();
+/// Small styled filter chip used in the filter bar.
+class _FilterChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final Color color;
+  final VoidCallback onTap;
 
-      if (snapshot.docs.isEmpty) {
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('No alerts to export')),
-          );
-        }
-        return;
-      }
+  const _FilterChip({
+    required this.label,
+    required this.selected,
+    required this.color,
+    required this.onTap,
+  });
 
-      final buffer = StringBuffer();
-      buffer.writeln('Timestamp,Level,Hazard Type,Message,PPV (mm/s),RMS (g),Frequency (Hz),Crest Factor,Kurtosis,STA/LTA,Latitude,Longitude,Device,Assessment');
-
-      for (final doc in snapshot.docs) {
-        final d = doc.data();
-        final ts = d['timestamp'] as Timestamp?;
-        final time = ts != null
-            ? DateFormat('yyyy-MM-dd HH:mm:ss').format(ts.toDate())
-            : 'Unknown';
-
-        buffer.writeln([
-          time,
-          d['level'] ?? '',
-          d['hazardType'] ?? '',
-          '"${(d['message'] ?? '').toString().replaceAll('"', '""')}"',
-          d['ppv']?.toStringAsFixed(2) ?? '',
-          d['rms']?.toStringAsFixed(4) ?? '',
-          d['freq']?.toStringAsFixed(1) ?? '',
-          d['crest']?.toStringAsFixed(1) ?? '',
-          d['kurtosis']?.toStringAsFixed(2) ?? '',
-          d['staLta']?.toStringAsFixed(2) ?? '',
-          d['latitude']?.toStringAsFixed(6) ?? '',
-          d['longitude']?.toStringAsFixed(6) ?? '',
-          d['deviceName'] ?? '',
-          '"${(d['assessment'] ?? '').toString().replaceAll('"', '""')}"',
-        ].join(','));
-      }
-
-      final dir = await getTemporaryDirectory();
-      final file = File('${dir.path}/safety_alerts_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv');
-      await file.writeAsString(buffer.toString());
-
-      await Share.shareXFiles(
-        [XFile(file.path)],
-        subject: 'AncientVision Safety Alert Log',
-      );
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Export failed: $e'), backgroundColor: Colors.red),
-        );
-      }
-    }
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        decoration: BoxDecoration(
+          color: selected ? color.withValues(alpha: 0.25) : Colors.white10,
+          border: Border.all(
+            color: selected ? color : Colors.white24,
+            width: selected ? 1.5 : 1,
+          ),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? color : Colors.white54,
+            fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+            fontSize: 13,
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -207,22 +390,26 @@ class _AlertTile extends StatelessWidget {
                           const SizedBox(width: 8),
                           Text(
                             hazard,
-                            style: const TextStyle(color: Colors.white54, fontSize: 12),
+                            style: const TextStyle(
+                                color: Colors.white54, fontSize: 12),
                           ),
                         ],
                         const Spacer(),
                         if (hasGps)
-                          const Icon(Icons.location_on, color: Colors.green, size: 14),
+                          const Icon(Icons.location_on,
+                              color: Colors.green, size: 14),
                       ],
                     ),
                     const SizedBox(height: 4),
                     Text(
                       'PPV: ${ppv.toStringAsFixed(1)} mm/s',
-                      style: const TextStyle(color: Colors.white, fontSize: 14),
+                      style:
+                          const TextStyle(color: Colors.white, fontSize: 14),
                     ),
                     Text(
                       timeStr,
-                      style: const TextStyle(color: Colors.white38, fontSize: 11),
+                      style: const TextStyle(
+                          color: Colors.white38, fontSize: 11),
                     ),
                   ],
                 ),
@@ -263,31 +450,47 @@ class _AlertTile extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 4),
-              Text(timeStr, style: const TextStyle(color: Colors.white54)),
+              Text(timeStr,
+                  style: const TextStyle(color: Colors.white54)),
               const Divider(color: Colors.white24, height: 24),
               if (data['message'] != null)
                 Text(
                   data['message'].toString(),
-                  style: const TextStyle(color: Colors.white70, fontSize: 14),
+                  style:
+                      const TextStyle(color: Colors.white70, fontSize: 14),
                 ),
               const SizedBox(height: 12),
-              _detailRow('Hazard Type', data['hazardType']?.toString() ?? 'N/A'),
-              _detailRow('PPV', '${data['ppv']?.toStringAsFixed(2) ?? 'N/A'} mm/s'),
-              _detailRow('RMS', '${data['rms']?.toStringAsFixed(4) ?? 'N/A'} g'),
-              _detailRow('Frequency', '${data['freq']?.toStringAsFixed(1) ?? 'N/A'} Hz'),
-              _detailRow('Crest Factor', data['crest']?.toStringAsFixed(1) ?? 'N/A'),
+              _detailRow('Hazard Type',
+                  data['hazardType']?.toString() ?? 'N/A'),
+              _detailRow('PPV',
+                  '${data['ppv']?.toStringAsFixed(2) ?? 'N/A'} mm/s'),
+              _detailRow('RMS',
+                  '${data['rms']?.toStringAsFixed(4) ?? 'N/A'} g'),
+              _detailRow('Frequency',
+                  '${data['freq']?.toStringAsFixed(1) ?? 'N/A'} Hz'),
+              _detailRow('Crest Factor',
+                  data['crest']?.toStringAsFixed(1) ?? 'N/A'),
               if (data['kurtosis'] != null)
-                _detailRow('Kurtosis', data['kurtosis'].toStringAsFixed(2)),
+                _detailRow(
+                    'Kurtosis', data['kurtosis'].toStringAsFixed(2)),
               if (data['staLta'] != null)
                 _detailRow('STA/LTA', data['staLta'].toStringAsFixed(2)),
               if (data['latitude'] != null && data['longitude'] != null)
-                _detailRow('Location', '${data['latitude'].toStringAsFixed(6)}, ${data['longitude'].toStringAsFixed(6)}'),
-              _detailRow('Device', data['deviceName']?.toString() ?? 'N/A'),
-              if (data['assessment'] != null && data['assessment'].toString().isNotEmpty) ...[
+                _detailRow(
+                    'Location',
+                    '${data['latitude'].toStringAsFixed(6)}, '
+                        '${data['longitude'].toStringAsFixed(6)}'),
+              _detailRow(
+                  'Device', data['deviceName']?.toString() ?? 'N/A'),
+              if (data['assessment'] != null &&
+                  data['assessment'].toString().isNotEmpty) ...[
                 const SizedBox(height: 8),
                 Text(
                   data['assessment'].toString(),
-                  style: const TextStyle(color: Colors.white60, fontSize: 12, fontStyle: FontStyle.italic),
+                  style: const TextStyle(
+                      color: Colors.white60,
+                      fontSize: 12,
+                      fontStyle: FontStyle.italic),
                 ),
               ],
               const SizedBox(height: 16),
@@ -305,10 +508,13 @@ class _AlertTile extends StatelessWidget {
         children: [
           SizedBox(
             width: 110,
-            child: Text(label, style: const TextStyle(color: Colors.white54, fontSize: 13)),
+            child: Text(label,
+                style:
+                    const TextStyle(color: Colors.white54, fontSize: 13)),
           ),
           Expanded(
-            child: Text(value, style: const TextStyle(color: Colors.white, fontSize: 13)),
+            child: Text(value,
+                style: const TextStyle(color: Colors.white, fontSize: 13)),
           ),
         ],
       ),
