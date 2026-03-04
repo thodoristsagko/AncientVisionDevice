@@ -80,6 +80,14 @@ class CriticalEventLogService {
   /// Call [_ensureLoaded] first if you need persistence across launches.
   List<CriticalEvent> get events => List.unmodifiable(_events);
 
+  /// Ensures persisted events are loaded, then returns an unmodifiable list.
+  ///
+  /// Prefer this over [events] when you need the full history on app start.
+  Future<List<CriticalEvent>> loadEvents() async {
+    await _ensureLoaded();
+    return List.unmodifiable(_events);
+  }
+
   /// Record a CRITICAL event.  Attempts to obtain a GPS fix (up to 15 s).
   ///
   /// Safe to call from any async context; never throws.

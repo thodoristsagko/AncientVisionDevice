@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
@@ -9,10 +9,14 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
 import 'package:file_picker/file_picker.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import '../models/finding_model.dart';
 import '../services/geojson_service.dart';
 import '../services/shapefile_service.dart';
 import '../services/cached_tile_provider.dart';
+import '../services/location_service.dart';
+import '../services/critical_event_log_service.dart';
 
 class FindingsMap extends StatefulWidget {
   final List<Finding> findings;
@@ -35,14 +39,28 @@ class _FindingsMapState extends State<FindingsMap> {
   bool _useSatellite = true;
   bool _showFindings = true;
   bool _showLayerPanel = false;
+  bool _showAlerts = true;
+  bool _showSensorMarker = true;
   String? _selectedFeatureLabel;
   bool _selectedIsCoord = false;
+
+  /// Phone user GPS location (blue dot).
   LatLng? _myLocation;
   StreamSubscription<Position>? _locationSub;
+
+  /// Sensor device location from LocationService (orange marker).
+  LatLng? _sensorLocation;
+
+  /// Loaded CRITICAL events for alert history markers.
+  List<CriticalEvent> _criticalEvents = [];
 
   final GeoJsonService _geoJsonService = GeoJsonService();
   final ShapefileService _shapefileService = ShapefileService();
   final List<_LayerEntry> _entries = [];
+
+  // ── Measure-distance mode ─────────────────────────────────────────────────
+  bool _measureMode = false;
+  final List<LatLng> _measureWaypoints = [];
 
   @override
   void initState() {
@@ -53,6 +71,8 @@ class _FindingsMapState extends State<FindingsMap> {
     }
     _loadGeoJsonLayers();
     _startLocationTracking();
+    _loadSensorLocation();
+    _loadCriticalEvents();
   }
 
   Future<void> _loadGeoJsonLayers() async {
@@ -99,6 +119,39 @@ class _FindingsMapState extends State<FindingsMap> {
       });
     } catch (_) {
       // Location unavailable — silently ignore
+    }
+  }
+
+  /// Grab the last fix from the shared LocationService singleton — this
+  /// reflects the monitoring device's GPS position (used throughout the app
+  /// for event logging, etc.).
+  Future<void> _loadSensorLocation() async {
+    try {
+      final loc = LocationService.instance.lastLocation;
+      if (loc != null && mounted) {
+        setState(() => _sensorLocation = LatLng(loc.latitude, loc.longitude));
+        return;
+      }
+      // No cached fix yet — try to get one (non-blocking).
+      final fix = await LocationService.instance.getCurrentLocation();
+      if (fix != null && mounted) {
+        setState(() => _sensorLocation = LatLng(fix.latitude, fix.longitude));
+      }
+    } catch (e) {
+      debugPrint('[FindingsMap] _loadSensorLocation: $e');
+    }
+  }
+
+  /// Load persisted CRITICAL events from CriticalEventLogService.
+  Future<void> _loadCriticalEvents() async {
+    try {
+      final all = await CriticalEventLogService.instance.loadEvents();
+      final withGps = all.where((e) => e.location != null).toList();
+      if (mounted) {
+        setState(() => _criticalEvents = withGps);
+      }
+    } catch (e) {
+      debugPrint('[FindingsMap] _loadCriticalEvents: $e');
     }
   }
 
@@ -168,6 +221,77 @@ class _FindingsMapState extends State<FindingsMap> {
     }
   }
 
+  /// Export visible findings as GeoJSON and share via OS share sheet.
+  Future<void> _exportGeoJson() async {
+    try {
+      final features = widget.findings.map((f) {
+        // Determine a simple risk_level label.
+        final riskLevel = _riskLevelForFinding(f);
+        return {
+          'type': 'Feature',
+          'geometry': {
+            'type': 'Point',
+            'coordinates': [f.longitude, f.latitude],
+          },
+          'properties': {
+            'id': f.id,
+            'name': f.name,
+            'type': f.type,
+            'site': f.site,
+            'date': f.date,
+            'description': f.description,
+            'source': f.source.name,
+            'risk_level': riskLevel,
+            if (f.locusNumber != null) 'locus': f.locusNumber,
+            if (f.isSignificant) 'significant': true,
+          },
+        };
+      }).toList();
+
+      final collection = {
+        'type': 'FeatureCollection',
+        'features': features,
+        'metadata': {
+          'exported_by': 'AncientVision',
+          'exported_at': DateTime.now().toIso8601String(),
+          'site': widget.findings.isNotEmpty ? widget.findings.first.site : 'Unknown',
+          'finding_count': features.length,
+        },
+      };
+
+      final jsonStr = const JsonEncoder.withIndent('  ').convert(collection);
+
+      final dir = await getTemporaryDirectory();
+      final ts = DateTime.now()
+          .toIso8601String()
+          .replaceAll(':', '-')
+          .split('.')
+          .first;
+      final file = File('${dir.path}/findings_$ts.geojson');
+      await file.writeAsString(jsonStr);
+
+      await Share.shareXFiles(
+        [XFile(file.path, mimeType: 'application/geo+json')],
+        subject: 'AncientVision Findings — GeoJSON',
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('GeoJSON export failed: $e')),
+        );
+      }
+    }
+  }
+
+  /// Simple risk level derived from finding type.  When PPV data is attached
+  /// to findings in future, this can use that instead.
+  String _riskLevelForFinding(Finding f) {
+    if (f.isSignificant) return 'high';
+    final t = f.type.toLowerCase();
+    if (t.contains('coin') || t.contains('jewelry')) return 'medium';
+    return 'low';
+  }
+
   @override
   void didUpdateWidget(covariant FindingsMap oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -220,6 +344,56 @@ class _FindingsMapState extends State<FindingsMap> {
     }
   }
 
+  // ── Map tap handler (supports measure mode) ───────────────────────────────
+
+  void _onMapTap(TapPosition tapPos, LatLng tappedPoint) {
+    if (_measureMode) {
+      setState(() => _measureWaypoints.add(tappedPoint));
+      return;
+    }
+
+    // Check visible polygon layers for a hit.
+    for (final entry in _entries.where((e) => e.visible)) {
+      for (final poly in entry.layer.polygons) {
+        if (_pointInPolygon(tappedPoint, poly.points)) {
+          setState(() {
+            _selectedFeatureLabel = poly.label ?? entry.layer.name;
+            _selectedIsCoord = false;
+          });
+          return;
+        }
+      }
+    }
+    // No polygon hit — show tapped coordinates.
+    setState(() {
+      _selectedFeatureLabel =
+          '${_formatCoord(tappedPoint.latitude, isLat: true)}, '
+          '${_formatCoord(tappedPoint.longitude, isLat: false)}';
+      _selectedIsCoord = true;
+    });
+  }
+
+  void _onMapLongPress(TapPosition tapPos, LatLng tappedPoint) {
+    if (!_measureMode) {
+      // Enter measure mode on long-press if not already active.
+      setState(() {
+        _measureMode = true;
+        _measureWaypoints.clear();
+        _measureWaypoints.add(tappedPoint);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Measure mode: tap to add waypoints'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    } else {
+      setState(() => _measureWaypoints.add(tappedPoint));
+    }
+  }
+
+  // ── Marker builders ───────────────────────────────────────────────────────
+
   List<Marker> _buildFindingMarkers() {
     if (!_showFindings) return [];
     return widget.findings.asMap().entries.map((entry) {
@@ -262,50 +436,164 @@ class _FindingsMapState extends State<FindingsMap> {
     }).toList();
   }
 
-  /// Ray-casting point-in-polygon test.
-  bool _pointInPolygon(LatLng point, List<LatLng> polygon) {
-    bool inside = false;
-    final x = point.longitude;
-    final y = point.latitude;
-    for (int i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-      final xi = polygon[i].longitude, yi = polygon[i].latitude;
-      final xj = polygon[j].longitude, yj = polygon[j].latitude;
-      if (((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
-        inside = !inside;
-      }
-    }
-    return inside;
-  }
-
-  String _formatCoord(double value, {required bool isLat}) {
-    final abs = value.abs();
-    final dir = isLat
-        ? (value >= 0 ? 'N' : 'S')
-        : (value >= 0 ? 'E' : 'W');
-    return '${abs.toStringAsFixed(5)}°$dir';
-  }
-
-  void _onMapTap(TapPosition tapPos, LatLng tappedPoint) {
-    // Check visible polygon layers for a hit.
-    for (final entry in _entries.where((e) => e.visible)) {
-      for (final poly in entry.layer.polygons) {
-        if (_pointInPolygon(tappedPoint, poly.points)) {
-          setState(() {
-            _selectedFeatureLabel = poly.label ?? entry.layer.name;
+  /// Sensor device location — distinct orange diamond marker with border.
+  List<Marker> _buildSensorMarker() {
+    if (!_showSensorMarker || _sensorLocation == null) return [];
+    return [
+      Marker(
+        point: _sensorLocation!,
+        width: 44,
+        height: 44,
+        child: GestureDetector(
+          onTap: () => setState(() {
+            _selectedFeatureLabel =
+                'Sensor: ${_formatCoord(_sensorLocation!.latitude, isLat: true)}, '
+                '${_formatCoord(_sensorLocation!.longitude, isLat: false)}';
             _selectedIsCoord = false;
-          });
-          return;
-        }
-      }
-    }
-    // No polygon hit — show tapped coordinates.
-    setState(() {
-      _selectedFeatureLabel =
-          '${_formatCoord(tappedPoint.latitude, isLat: true)}, '
-          '${_formatCoord(tappedPoint.longitude, isLat: false)}';
-      _selectedIsCoord = true;
-    });
+          }),
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              Container(
+                width: 44, height: 44,
+                decoration: const BoxDecoration(
+                  color: Color(0x44FF6D00),
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const Icon(
+                Icons.sensors,
+                size: 28,
+                color: Color(0xFFFF6D00),
+                shadows: [
+                  Shadow(color: Colors.black54, blurRadius: 6),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    ];
   }
+
+  /// Alert history markers — warning icon for each CRITICAL event with GPS.
+  List<Marker> _buildAlertMarkers() {
+    if (!_showAlerts) return [];
+    return _criticalEvents.map((ev) {
+      final loc = ev.location!; // only events with location are in the list
+      final point = LatLng(loc.latitude, loc.longitude);
+      return Marker(
+        point: point,
+        width: 36,
+        height: 36,
+        child: GestureDetector(
+          onTap: () {
+            final ts = ev.timestamp.toLocal();
+            final label = 'CRITICAL ${ts.day}/${ts.month} ${ts.hour}:${ts.minute.toString().padLeft(2, '0')} '
+                '— PPV ${ev.ppv.toStringAsFixed(2)} mm/s';
+            setState(() {
+              _selectedFeatureLabel = label;
+              _selectedIsCoord = false;
+            });
+          },
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: const Color(0x55F44336),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: const Color(0xFFF44336), width: 1.5),
+                ),
+              ),
+              const Icon(
+                Icons.warning_amber_rounded,
+                size: 22,
+                color: Color(0xFFF44336),
+                shadows: [Shadow(color: Colors.black54, blurRadius: 4)],
+              ),
+            ],
+          ),
+        ),
+      );
+    }).toList();
+  }
+
+  List<Marker> _buildMyLocationMarker() {
+    if (_myLocation == null) return [];
+    return [
+      Marker(
+        point: _myLocation!,
+        width: 20,
+        height: 20,
+        child: Container(
+          decoration: BoxDecoration(
+            color: const Color(0xFF2196F3),
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white, width: 2),
+            boxShadow: const [
+              BoxShadow(
+                  color: Color(0x552196F3), blurRadius: 8, spreadRadius: 4),
+            ],
+          ),
+        ),
+      ),
+    ];
+  }
+
+  /// Waypoint markers for the distance-measure tool.
+  List<Marker> _buildMeasureMarkers() {
+    if (!_measureMode || _measureWaypoints.isEmpty) return [];
+    return _measureWaypoints.asMap().entries.map((e) {
+      final index = e.key;
+      final pt = e.value;
+      return Marker(
+        point: pt,
+        width: 28,
+        height: 28,
+        child: GestureDetector(
+          onTap: () => setState(() => _measureWaypoints.removeAt(index)),
+          child: Container(
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              color: const Color(0xFF00BCD4),
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white, width: 2),
+            ),
+            child: Center(
+              child: Text(
+                '${index + 1}',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }).toList();
+  }
+
+  // ── Polyline builders ─────────────────────────────────────────────────────
+
+  List<Polyline> _buildMeasurePolyline() {
+    if (!_measureMode || _measureWaypoints.length < 2) return [];
+    return [
+      Polyline(
+        points: _measureWaypoints,
+        color: const Color(0xFF00BCD4),
+        strokeWidth: 2.5,
+        isDotted: true,
+      ),
+    ];
+  }
+
+  // ── GeoJSON layer builders ────────────────────────────────────────────────
 
   List<Polygon> _buildGeoJsonPolygons() {
     return _entries
@@ -355,31 +643,61 @@ class _FindingsMapState extends State<FindingsMap> {
         .toList();
   }
 
-  List<Marker> _buildMyLocationMarker() {
-    if (_myLocation == null) return [];
-    return [
-      Marker(
-        point: _myLocation!,
-        width: 20,
-        height: 20,
-        child: Container(
-          decoration: BoxDecoration(
-            color: const Color(0xFF2196F3),
-            shape: BoxShape.circle,
-            border: Border.all(color: Colors.white, width: 2),
-            boxShadow: const [
-              BoxShadow(
-                  color: Color(0x552196F3), blurRadius: 8, spreadRadius: 4),
-            ],
-          ),
-        ),
-      ),
-    ];
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  /// Ray-casting point-in-polygon test.
+  bool _pointInPolygon(LatLng point, List<LatLng> polygon) {
+    bool inside = false;
+    final x = point.longitude;
+    final y = point.latitude;
+    for (int i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      final xi = polygon[i].longitude, yi = polygon[i].latitude;
+      final xj = polygon[j].longitude, yj = polygon[j].latitude;
+      if (((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+        inside = !inside;
+      }
+    }
+    return inside;
   }
+
+  String _formatCoord(double value, {required bool isLat}) {
+    final abs = value.abs();
+    final dir = isLat
+        ? (value >= 0 ? 'N' : 'S')
+        : (value >= 0 ? 'E' : 'W');
+    return '${abs.toStringAsFixed(5)}°$dir';
+  }
+
+  /// Total geodetic distance along the measure waypoints in metres.
+  double _measureTotalMetres() {
+    double total = 0;
+    const distance = Distance();
+    for (int i = 1; i < _measureWaypoints.length; i++) {
+      total += distance.as(
+        LengthUnit.Meter,
+        _measureWaypoints[i - 1],
+        _measureWaypoints[i],
+      );
+    }
+    return total;
+  }
+
+  String _formatMetres(double m) {
+    if (m < 1000) return '${m.toStringAsFixed(1)} m';
+    return '${(m / 1000).toStringAsFixed(3)} km';
+  }
+
+  // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
     final firstFinding = widget.findings.first;
+
+    // All polylines for the map (GeoJSON + measure).
+    final allPolylines = [
+      ..._buildGeoJsonPolylines(),
+      ..._buildMeasurePolyline(),
+    ];
 
     return Stack(
       children: [
@@ -392,6 +710,7 @@ class _FindingsMapState extends State<FindingsMap> {
             maxZoom: 19,
             interactionOptions: const InteractionOptions(flags: InteractiveFlag.all),
             onTap: _onMapTap,
+            onLongPress: _onMapLongPress,
           ),
           children: [
             TileLayer(
@@ -404,9 +723,15 @@ class _FindingsMapState extends State<FindingsMap> {
             ),
             MarkerLayer(markers: _buildMyLocationMarker()),
             PolygonLayer(polygons: _buildGeoJsonPolygons()),
-            PolylineLayer(polylines: _buildGeoJsonPolylines()),
+            PolylineLayer(polylines: allPolylines),
             MarkerLayer(markers: _buildGeoJsonPointMarkers()),
+            // Alert history markers below findings so findings are on top.
+            MarkerLayer(markers: _buildAlertMarkers()),
             MarkerLayer(markers: _buildFindingMarkers()),
+            // Sensor marker on top of findings.
+            MarkerLayer(markers: _buildSensorMarker()),
+            // Measure waypoints on top of everything.
+            MarkerLayer(markers: _buildMeasureMarkers()),
           ],
         ),
 
@@ -469,6 +794,22 @@ class _FindingsMapState extends State<FindingsMap> {
                   }
                 },
               ),
+              const SizedBox(height: 8),
+              _mapButton(
+                icon: Icons.upload_file,
+                tooltip: 'Export findings as GeoJSON',
+                onTap: _exportGeoJson,
+              ),
+              const SizedBox(height: 8),
+              _mapButton(
+                icon: _measureMode ? Icons.straighten : Icons.space_bar,
+                tooltip: _measureMode ? 'Exit measure mode' : 'Measure distance',
+                active: _measureMode,
+                onTap: () => setState(() {
+                  _measureMode = !_measureMode;
+                  if (!_measureMode) _measureWaypoints.clear();
+                }),
+              ),
             ],
           ),
         ),
@@ -476,9 +817,9 @@ class _FindingsMapState extends State<FindingsMap> {
         // Layer panel
         if (_showLayerPanel)
           Positioned(
-            top: 120, right: 12,
+            top: 12, right: 60,
             child: Container(
-              width: 200,
+              width: 210,
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
                 color: Colors.black.withAlpha(210),
@@ -497,11 +838,65 @@ class _FindingsMapState extends State<FindingsMap> {
                   const SizedBox(height: 8),
                   _layerToggle(
                       'Findings', _showFindings, (v) => setState(() => _showFindings = v)),
+                  _layerToggle(
+                      'Sensor', _showSensorMarker, (v) => setState(() => _showSensorMarker = v)),
+                  _layerToggle(
+                      'Alert History', _showAlerts, (v) => setState(() => _showAlerts = v)),
                   if (_entries.isNotEmpty) ...[
                     const Divider(color: Colors.white24, height: 16),
                     ..._entries.map((e) => _layerRow(e)),
                   ],
                 ],
+              ),
+            ),
+          ),
+
+        // Measure distance readout
+        if (_measureMode)
+          Positioned(
+            top: 12, left: 12,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 44),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: const Color(0xE000BCD4),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.straighten, color: Colors.white, size: 14),
+                        SizedBox(width: 6),
+                        Text('Measure', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
+                      ],
+                    ),
+                    if (_measureWaypoints.length >= 2) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        _formatMetres(_measureTotalMetres()),
+                        style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
+                      ),
+                      Text(
+                        '${_measureWaypoints.length} waypoints',
+                        style: const TextStyle(color: Colors.white70, fontSize: 11),
+                      ),
+                    ] else
+                      const Padding(
+                        padding: EdgeInsets.only(top: 4),
+                        child: Text('Tap map to add\nwaypoints', style: TextStyle(color: Colors.white70, fontSize: 11)),
+                      ),
+                    const SizedBox(height: 6),
+                    GestureDetector(
+                      onTap: () => setState(() => _measureWaypoints.clear()),
+                      child: const Text('Clear', style: TextStyle(color: Colors.white54, fontSize: 11, decoration: TextDecoration.underline)),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -573,11 +968,42 @@ class _FindingsMapState extends State<FindingsMap> {
               ),
             ),
           ),
+
+        // Alert count badge (bottom-left)
+        if (_criticalEvents.isNotEmpty && _showAlerts)
+          Positioned(
+            bottom: 12, left: 12,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: const Color(0xCCF44336),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 14),
+                  const SizedBox(width: 4),
+                  Text(
+                    '${_criticalEvents.length} alert${_criticalEvents.length == 1 ? '' : 's'}',
+                    style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
+          ),
       ],
     );
   }
 
-  Widget _mapButton({required IconData icon, required String tooltip, required VoidCallback onTap}) {
+  // ── Reusable widgets ──────────────────────────────────────────────────────
+
+  Widget _mapButton({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback onTap,
+    bool active = false,
+  }) {
     return Tooltip(
       message: tooltip,
       child: GestureDetector(
@@ -585,9 +1011,9 @@ class _FindingsMapState extends State<FindingsMap> {
         child: Container(
           width: 40, height: 40,
           decoration: BoxDecoration(
-            color: Colors.black.withAlpha(179),
+            color: active ? const Color(0xCC00BCD4) : Colors.black.withAlpha(179),
             borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: Colors.white24),
+            border: Border.all(color: active ? Colors.cyan : Colors.white24),
           ),
           child: Icon(icon, color: Colors.white, size: 20),
         ),
