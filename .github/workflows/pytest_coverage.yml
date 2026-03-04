@@ -1,0 +1,40 @@
+name: Python Coverage
+on:
+  push:
+    branches: [master, docker-experiment]
+    paths:
+      - 'scripts/**.py'
+      - 'docker/**.py'
+  pull_request:
+    paths:
+      - 'scripts/**.py'
+      - 'docker/**.py'
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install pytest pytest-cov pandas numpy scikit-learn
+      - name: Run tests with coverage
+        run: |
+          python -m pytest scripts/ docker/collect/ \
+            --cov=scripts --cov=docker \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            -v --tb=short \
+            2>&1 | tee test_output.txt
+        continue-on-error: true
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 30
+      - name: Print coverage summary
+        run: |
+          python -m pytest scripts/ docker/collect/ --cov=scripts --cov=docker --cov-report=term 2>/dev/null | grep -E "TOTAL|Coverage" || true

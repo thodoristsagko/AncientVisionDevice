@@ -2031,10 +2031,13 @@ class TestTrainingHistory:
     """Tests for scripts/training_history.py"""
 
     def _run(self, args: list) -> subprocess.CompletedProcess:
+        env = {**os.environ, "PYTHONUTF8": "1"}
         return subprocess.run(
             [sys.executable, str(_SCRIPTS_DIR / "training_history.py")] + args,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            env=env,
         )
 
     def test_no_model_dir(self, tmp_path):
@@ -2174,10 +2177,13 @@ class TestFeatureImportanceReport:
     """Tests for scripts/feature_importance_report.py"""
 
     def _run(self, args: list) -> subprocess.CompletedProcess:
+        env = {**os.environ, "PYTHONUTF8": "1"}
         return subprocess.run(
             [sys.executable, str(_SCRIPTS_DIR / "feature_importance_report.py")] + args,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            env=env,
         )
 
     def test_no_model_files(self, tmp_path):
