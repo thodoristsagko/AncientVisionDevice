@@ -21,6 +21,7 @@ import os
 import sys
 
 import numpy as np
+from collections import defaultdict
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -205,7 +206,7 @@ def evaluate_precursor(rows: list) -> None:
         ground_truth.append(gt_idx)
 
     _print_classification_report(
-        ground_truth, predictions, prediction_probs, class_names, rows
+        ground_truth, predictions, prediction_probs, class_names, rows, feature_names
     )
 
 
@@ -280,7 +281,7 @@ def evaluate_anomaly(rows: list) -> None:
     print(f"  Thresholds: low={low_t:.4f}  high={high_t:.4f}")
 
     _print_classification_report(
-        ground_truth, predictions, None, anomaly_class_names, rows
+        ground_truth, predictions, None, anomaly_class_names, rows, feature_names
     )
 
 
@@ -288,14 +289,226 @@ def evaluate_anomaly(rows: list) -> None:
 # Shared reporting helpers
 # ---------------------------------------------------------------------------
 
+def _compute_roc_curve_ascii(
+    ground_truth: list,
+    probs: list,
+    class_names: list,
+    pos_class_idx: int = 1,
+) -> float:
+    """Compute and display ROC curve for binary classification.
+
+    For multi-class, treats pos_class_idx vs rest as binary.
+    Returns AUC.
+    """
+    # Convert multi-class GT to binary (pos_class vs rest)
+    binary_gt = [1 if gt == pos_class_idx else 0 for gt in ground_truth]
+
+    # Extract probability for positive class
+    binary_probs = [p[pos_class_idx] if pos_class_idx < len(p) else 0.0 for p in probs]
+
+    # Sort by probability (descending) and compute TPR/FPR at each threshold
+    sorted_pairs = sorted(zip(binary_probs, binary_gt), reverse=True)
+
+    total_pos = sum(binary_gt)
+    total_neg = len(binary_gt) - total_pos
+
+    if total_pos == 0 or total_neg == 0:
+        return 0.0  # Can't compute ROC if only one class
+
+    # Compute ROC points
+    roc_points = [(0.0, 0.0)]  # (FPR, TPR) starting at origin
+    tp = 0
+    fp = 0
+    auc = 0.0
+
+    for prob, label in sorted_pairs:
+        if label == 1:
+            tp += 1
+        else:
+            fp += 1
+        tpr = tp / total_pos
+        fpr = fp / total_neg
+        roc_points.append((fpr, tpr))
+        # Trapezoidal rule for AUC
+        if len(roc_points) > 1:
+            prev_fpr, prev_tpr = roc_points[-2]
+            auc += (fpr - prev_fpr) * (tpr + prev_tpr) / 2
+
+    # ASCII plot (20x10 grid)
+    width, height = 40, 12
+    grid = [["." for _ in range(width)] for _ in range(height)]
+
+    # Plot diagonal line (random classifier)
+    for h in range(height):
+        w_diag = int(h * width / height)
+        if 0 <= w_diag < width:
+            grid[h][w_diag] = "-"
+
+    # Plot ROC curve
+    for fpr, tpr in roc_points:
+        x = int(fpr * (width - 1))
+        y = height - 1 - int(tpr * (height - 1))
+        if 0 <= x < width and 0 <= y < height:
+            grid[y][x] = "*"
+
+    print(f"\nROC Curve (binary: {class_names[pos_class_idx]} vs rest):")
+    print("  TPR")
+    print("    |")
+    for h, row in enumerate(grid):
+        tpr_label = f"{1.0 - h / height:.1f}" if h % 2 == 0 else "   "
+        print(f"    {tpr_label}  {''.join(row)}")
+    print("    +--" + "-" * (width - 3) + "→ FPR")
+    print(f"    0.0                1.0")
+    print(f"  AUC: {auc:.4f}")
+    return auc
+
+
+def _compute_calibration_curve_ascii(
+    ground_truth: list,
+    probs: list,
+    class_names: list,
+) -> None:
+    """Compute and display calibration curves (reliability diagrams).
+
+    For each class, compares predicted probability vs actual frequency.
+    A well-calibrated model has points near the diagonal.
+    """
+    print("\nCalibration Curves (Reliability Diagrams):")
+
+    for class_idx, class_name in enumerate(class_names):
+        # Filter to samples where this class appears
+        class_probs = [p[class_idx] if class_idx < len(p) else 0.0 for p in probs]
+        is_true_class = [1 if gt == class_idx else 0 for gt in ground_truth]
+
+        if sum(is_true_class) == 0:
+            print(f"  {class_name:<22} (no samples of this class)")
+            continue
+
+        # Bin predictions into 10 bins (0-0.1, 0.1-0.2, ..., 0.9-1.0)
+        bins = [[] for _ in range(10)]
+        for prob, true_label in zip(class_probs, is_true_class):
+            bin_idx = min(int(prob * 10), 9)
+            bins[bin_idx].append(true_label)
+
+        # Compute calibration points
+        calib_points = []
+        for bin_idx, bin_samples in enumerate(bins):
+            if bin_samples:
+                pred_prob = (bin_idx + 0.5) / 10
+                actual_freq = sum(bin_samples) / len(bin_samples)
+                calib_points.append((pred_prob, actual_freq))
+
+        # ASCII plot (20x10)
+        width, height = 40, 12
+        grid = [["." for _ in range(width)] for _ in range(height)]
+
+        # Diagonal line (perfect calibration)
+        for h in range(height):
+            w_diag = int(h * width / height)
+            if 0 <= w_diag < width:
+                grid[h][w_diag] = "-"
+
+        # Plot calibration points
+        for pred_prob, actual_freq in calib_points:
+            x = int(pred_prob * (width - 1))
+            y = height - 1 - int(actual_freq * (height - 1))
+            if 0 <= x < width and 0 <= y < height:
+                grid[y][x] = "*"
+
+        print(f"\n  {class_name}:")
+        print("    |")
+        for h, row in enumerate(grid):
+            actual_label = f"{1.0 - h / height:.1f}" if h % 2 == 0 else "   "
+            print(f"    {actual_label}  {''.join(row)}")
+        print("    +--" + "-" * (width - 3) + "→ Predicted")
+        print(f"    0.0                1.0")
+
+
+def _compute_top_k_accuracy(
+    ground_truth: list,
+    probs: list,
+    k: int = 2,
+) -> float:
+    """Compute top-K accuracy: fraction where correct class is in top-K predictions."""
+    if not probs or k < 1:
+        return 0.0
+
+    correct = 0
+    total = 0
+    for gt, p_list in zip(ground_truth, probs):
+        if gt >= 0:  # Only count labeled samples
+            total += 1
+            # Get indices of top-K predictions
+            top_k_indices = np.argsort(p_list)[-k:]
+            if gt in top_k_indices:
+                correct += 1
+
+    return correct / total if total > 0 else 0.0
+
+
+def _analyze_errors(
+    ground_truth: list,
+    predictions: list,
+    probs,  # list of prob lists or None
+    class_names: list,
+    rows: list,
+    feature_names: list,
+) -> None:
+    """Analyze error patterns: top confused pairs and feature stats for errors."""
+    print("\nError Analysis:")
+
+    # Find confused class pairs
+    confusion_pairs = defaultdict(int)
+    error_indices = []
+
+    for idx, (gt, pred) in enumerate(zip(ground_truth, predictions)):
+        if gt >= 0 and gt != pred:
+            gt_name = class_names[gt] if gt < len(class_names) else "unknown"
+            pred_name = class_names[pred] if pred < len(class_names) else "unknown"
+            confusion_pairs[(gt_name, pred_name)] += 1
+            error_indices.append(idx)
+
+    if not confusion_pairs:
+        print("  No errors found!")
+        return
+
+    # Top 5 confused pairs
+    top_pairs = sorted(confusion_pairs.items(), key=lambda x: x[1], reverse=True)[:5]
+    print(f"\n  Top {len(top_pairs)} confused class pairs:")
+    for (true_class, pred_class), count in top_pairs:
+        print(f"    {true_class:20s} → {pred_class:20s}: {count:3d} times")
+
+    # Feature stats for errors
+    if rows and feature_names and len(rows) == len(ground_truth):
+        print(f"\n  Mean feature values for misclassified samples ({len(error_indices)} errors):")
+
+        error_features = defaultdict(list)
+        for err_idx in error_indices:
+            row = rows[err_idx]
+            for fname in feature_names:
+                try:
+                    val = float(row.get(fname, 0.0))
+                    error_features[fname].append(val)
+                except (ValueError, TypeError):
+                    pass
+
+        if error_features:
+            for fname in feature_names[:8]:  # Show first 8 features to keep output manageable
+                if fname in error_features and error_features[fname]:
+                    mean_val = np.mean(error_features[fname])
+                    std_val = np.std(error_features[fname])
+                    print(f"    {fname:<22} mean={mean_val:8.4f}  std={std_val:8.4f}")
+
+
 def _print_classification_report(
     ground_truth: list,
     predictions: list,
     probs,          # list of prob-lists or None
     class_names: list,
     rows: list,
+    feature_names: list = None,
 ) -> None:
-    """Print accuracy, per-class counts, and sample predictions."""
+    """Print accuracy, per-class counts, sample predictions, ROC, calibration, top-K, and errors."""
     n = len(predictions)
     if n == 0:
         print("No samples to evaluate.")
@@ -338,6 +551,25 @@ def _print_classification_report(
                       f"({cls_correct / len(class_rows) * 100:.1f}%)")
             else:
                 print(f"  {name:<22} 0/0  (no samples)")
+
+    # Top-2 accuracy (only if we have probabilities)
+    if probs:
+        top2_acc = _compute_top_k_accuracy(ground_truth, probs, k=2)
+        print(f"\nTop-2 Accuracy: {top2_acc:.4f}")
+
+    # ROC curve (for binary: normal vs anomaly, or for multi-class use first anomaly-like class)
+    if probs and len(class_names) >= 2:
+        # For precursor (4 classes): anomaly = imminent_failure (index 3)
+        # For anomaly (3 classes): anomaly = anomaly (index 2)
+        pos_idx = len(class_names) - 1 if "imminent_failure" not in class_names else list(class_names).index("imminent_failure") if "imminent_failure" in class_names else 2
+        _compute_roc_curve_ascii(ground_truth, probs, class_names, pos_class_idx=pos_idx)
+
+    # Calibration curves
+    if probs:
+        _compute_calibration_curve_ascii(ground_truth, probs, class_names)
+
+    # Error analysis
+    _analyze_errors(ground_truth, predictions, probs, class_names, rows, feature_names or [])
 
     # Sample predictions (first 10)
     print("\nSample predictions (first 10):")
