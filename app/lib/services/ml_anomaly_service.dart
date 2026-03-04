@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'dart:io';
 import '../models/site_profile.dart';
+import '../utils/circular_buffer.dart';
 
 /// Manages the autoencoder TFLite model for anomaly detection.
 ///
@@ -40,6 +41,18 @@ class MlAnomalyService {
   int _errorCount = 0;
   static const int _maxErrorCount = 3;
 
+  // Sliding-window anomaly score smoothing (EMA, α=0.3)
+  static const double _emaAlpha = 0.3;
+  double _smoothedScore = 0.0;
+
+  // Consecutive anomaly frame counter
+  int _consecutiveAnomalyFrames = 0;
+
+  // Score history circular buffer (last 100 scores)
+  static const int _scoreHistorySize = 100;
+  final CircularBuffer<double> _scoreHistory =
+      CircularBuffer<double>(_scoreHistorySize);
+
   bool get isLoaded => _isLoaded;
   bool get isCalibrating => _isCalibrating;
   bool get isCalibrated => _activeSiteProfile != null;
@@ -53,6 +66,26 @@ class MlAnomalyService {
 
   /// True if the last inference completed without error.
   bool get isHealthy => _lastInferenceSucceeded;
+
+  /// Exponentially smoothed anomaly score (α=0.3). Updated on each [infer] call.
+  double get smoothedScore => _smoothedScore;
+
+  /// Number of consecutive frames whose raw anomaly score exceeded [_thresholdHigh].
+  /// Resets to zero as soon as a frame falls below that threshold.
+  int get consecutiveAnomalyFrames => _consecutiveAnomalyFrames;
+
+  /// Last 100 raw anomaly scores returned by [infer], oldest first.
+  List<double> get scoreHistory => _scoreHistory.toList();
+
+  /// Variance of [scoreHistory]. Returns 0 when fewer than two samples exist.
+  double get scoreVariance {
+    final history = _scoreHistory.toList();
+    if (history.length < 2) return 0.0;
+    final mean = history.reduce((a, b) => a + b) / history.length;
+    final sumSq = history.fold<double>(
+        0.0, (acc, v) => acc + (v - mean) * (v - mean));
+    return sumSq / history.length;
+  }
 
   Future<bool> initialize() async {
     try {
@@ -114,13 +147,29 @@ class MlAnomalyService {
       _lastError = null;
       _errorCount = 0;
 
+      double score;
       if (mse < _thresholdLow) {
-        return (mse / _thresholdLow).clamp(0.0, 1.0);
+        score = (mse / _thresholdLow).clamp(0.0, 1.0);
       } else if (mse < _thresholdHigh) {
-        return (0.5 + 0.5 * (mse - _thresholdLow) / (_thresholdHigh - _thresholdLow)).clamp(0.0, 1.0);
+        score = (0.5 + 0.5 * (mse - _thresholdLow) / (_thresholdHigh - _thresholdLow)).clamp(0.0, 1.0);
       } else {
-        return min(1.0, mse / (_thresholdHigh * 2));
+        score = min(1.0, mse / (_thresholdHigh * 2));
       }
+
+      // Update EMA smoothed score
+      _smoothedScore = _emaAlpha * score + (1.0 - _emaAlpha) * _smoothedScore;
+
+      // Update consecutive anomaly frame counter (threshold on raw MSE)
+      if (mse >= _thresholdHigh) {
+        _consecutiveAnomalyFrames++;
+      } else {
+        _consecutiveAnomalyFrames = 0;
+      }
+
+      // Append to score history
+      _scoreHistory.add(score);
+
+      return score;
     } catch (e) {
       _lastInferenceSucceeded = false;
       _errorCount++;
@@ -273,6 +322,47 @@ class MlAnomalyService {
     final file = File('${dir.path}/site_profiles/$name.json');
     if (file.existsSync()) await file.delete();
     if (_activeSiteProfile?.name == name) _activeSiteProfile = null;
+  }
+
+  /// Calibrates [_thresholdHigh] (95th percentile) and [_thresholdLow]
+  /// (85th percentile) from a list of reconstruction-error scores recorded
+  /// during a normal-vibration baseline period.
+  ///
+  /// Scores are expected to be the raw MSE values produced by the autoencoder
+  /// (not the normalised 0-1 anomaly scores returned by [infer]).
+  ///
+  /// Throws [ArgumentError] when [normalScores] is empty.
+  Future<void> calibrateThresholds(List<double> normalScores) async {
+    if (normalScores.isEmpty) {
+      throw ArgumentError('normalScores must not be empty');
+    }
+    final sorted = List<double>.from(normalScores)..sort();
+    final n = sorted.length;
+
+    // Linear-interpolation percentile helper
+    double percentile(double p) {
+      final idx = p / 100.0 * (n - 1);
+      final lo = idx.floor();
+      final hi = idx.ceil();
+      if (lo == hi) return sorted[lo];
+      final frac = idx - lo;
+      return sorted[lo] * (1.0 - frac) + sorted[hi] * frac;
+    }
+
+    _thresholdLow = percentile(85);
+    _thresholdHigh = percentile(95);
+
+    // Keep thresholds sensible: high must exceed low
+    if (_thresholdHigh <= _thresholdLow) {
+      _thresholdHigh = _thresholdLow * 1.5;
+    }
+
+    if (kDebugMode) {
+      debugPrint('MlAnomalyService: calibrateThresholds '
+          'low=${_thresholdLow.toStringAsFixed(4)} '
+          'high=${_thresholdHigh.toStringAsFixed(4)} '
+          '(n=${normalScores.length})');
+    }
   }
 
   void dispose() {
