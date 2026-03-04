@@ -6,7 +6,7 @@
 .PHONY: help build firmware flutter ml collect train monitor dev-ml dev-flutter dev-firmware \
         test simulate backup logs clean report drift validate-config quality-check \
         label replay schedule playback sync annotate analyze apk quantize benchmark load-test \
-        validate-data e2e status health augment online-learn tune onnx \
+        validate-data dry-run e2e status health augment online-learn tune onnx \
         live-dashboard ab-test augmentation-report \
         serve-model session-report calibration-check confidence-analysis monitor-model \
         freq-analysis compare-devices site-summary \
@@ -60,6 +60,7 @@ help:
 	@echo "  benchmark      Run inference benchmark (100 runs)"
 	@echo "  load-test      Run API load test (500 requests, p95 latency)"
 	@echo "  validate-data  Validate field training data integrity"
+	@echo "  dry-run        Dry run training pipeline to check all preconditions"
 	@echo "  e2e            Run end-to-end pipeline integration tests"
 	@echo ""
 	@echo "  status         Show system-wide pipeline and model status"
@@ -371,6 +372,14 @@ validate-data:
 		python scripts/validate_training_data.py --data-dir ./data/field; \
 	else \
 		echo "WARNING: scripts/validate_training_data.py not found"; \
+	fi
+
+dry-run: ## Dry run training pipeline to check all preconditions
+	@echo "==> Dry run training pipeline (no actual training)..."
+	@if [ -f scripts/training_pipeline_dry_run.py ]; then \
+		python scripts/training_pipeline_dry_run.py; \
+	else \
+		echo "WARNING: scripts/training_pipeline_dry_run.py not found"; \
 	fi
 
 e2e:

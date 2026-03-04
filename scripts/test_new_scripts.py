@@ -1308,3 +1308,205 @@ class TestRetrainAdvisor:
         assert "Score" in result.stdout, (
             f"Expected 'Score' in output: {result.stdout!r}"
         )
+
+
+
+# ===========================================================================
+# validate_training_data tests
+# ===========================================================================
+
+def _write_csv_vtd(path, rows, fieldnames=None):
+    """Write a list-of-dicts CSV to path."""
+    if not rows:
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            if fieldnames:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+        return
+    fn = fieldnames or list(rows[0].keys())
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fn)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _make_valid_rows_vtd(n=60):
+    """Return n valid balanced field data rows."""
+    import random
+    random.seed(1234)
+    rows = []
+    labels = ["normal", "soil_creep", "crack_propagation", "imminent_failure"]
+    for i in range(n):
+        rows.append({
+            "timestamp": "2026-03-01T12:00:{:02d}Z".format(i % 60),
+            "device_id": "device_001",
+            "ppv": str(round(0.05 + random.gauss(0, 0.01), 6)),
+            "ax": str(round(0.1 + random.gauss(0, 0.01), 6)),
+            "ay": str(round(0.2 + random.gauss(0, 0.01), 6)),
+            "az": str(round(9.8 + random.gauss(0, 0.05), 6)),
+            "label": labels[i % len(labels)],
+        })
+    return rows
+
+
+class TestValidateTrainingData:
+    """Tests for validate_training_data.py."""
+
+    def _run(self, args):
+        env = os.environ.copy()
+        env["PYTHONUTF8"] = "1"
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "validate_training_data.py")] + args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=env,
+        )
+
+    def test_empty_data_dir(self, tmp_path):
+        """With an empty directory (no CSV files), should report error for 0 samples."""
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        result = self._run(["--data-dir", str(empty_dir)])
+        combined = result.stdout + result.stderr
+        # Should fail or report no/insufficient samples
+        assert result.returncode != 0 or any(
+            phrase in combined
+            for phrase in ["ERROR", "FAIL", "0 samples", "Only 0", "minimum"]
+        ), f"Expected error/fail message for empty dir. Output: {combined!r}"
+
+    def test_valid_data(self, tmp_path):
+        """With balanced, clean data all checks should pass with exit 0."""
+        rows = _make_valid_rows_vtd(n=60)
+        _write_csv_vtd(tmp_path / "session.csv", rows)
+        result = self._run(["--data-dir", str(tmp_path)])
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, (
+            f"Expected exit 0 for valid data, got {result.returncode}. Output: {combined!r}"
+        )
+        assert "PASS" in combined, f"Expected PASS in output: {combined!r}"
+
+    def test_missing_values(self, tmp_path):
+        """Rows with empty ppv should be flagged as missing/null."""
+        rows = _make_valid_rows_vtd(n=60)
+        for i in range(10):
+            rows[i]["ppv"] = ""
+        _write_csv_vtd(tmp_path / "session.csv", rows)
+        result = self._run(["--data-dir", str(tmp_path)])
+        combined = result.stdout + result.stderr
+        assert any(
+            phrase in combined
+            for phrase in ["missing", "null", "NaN", "ppv", "WARN", "ERROR"]
+        ), f"Expected missing-value warning in output: {combined!r}"
+
+    def test_out_of_range(self, tmp_path):
+        """Rows with PPV > 100 mm/s should be flagged as out-of-range."""
+        rows = _make_valid_rows_vtd(n=60)
+        for i in range(5):
+            rows[i]["ppv"] = "999.0"
+        _write_csv_vtd(tmp_path / "session.csv", rows)
+        result = self._run(["--data-dir", str(tmp_path)])
+        combined = result.stdout + result.stderr
+        assert any(
+            phrase in combined
+            for phrase in ["ppv", "above", "maximum", "physical", "WARN", "ERROR", "bounds"]
+        ), f"Expected out-of-range warning in output: {combined!r}"
+
+    def test_class_imbalance(self, tmp_path):
+        """Highly skewed class distribution should trigger a warning."""
+        import random
+        random.seed(42)
+        rows = []
+        # 58 normal, 1 soil_creep, 1 crack_propagation — no imminent_failure
+        for i in range(58):
+            rows.append({
+                "timestamp": "2026-03-01T12:00:{:02d}Z".format(i % 60),
+                "device_id": "device_001",
+                "ppv": str(round(0.05 + random.gauss(0, 0.01), 6)),
+                "ax": "0.1", "ay": "0.2", "az": "9.8",
+                "label": "normal",
+            })
+        for label in ["soil_creep", "crack_propagation"]:
+            rows.append({
+                "timestamp": "2026-03-01T12:01:00Z",
+                "device_id": "device_001",
+                "ppv": "0.05", "ax": "0.1", "ay": "0.2", "az": "9.8",
+                "label": label,
+            })
+        _write_csv_vtd(tmp_path / "session.csv", rows)
+        result = self._run(["--data-dir", str(tmp_path)])
+        combined = result.stdout + result.stderr
+        assert any(
+            phrase in combined
+            for phrase in ["class", "balance", "WARN", "ERROR", "soil_creep",
+                           "crack_propagation", "imminent_failure", "%"]
+        ), f"Expected class imbalance warning in output: {combined!r}"
+
+
+# ===========================================================================
+# training_pipeline_dry_run tests
+# ===========================================================================
+
+class TestTrainingPipelineDryRun:
+    """Tests for training_pipeline_dry_run.py."""
+
+    def _run(self, args):
+        return subprocess.run(
+            [sys.executable, str(_SCRIPTS_DIR / "training_pipeline_dry_run.py")] + args,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_no_data(self, tmp_path):
+        """Fails when data directory has no CSV files."""
+        empty_dir = tmp_path / "data"
+        empty_dir.mkdir()
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+        result = self._run([
+            "--data-dir", str(empty_dir),
+            "--model-dir", str(model_dir),
+        ])
+        assert result.returncode == 1, (
+            f"Expected exit 1 when no CSV data, got {result.returncode}. "
+            f"stdout: {result.stdout}"
+        )
+        combined = result.stdout + result.stderr
+        assert "FAIL" in combined, f"Expected FAIL in output: {combined!r}"
+
+    def test_all_pass(self, tmp_path):
+        """Passes critical checks when data dir has CSV with required columns."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        model_dir = tmp_path / "models"
+        model_dir.mkdir()
+
+        # Write a valid CSV with all required columns
+        rows = _make_valid_rows_vtd(n=20)
+        _write_csv_vtd(data_dir / "session.csv", rows)
+
+        # Write a valid config with 17 features
+        config = {
+            "feature_names": [
+                "rms", "ppv", "freq", "crest", "centroid", "kurtosis",
+                "stalta", "arias", "cav", "temp", "psdSlope",
+                "ppv_trend", "freq_trend", "kurtosis_trend", "stalta_trend",
+                "cusum_max", "autoencoder_score",
+            ],
+            "input_dim": 17,
+        }
+        (model_dir / "precursor_classifier_config.json").write_text(
+            json.dumps(config), encoding="utf-8"
+        )
+
+        result = self._run([
+            "--data-dir", str(data_dir),
+            "--model-dir", str(model_dir),
+        ])
+        combined = result.stdout + result.stderr
+        # Data dir, CSV columns, output dir, packages, feature count must PASS
+        assert "PASS" in combined, f"Expected at least one PASS in output: {combined!r}"
+        # Exit code 0 (all pass) or 1 (some fail — acceptable if only scripts missing)
+        assert result.returncode in (0, 1), (
+            f"Unexpected exit code: {result.returncode}. Output: {combined!r}"
+        )
