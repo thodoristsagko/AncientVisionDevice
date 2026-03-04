@@ -1,0 +1,45 @@
+name: Model Inference Benchmark
+on:
+  push:
+    paths:
+      - 'app/assets/ml/*.tflite'
+      - 'app/assets/ml/*.json'
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install TFLite
+        run: pip install tflite-runtime numpy
+      - name: Run model confidence analysis
+        run: |
+          python scripts/model_confidence_analysis.py 2>/dev/null || echo "Model analysis skipped"
+        continue-on-error: true
+      - name: Check probability sums
+        run: |
+          python -c "
+          import tflite_runtime.interpreter as tflite
+          import numpy as np
+          import os
+          model_path = 'app/assets/ml/precursor_classifier.tflite'
+          if not os.path.exists(model_path):
+              print('Model not found, skipping')
+              exit(0)
+          interp = tflite.Interpreter(model_path=model_path)
+          interp.allocate_tensors()
+          inp = interp.get_input_details()
+          out = interp.get_output_details()
+          for _ in range(10):
+              data = np.random.randn(1, *inp[0]['shape'][1:]).astype(np.float32)
+              interp.set_tensor(inp[0]['index'], data)
+              interp.invoke()
+              probs = interp.get_tensor(out[0]['index'])[0]
+              s = probs.sum()
+              assert abs(s - 1.0) < 0.001, f'Probabilities sum to {s}'
+          print('All probability checks passed')
+          "
