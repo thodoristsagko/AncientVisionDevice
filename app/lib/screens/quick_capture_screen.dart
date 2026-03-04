@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -117,6 +118,10 @@ class _QuickCaptureScreenState extends State<QuickCaptureScreen> {
   // CRITICAL alert banner
   bool _showCriticalBanner = false;
 
+  // Live vibration risk overlay
+  Timer? _vibrationPollTimer;
+  AnomalyLevel _liveAnomalyLevel = AnomalyLevel.unknown;
+
   @override
   void initState() {
     super.initState();
@@ -128,6 +133,12 @@ class _QuickCaptureScreenState extends State<QuickCaptureScreen> {
     });
     // Seed current anomaly level from the running service
     _checkAnomalyLevel();
+    // Poll vibration level every second for the live overlay badge
+    _vibrationPollTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      final snapshot = _snapshotVibration();
+      setState(() => _liveAnomalyLevel = snapshot.level);
+    });
   }
 
   void _checkAnomalyLevel() {
@@ -230,6 +241,7 @@ class _QuickCaptureScreenState extends State<QuickCaptureScreen> {
 
   @override
   void dispose() {
+    _vibrationPollTimer?.cancel();
     _cameraController?.dispose();
     _quickNoteController.dispose();
     super.dispose();
@@ -267,6 +279,12 @@ class _QuickCaptureScreenState extends State<QuickCaptureScreen> {
                       if (_showGrid) _buildGridOverlay(),
                       // Simple center crosshair
                       Center(child: _buildCrosshair()),
+                      // Vibration risk badge (top-right of preview)
+                      Positioned(
+                        top: 12,
+                        right: 12,
+                        child: _buildLiveVibrationBadge(),
+                      ),
                     ],
                   ),
                 ),
@@ -367,6 +385,52 @@ class _QuickCaptureScreenState extends State<QuickCaptureScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildLiveVibrationBadge() {
+    String label;
+    Color color;
+    switch (_liveAnomalyLevel) {
+      case AnomalyLevel.normal:
+        label = 'SAFE';
+        color = AppColors.success;
+        break;
+      case AnomalyLevel.unusual:
+        label = 'CAUTION';
+        color = AppColors.warning;
+        break;
+      case AnomalyLevel.anomaly:
+        label = 'ANOMALY';
+        color = AppColors.error;
+        break;
+      case AnomalyLevel.unknown:
+        label = 'INIT';
+        color = Colors.grey;
+        break;
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withAlpha(200),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color, width: 1),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.sensors, color: Colors.white, size: 12),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 10,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
       ),
     );
   }

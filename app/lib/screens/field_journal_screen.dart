@@ -1,6 +1,7 @@
 // ignore_for_file: use_build_context_synchronously
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/field_journal.dart';
 import '../services/voice_service.dart';
@@ -33,6 +34,7 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
   final _searchController = TextEditingController();
   bool _showSearchBar = false;
   WeatherLog? _currentWeather;
+  DateTimeRange? _dateRange;
 
   // SharedPreferences key for local storage
   static const _entriesKey = 'journal_entries';
@@ -396,11 +398,17 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
               });
             },
           ),
-          if (!_showSearchBar)
+          if (!_showSearchBar) ...[
             IconButton(
               icon: const Icon(Icons.filter_list),
               onPressed: _showFilterDialog,
             ),
+            IconButton(
+              icon: const Icon(Icons.ios_share),
+              tooltip: 'Export entries',
+              onPressed: _exportEntries,
+            ),
+          ],
         ],
       ),
       body: Container(
@@ -448,6 +456,19 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
         ? _entries
         : _entries.where((e) => e.type == _selectedFilter).toList();
 
+    // Apply date range filter
+    if (_dateRange != null) {
+      final rangeStart = DateTime(
+          _dateRange!.start.year, _dateRange!.start.month, _dateRange!.start.day);
+      final rangeEnd = DateTime(
+          _dateRange!.end.year, _dateRange!.end.month, _dateRange!.end.day, 23, 59, 59);
+      filteredEntries = filteredEntries
+          .where((e) =>
+              !e.createdAt.isBefore(rangeStart) &&
+              !e.createdAt.isAfter(rangeEnd))
+          .toList();
+    }
+
     // Apply search filter
     if (_searchQuery.isNotEmpty) {
       filteredEntries = filteredEntries.where((e) {
@@ -467,40 +488,282 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
     }
 
     if (groupedEntries.isEmpty) {
-      return Center(
-        child: Text(
-          'No entries found',
-          style: TextStyle(color: Colors.white.withAlpha(150)),
-        ),
+      return Column(
+        children: [
+          _buildStatsHeader(filteredEntries),
+          _buildDateRangeFilterRow(),
+          Expanded(
+            child: Center(
+              child: Text(
+                'No entries found',
+                style: TextStyle(color: Colors.white.withAlpha(150)),
+              ),
+            ),
+          ),
+        ],
       );
     }
 
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: groupedEntries.length,
-      itemBuilder: (context, index) {
-        final dateKey = groupedEntries.keys.elementAt(index);
-        final entries = groupedEntries[dateKey]!;
+    return Column(
+      children: [
+        _buildStatsHeader(filteredEntries),
+        _buildDateRangeFilterRow(),
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.all(16),
+            itemCount: groupedEntries.length,
+            itemBuilder: (context, index) {
+              final dateKey = groupedEntries.keys.elementAt(index);
+              final entries = groupedEntries[dateKey]!;
 
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: Text(
-                dateKey,
-                style: TextStyle(
-                  color: Colors.white.withAlpha(179),
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Text(
+                      dateKey,
+                      style: TextStyle(
+                        color: Colors.white.withAlpha(179),
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  ...entries.map((entry) => _buildEntryCard(entry)),
+                  const SizedBox(height: 8),
+                ],
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Compact stats card shown above the entry list.
+  Widget _buildStatsHeader(List<JournalEntry> visibleEntries) {
+    final total = _entries.length;
+    final lastEntry = _entries.isEmpty ? null : _entries.first;
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    final lastDate = lastEntry == null
+        ? '—'
+        : '${months[lastEntry.createdAt.month - 1]} ${lastEntry.createdAt.day}';
+
+    return Container(
+      height: 60,
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(18),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withAlpha(30)),
+      ),
+      child: Row(
+        children: [
+          _buildStatCell(Icons.book, total.toString(), 'entries'),
+          _buildStatDivider(),
+          _buildStatCell(Icons.event, lastDate, 'last entry'),
+          _buildStatDivider(),
+          _buildStatCell(
+            Icons.search,
+            visibleEntries.length.toString(),
+            'visible',
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatCell(IconData icon, String value, String label) {
+    return Expanded(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 12, color: AppColors.accent),
+              const SizedBox(width: 4),
+              Text(
+                value,
+                style: const TextStyle(
+                  color: Colors.white,
                   fontSize: 14,
                   fontWeight: FontWeight.bold,
                 ),
               ),
+            ],
+          ),
+          Text(
+            label,
+            style: TextStyle(color: Colors.white.withAlpha(130), fontSize: 10),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatDivider() {
+    return Container(width: 1, height: 32, color: Colors.white.withAlpha(38));
+  }
+
+  /// Date range filter chip row shown below the stats header.
+  Widget _buildDateRangeFilterRow() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      child: Row(
+        children: [
+          if (_dateRange == null)
+            GestureDetector(
+              onTap: _pickDateRange,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.white.withAlpha(25),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: Colors.white.withAlpha(50)),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.date_range, size: 14, color: Colors.white70),
+                    SizedBox(width: 6),
+                    Text(
+                      'All dates',
+                      style: TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: AppColors.accent.withAlpha(50),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: AppColors.accent.withAlpha(150)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.date_range, size: 14, color: AppColors.accent),
+                  const SizedBox(width: 6),
+                  GestureDetector(
+                    onTap: _pickDateRange,
+                    child: Text(
+                      _formatDateRangeLabel(_dateRange!),
+                      style: const TextStyle(
+                        color: AppColors.accent,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  GestureDetector(
+                    onTap: () => setState(() => _dateRange = null),
+                    child: const Icon(Icons.close, size: 14, color: AppColors.accent),
+                  ),
+                ],
+              ),
             ),
-            ...entries.map((entry) => _buildEntryCard(entry)),
-            const SizedBox(height: 8),
-          ],
-        );
-      },
+        ],
+      ),
+    );
+  }
+
+  Future<void> _pickDateRange() async {
+    final now = DateTime.now();
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(now.year - 5),
+      lastDate: now,
+      initialDateRange: _dateRange,
+      builder: (context, child) => Theme(
+        data: Theme.of(context).copyWith(
+          colorScheme: const ColorScheme.dark(
+            primary: AppColors.accent,
+            onPrimary: AppColors.primaryDark,
+            surface: Color(0xFF1C2523),
+          ),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked != null && mounted) {
+      setState(() => _dateRange = picked);
+    }
+  }
+
+  String _formatDateRangeLabel(DateTimeRange range) {
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    final start = range.start;
+    final end = range.end;
+    if (start.month == end.month && start.year == end.year) {
+      return '${months[start.month - 1]} ${start.day}–${end.day}';
+    }
+    return '${months[start.month - 1]} ${start.day} – ${months[end.month - 1]} ${end.day}';
+  }
+
+  /// Export currently visible entries as a JSON array via the system share sheet.
+  void _exportEntries() {
+    // Collect the currently filtered entries (same logic as _buildJournalList)
+    var toExport = _showAllTypes
+        ? _entries
+        : _entries.where((e) => e.type == _selectedFilter).toList();
+
+    if (_dateRange != null) {
+      final rangeStart = DateTime(
+          _dateRange!.start.year, _dateRange!.start.month, _dateRange!.start.day);
+      final rangeEnd = DateTime(
+          _dateRange!.end.year, _dateRange!.end.month, _dateRange!.end.day, 23, 59, 59);
+      toExport = toExport
+          .where((e) =>
+              !e.createdAt.isBefore(rangeStart) &&
+              !e.createdAt.isAfter(rangeEnd))
+          .toList();
+    }
+
+    if (_searchQuery.isNotEmpty) {
+      toExport = toExport.where((e) {
+        final query = _searchQuery.toLowerCase();
+        return e.title.toLowerCase().contains(query) ||
+            e.content.toLowerCase().contains(query) ||
+            (e.tags?.any((t) => t.toLowerCase().contains(query)) ?? false) ||
+            (e.transcription?.toLowerCase().contains(query) ?? false);
+      }).toList();
+    }
+
+    final jsonList = toExport
+        .map((e) => {
+              'id': e.id,
+              'date': e.createdAt.toIso8601String(),
+              'title': e.title,
+              'content': e.content,
+              'type': e.type.name,
+            })
+        .toList();
+
+    final jsonString = const JsonEncoder.withIndent('  ').convert(jsonList);
+
+    // Use Clipboard as fallback (share_plus is not imported here)
+    Clipboard.setData(ClipboardData(text: jsonString));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Exported ${toExport.length} entr${toExport.length == 1 ? 'y' : 'ies'} — copied to clipboard',
+        ),
+        backgroundColor: AppColors.success,
+        duration: const Duration(seconds: 3),
+      ),
     );
   }
 
