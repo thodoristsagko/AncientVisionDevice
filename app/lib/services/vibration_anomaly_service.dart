@@ -25,6 +25,10 @@ class VibrationAnomalyService {
   static final VibrationAnomalyService _instance =
       VibrationAnomalyService._internal();
   factory VibrationAnomalyService() => _instance;
+
+  /// Named singleton accessor — identical to `VibrationAnomalyService()`.
+  static VibrationAnomalyService get instance => _instance;
+
   VibrationAnomalyService._internal();
 
   Interpreter? _interpreter;
@@ -53,6 +57,13 @@ class VibrationAnomalyService {
   String _modelVersion = 'unknown';
   String _modelType = 'autoencoder'; // 'autoencoder' or 'vae'
   double _beta = 1.0; // KL divergence weight for VAE scoring
+
+  // Runtime-configurable PPV alert threshold (updated from settings screen)
+  double _ppvThreshold = 0.3; // mm/s — default DIN 4150-3 heritage limit
+
+  // Maximum inference frequency debounce (set from settings screen)
+  Duration _maxInferenceInterval = const Duration(milliseconds: 500); // default 2 Hz
+  DateTime _lastInferenceTime = DateTime(2000); // sentinel: always allow first call
 
   // P70: Model fingerprint (sum of first 64 bytes of .tflite file)
   int _modelFingerprint = 0;
@@ -238,6 +249,12 @@ class VibrationAnomalyService {
       // Still calibrating — fall back to rule-based
       return _ruleBasedDetect(features);
     }
+
+    // Rate-limit ML inference according to the configured max Hz
+    if (!_inferenceAllowed) {
+      return _ruleBasedDetect(features);
+    }
+    _lastInferenceTime = DateTime.now();
 
     try {
       // Build feature vector in the expected order
@@ -454,6 +471,44 @@ class VibrationAnomalyService {
       level: level,
       rawError: aggregate,
     );
+  }
+
+  /// Update the PPV alert threshold at runtime (called from settings screen).
+  ///
+  /// Affects [_ruleBasedDetect]: the [ppvConcern] / [ppvDanger] levels are
+  /// derived as 3× and 10× of this base threshold so the rule-based fallback
+  /// stays proportional to the user's chosen sensitivity.
+  void setAlertThreshold(double ppv) {
+    _ppvThreshold = ppv.clamp(0.05, 10.0);
+    if (kDebugMode) {
+      debugPrint('VibrationAnomalyService: PPV threshold set to ${_ppvThreshold.toStringAsFixed(3)} mm/s');
+    }
+  }
+
+  /// Expose the current runtime PPV threshold (mm/s).
+  double get alertThreshold => _ppvThreshold;
+
+  /// Limit the rate at which [detect] runs TFLite inference.
+  ///
+  /// Calls that arrive before [_maxInferenceInterval] has elapsed since the
+  /// last successful inference are skipped (the previous result is reused by
+  /// the caller). Pass 0 to disable rate limiting.
+  void setMaxInferenceHz(double hz) {
+    if (hz <= 0) {
+      _maxInferenceInterval = Duration.zero;
+    } else {
+      _maxInferenceInterval = Duration(milliseconds: (1000 / hz).round());
+    }
+    if (kDebugMode) {
+      debugPrint('VibrationAnomalyService: Inference rate limited to ${hz.toStringAsFixed(1)} Hz '
+          '(interval=${_maxInferenceInterval.inMilliseconds} ms)');
+    }
+  }
+
+  /// Returns true if a new inference is allowed under the current rate limit.
+  bool get _inferenceAllowed {
+    if (_maxInferenceInterval == Duration.zero) return true;
+    return DateTime.now().difference(_lastInferenceTime) >= _maxInferenceInterval;
   }
 
   void resetBaseline() => _adaptiveService.reset();

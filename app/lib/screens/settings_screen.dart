@@ -7,6 +7,7 @@ import '../services/backup_service.dart';
 import '../services/biometric_service.dart';
 import '../services/coin/index.dart';
 import '../services/gemini_coin_service.dart';
+import '../services/vibration_anomaly_service.dart';
 import '../utils/app_styles.dart';
 
 // Vibration monitor prefs keys
@@ -77,6 +78,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await prefs.setString(_kBlePrefixKey, _blePrefixController.text.trim());
     await prefs.setDouble(_kPpvThresholdKey, _ppvAlertThreshold);
     await prefs.setString(_kInferenceFreqKey, _inferenceFreq);
+
+    // Apply to the running anomaly service immediately (no app restart needed)
+    final anomalyService = VibrationAnomalyService.instance;
+    anomalyService.setAlertThreshold(_ppvAlertThreshold);
+    const hzMap = {'1Hz': 1.0, '2Hz': 2.0, '5Hz': 5.0};
+    anomalyService.setMaxInferenceHz(hzMap[_inferenceFreq] ?? 2.0);
   }
 
   Future<void> _loadBiometricState() async {
