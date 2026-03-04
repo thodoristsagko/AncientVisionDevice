@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import '../config/env_config.dart';
 import '../services/auth_service.dart';
 import '../services/export_service.dart';
@@ -21,9 +22,57 @@ import 'help_screen.dart';
 import 'admin_panel_screen.dart';
 import 'ai_recognition_screen.dart';
 import 'calibration_wizard_screen.dart';
+import 'diagnostics_screen.dart';
 
-class ToolsView extends StatelessWidget {
+class ToolsView extends StatefulWidget {
   const ToolsView({super.key});
+
+  @override
+  State<ToolsView> createState() => _ToolsViewState();
+}
+
+class _ToolsViewState extends State<ToolsView> {
+  // Last-used timestamps keyed by tool name.
+  final Map<String, int> _lastUsed = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _loadLastUsed();
+  }
+
+  Future<void> _loadLastUsed() async {
+    final prefs = await SharedPreferences.getInstance();
+    final keys = [
+      'analytics', 'export', 'settings', 'help', 'field_journal',
+      'manual_entry', 'ai_recognition', 'quick_capture', 'pdf_report',
+      'export_session', 'calibrate', 'emergency', 'data_quality',
+    ];
+    final loaded = <String, int>{};
+    for (final k in keys) {
+      final ms = prefs.getInt('tool_last_used_$k');
+      if (ms != null) loaded[k] = ms;
+    }
+    if (mounted) setState(() => _lastUsed.addAll(loaded));
+  }
+
+  Future<void> _recordLastUsed(String toolKey) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    setState(() => _lastUsed[toolKey] = now);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('tool_last_used_$toolKey', now);
+  }
+
+  String _formatLastUsed(String toolKey) {
+    final ms = _lastUsed[toolKey];
+    if (ms == null) return 'Never used';
+    final diff = DateTime.now()
+        .difference(DateTime.fromMillisecondsSinceEpoch(ms));
+    if (diff.inMinutes < 1) return 'Last used: just now';
+    if (diff.inHours < 1) return 'Last used: ${diff.inMinutes}m ago';
+    if (diff.inDays < 1) return 'Last used: ${diff.inHours}h ago';
+    return 'Last used: ${diff.inDays}d ago';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -57,7 +106,12 @@ class ToolsView extends StatelessWidget {
                         fontWeight: FontWeight.w700,
                       ),
                     ),
-                    const SizedBox(height: 24),
+                    const SizedBox(height: 12),
+
+                    // QUICK ACTIONS ROW
+                    _buildQuickActionsRow(context),
+                    const SizedBox(height: 16),
+
                     _buildFeaturedSection(context),
 
                     // === DOCUMENTATION (merged Field Work + Capture) ===
@@ -68,11 +122,15 @@ class ToolsView extends StatelessWidget {
                         icon: Icons.book_rounded,
                         title: 'Field Journal',
                         description: 'Daily logs, observations, and site notes',
+                        lastUsedLabel: _formatLastUsed('field_journal'),
                         color: const Color(0xFF795548),
-                        onTap: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(builder: (_) => const FieldJournalScreen()),
-                        ),
+                        onTap: () {
+                          _recordLastUsed('field_journal');
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (_) => const FieldJournalScreen()),
+                          );
+                        },
                       ),
                       const SizedBox(height: 10),
                       _buildToolGrid(context, [
@@ -80,11 +138,15 @@ class ToolsView extends StatelessWidget {
                           icon: Icons.edit_note_rounded,
                           title: 'Manual Entry',
                           description: 'Full recording form',
+                          lastUsedLabel: _formatLastUsed('manual_entry'),
                           color: const Color(0xFFFFC107),
-                          onTap: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(builder: (_) => const ManualEntryFormScreen()),
-                          ),
+                          onTap: () {
+                            _recordLastUsed('manual_entry');
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(builder: (_) => const ManualEntryFormScreen()),
+                            );
+                          },
                         ),
                       ]),
                       const SizedBox(height: 18),
@@ -97,18 +159,26 @@ class ToolsView extends StatelessWidget {
                           icon: Icons.insights_rounded,
                           title: 'Analytics',
                           description: 'Statistics & activity',
+                          lastUsedLabel: _formatLastUsed('analytics'),
                           color: const Color(0xFF00BCD4),
-                          onTap: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(builder: (_) => const AnalyticsScreen()),
-                          ),
+                          onTap: () {
+                            _recordLastUsed('analytics');
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(builder: (_) => const AnalyticsScreen()),
+                            );
+                          },
                         ),
                         ToolCard(
                           icon: Icons.file_download_rounded,
                           title: 'Export Data',
                           description: 'CSV, JSON, GeoJSON',
+                          lastUsedLabel: _formatLastUsed('export'),
                           color: const Color(0xFF607D8B),
-                          onTap: () => _showExportDialog(context),
+                          onTap: () {
+                            _recordLastUsed('export');
+                            _showExportDialog(context);
+                          },
                         ),
                       ]),
                       const SizedBox(height: 18),
@@ -121,21 +191,29 @@ class ToolsView extends StatelessWidget {
                           icon: Icons.settings_rounded,
                           title: 'Settings',
                           description: 'Theme & preferences',
+                          lastUsedLabel: _formatLastUsed('settings'),
                           color: const Color(0xFF455A64),
-                          onTap: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(builder: (_) => const SettingsScreen()),
-                          ),
+                          onTap: () {
+                            _recordLastUsed('settings');
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                            );
+                          },
                         ),
                         ToolCard(
                           icon: Icons.help_outline_rounded,
                           title: 'Help & Guide',
                           description: 'Tutorials & FAQ',
+                          lastUsedLabel: _formatLastUsed('help'),
                           color: const Color(0xFF3F51B5),
-                          onTap: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(builder: (_) => const HelpScreen()),
-                          ),
+                          onTap: () {
+                            _recordLastUsed('help');
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(builder: (_) => const HelpScreen()),
+                            );
+                          },
                         ),
                       ]),
                       const SizedBox(height: 18),
@@ -186,6 +264,110 @@ class ToolsView extends StatelessWidget {
     );
   }
 
+  Widget _buildQuickActionsRow(BuildContext context) {
+    final anomalyService = VibrationAnomalyService.instance;
+    final bool isConnected = anomalyService.isInitialized;
+    final Color bleColor = isConnected ? const Color(0xFF4CAF50) : Colors.white38;
+    final String bleLabel = isConnected ? 'Connected' : 'No Device';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Quick Actions',
+          style: TextStyle(color: Colors.white54, fontSize: 12, fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          height: 38,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            children: [
+              // BLE status chip
+              _quickChip(
+                icon: Icons.bluetooth_rounded,
+                label: bleLabel,
+                color: bleColor,
+                onTap: null,
+              ),
+              const SizedBox(width: 8),
+              // Export Data
+              _quickChip(
+                icon: Icons.file_download_rounded,
+                label: 'Export Data',
+                color: const Color(0xFF607D8B),
+                onTap: () {
+                  _recordLastUsed('export');
+                  _showExportDialog(context);
+                },
+              ),
+              const SizedBox(width: 8),
+              // Run Diagnostics
+              _quickChip(
+                icon: Icons.fact_check_rounded,
+                label: 'Diagnostics',
+                color: const Color(0xFF00BCD4),
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const DiagnosticsScreen()),
+                  );
+                },
+              ),
+              const SizedBox(width: 8),
+              // Help
+              _quickChip(
+                icon: Icons.help_outline_rounded,
+                label: 'Help',
+                color: const Color(0xFF3F51B5),
+                onTap: () {
+                  _recordLastUsed('help');
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const HelpScreen()),
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _quickChip({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback? onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: color.withAlpha(onTap == null ? 15 : 30),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: color.withAlpha(onTap == null ? 40 : 80)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: color, size: 14),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                  color: color,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildFeaturedSection(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -199,10 +381,14 @@ class ToolsView extends StatelessWidget {
           subtitle: 'Identify coins using Google Gemini AI',
           statusLabel: 'Gemini AI',
           statusColor: const Color(0xFF4CAF50),
-          onTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => const AIRecognitionScreen()),
-          ),
+          lastUsedLabel: _formatLastUsed('ai_recognition'),
+          onTap: () {
+            _recordLastUsed('ai_recognition');
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const AIRecognitionScreen()),
+            );
+          },
         ),
         HeroToolCard(
           icon: Icons.flash_on_rounded,
@@ -211,7 +397,9 @@ class ToolsView extends StatelessWidget {
           subtitle: 'Record a finding in seconds',
           statusLabel: 'Instant',
           statusColor: const Color(0xFF2196F3),
+          lastUsedLabel: _formatLastUsed('quick_capture'),
           onTap: () async {
+            _recordLastUsed('quick_capture');
             final result = await Navigator.push<Map<String, dynamic>>(
               context,
               MaterialPageRoute(builder: (_) => const QuickCaptureScreen()),
@@ -228,7 +416,9 @@ class ToolsView extends StatelessWidget {
           subtitle: 'Export all findings as a shareable report',
           statusLabel: 'Ready',
           statusColor: const Color(0xFF4CAF50),
+          lastUsedLabel: _formatLastUsed('pdf_report'),
           onTap: () async {
+            _recordLastUsed('pdf_report');
             try {
               await PdfExportService().exportFindingsReport(context);
             } catch (e) {
@@ -274,6 +464,7 @@ class ToolsView extends StatelessWidget {
     required String description,
     required Color color,
     required VoidCallback onTap,
+    String? lastUsedLabel,
   }) {
     return GestureDetector(
       onTap: onTap,
@@ -315,6 +506,16 @@ class ToolsView extends StatelessWidget {
                       fontSize: 14,
                     ),
                   ),
+                  if (lastUsedLabel != null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      lastUsedLabel,
+                      style: TextStyle(
+                        color: Colors.white.withAlpha(100),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -327,32 +528,62 @@ class ToolsView extends StatelessWidget {
 
 
   Widget _buildVibrationToolsSection(BuildContext context) {
+    final anomalyService = VibrationAnomalyService.instance;
+    final bool isConnected = anomalyService.isInitialized;
+    final Color bleColor = isConnected ? const Color(0xFF4CAF50) : Colors.white38;
+
     return Column(
       children: [
-        // Session Export
-        _buildBigToolButton(
-          context,
-          icon: Icons.ios_share_rounded,
-          title: 'Export Session Data',
-          description: 'Share current session as CSV',
-          color: const Color(0xFF607D8B),
-          onTap: () async {
-            try {
-              // Export an empty/placeholder session when called standalone;
-              // the real export with actual data is triggered from safety_view.
-              await SessionExportService.instance.exportSession([]);
-            } catch (e) {
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text(
-                      'No active session data to export. Start monitoring first.',
-                    ),
+        // Session Export — with active-status badge (BLE connection dot)
+        Stack(
+          children: [
+            _buildBigToolButton(
+              context,
+              icon: Icons.ios_share_rounded,
+              title: 'Export Session Data',
+              description: 'Share current session as CSV',
+              lastUsedLabel: _formatLastUsed('export_session'),
+              color: const Color(0xFF607D8B),
+              onTap: () async {
+                _recordLastUsed('export_session');
+                try {
+                  // Export an empty/placeholder session when called standalone;
+                  // the real export with actual data is triggered from safety_view.
+                  await SessionExportService.instance.exportSession([]);
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'No active session data to export. Start monitoring first.',
+                        ),
+                      ),
+                    );
+                  }
+                }
+              },
+            ),
+            // BLE status badge overlay (top-right)
+            Positioned(
+              top: 8,
+              right: 12,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(color: bleColor, shape: BoxShape.circle),
                   ),
-                );
-              }
-            }
-          },
+                  const SizedBox(width: 4),
+                  Text(
+                    isConnected ? 'Live' : 'Offline',
+                    style: TextStyle(color: bleColor, fontSize: 10, fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 10),
 
@@ -362,8 +593,10 @@ class ToolsView extends StatelessWidget {
           icon: Icons.tune_rounded,
           title: 'Calibrate Device',
           description: 'Reset baseline for current environment',
+          lastUsedLabel: _formatLastUsed('calibrate'),
           color: const Color(0xFFFFC107),
           onTap: () {
+            _recordLastUsed('calibrate');
             Navigator.push(
               context,
               MaterialPageRoute(
@@ -374,32 +607,54 @@ class ToolsView extends StatelessWidget {
         ),
         const SizedBox(height: 10),
 
-        // Emergency Share
-        _buildBigToolButton(
-          context,
-          icon: Icons.emergency_share_rounded,
-          title: 'Emergency Report',
-          description: 'Share alert data with site supervisor',
-          color: const Color(0xFFF44336),
-          onTap: () async {
-            final anomalyService = VibrationAnomalyService.instance;
-            try {
-              await EmergencyShareService.shareAlertAutoLocation(
-                ppv: 0.0,
-                anomalyScore: 0.0,
-                deviceId: anomalyService.isInitialized
-                    ? 'AncientVision'
-                    : 'No device',
-                precursorPattern: null,
-              );
-            } catch (e) {
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Share failed: $e')),
-                );
-              }
-            }
-          },
+        // Emergency Share — with BLE status badge
+        Stack(
+          children: [
+            _buildBigToolButton(
+              context,
+              icon: Icons.emergency_share_rounded,
+              title: 'Emergency Report',
+              description: 'Share alert data with site supervisor',
+              lastUsedLabel: _formatLastUsed('emergency'),
+              color: const Color(0xFFF44336),
+              onTap: () async {
+                _recordLastUsed('emergency');
+                try {
+                  await EmergencyShareService.shareAlertAutoLocation(
+                    ppv: 0.0,
+                    anomalyScore: 0.0,
+                    deviceId: isConnected ? 'AncientVision' : 'No device',
+                    precursorPattern: null,
+                  );
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Share failed: $e')),
+                    );
+                  }
+                }
+              },
+            ),
+            Positioned(
+              top: 8,
+              right: 12,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(color: bleColor, shape: BoxShape.circle),
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    isConnected ? 'BLE On' : 'BLE Off',
+                    style: TextStyle(color: bleColor, fontSize: 10, fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 10),
 
@@ -409,8 +664,10 @@ class ToolsView extends StatelessWidget {
           icon: Icons.fact_check_rounded,
           title: 'Check Data Quality',
           description: 'Run quality analysis on collected samples',
+          lastUsedLabel: _formatLastUsed('data_quality'),
           color: const Color(0xFF00BCD4),
           onTap: () {
+            _recordLastUsed('data_quality');
             showDialog(
               context: context,
               builder: (ctx) => AlertDialog(

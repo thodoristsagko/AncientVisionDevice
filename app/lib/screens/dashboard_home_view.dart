@@ -6,6 +6,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../widgets/dashboard_home_widgets.dart';
 import '../services/auth_service.dart';
+import '../services/alert_history_service.dart';
 import '../services/local_storage_service.dart';
 import '../services/notification_service.dart';
 import '../services/site_service.dart';
@@ -16,6 +17,7 @@ import 'qr_scanner_screen.dart';
 import 'analytics_screen.dart';
 import 'calibration_wizard_screen.dart';
 import 'session_history_screen.dart';
+import 'vibration_event_log_screen.dart';
 
 class DashboardHomeView extends StatefulWidget {
   /// Called when the view wants to switch the main navigation tab.
@@ -51,6 +53,14 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
   String _lastSync = 'Never';
   bool _sessionStatsLoading = true;
 
+  // --- Quick Status Banner ---
+  int _appStartTimeMs = 0;
+
+  // --- Recent Alerts Summary ---
+  int _alerts24h = 0;
+  AlertData? _mostRecentAlert;
+  bool _alertsLoading = true;
+
   @override
   void initState() {
     super.initState();
@@ -64,6 +74,8 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
     });
     _loadSessionStats();
     _loadSystemStatus();
+    _loadAppStartTime();
+    _loadRecentAlerts();
   }
 
   // ---------------------------------------------------------------------------
@@ -133,6 +145,41 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
       }
     } catch (e) {
       debugPrint('_loadSystemStatus error: $e');
+    }
+  }
+
+  Future<void> _loadAppStartTime() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ms = prefs.getInt('app_start_time') ?? 0;
+    if (ms == 0) {
+      // Store on first run
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await prefs.setInt('app_start_time', now);
+      if (mounted) setState(() => _appStartTimeMs = now);
+    } else {
+      if (mounted) setState(() => _appStartTimeMs = ms);
+    }
+  }
+
+  Future<void> _loadRecentAlerts() async {
+    try {
+      final alertService = AlertHistoryService();
+      final recent = await alertService.getRecent(const Duration(hours: 24));
+      AlertData? mostRecent;
+      if (recent.isNotEmpty) {
+        recent.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+        mostRecent = recent.first;
+      }
+      if (mounted) {
+        setState(() {
+          _alerts24h = recent.length;
+          _mostRecentAlert = mostRecent;
+          _alertsLoading = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('_loadRecentAlerts error: $e');
+      if (mounted) setState(() => _alertsLoading = false);
     }
   }
 
@@ -269,6 +316,270 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
   // ---------------------------------------------------------------------------
   // Widgets
   // ---------------------------------------------------------------------------
+
+  // --- Quick Status Banner ---------------------------------------------------
+
+  String _formatElapsed(int startMs) {
+    if (startMs == 0) return 'Active';
+    final elapsed = DateTime.now()
+        .difference(DateTime.fromMillisecondsSinceEpoch(startMs));
+    if (elapsed.inHours >= 1) {
+      return '${elapsed.inHours}h ${elapsed.inMinutes.remainder(60)}m';
+    }
+    return '${elapsed.inMinutes}m';
+  }
+
+  Widget _buildStatusBanner() {
+    final anomalyService = VibrationAnomalyService.instance;
+    final bool isConnected = anomalyService.isInitialized;
+    final String modeLabel = isConnected ? anomalyService.modeLabel : 'Disconnected';
+    final Color bleColor =
+        isConnected ? const Color(0xFF4CAF50) : Colors.white38;
+    final String elapsedStr = _formatElapsed(_appStartTimeMs);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(14),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withAlpha(20)),
+      ),
+      child: Row(
+        children: [
+          // BLE dot
+          Container(
+            width: 10,
+            height: 10,
+            decoration: BoxDecoration(color: bleColor, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            isConnected ? 'Connected' : 'No Device',
+            style: TextStyle(color: bleColor, fontSize: 12, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(width: 12),
+          // Mode badge
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFC107).withAlpha(30),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: const Color(0xFFFFC107).withAlpha(80)),
+            ),
+            child: Text(
+              modeLabel,
+              style: const TextStyle(
+                  color: Color(0xFFFFC107), fontSize: 10, fontWeight: FontWeight.w600),
+            ),
+          ),
+          const Spacer(),
+          // Session timer
+          const Icon(Icons.timer_outlined, color: Colors.white38, size: 14),
+          const SizedBox(width: 4),
+          Text(
+            elapsedStr,
+            style: const TextStyle(color: Colors.white54, fontSize: 12),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // --- Recent Alerts Summary Card --------------------------------------------
+
+  Widget _buildRecentAlertsSummaryCard() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(18),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withAlpha(26)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+            child: Row(
+              children: [
+                const Icon(Icons.warning_amber_rounded,
+                    color: Color(0xFFFFC107), size: 16),
+                const SizedBox(width: 8),
+                const Text(
+                  'Alerts (24h)',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600),
+                ),
+                const Spacer(),
+                GestureDetector(
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) => const VibrationEventLogScreen()),
+                  ),
+                  child: const Text(
+                    'View all',
+                    style: TextStyle(color: Color(0xFFFFC107), fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (_alertsLoading)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 4, 16, 16),
+              child: SizedBox(
+                height: 24,
+                child: LinearProgressIndicator(
+                    color: Color(0xFFFFC107),
+                    backgroundColor: Colors.white10),
+              ),
+            )
+          else if (_alerts24h == 0)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 4, 16, 16),
+              child: Row(
+                children: [
+                  Icon(Icons.check_circle_outline,
+                      color: Color(0xFF4CAF50), size: 16),
+                  SizedBox(width: 8),
+                  Text(
+                    'No alerts in last 24h',
+                    style: TextStyle(color: Color(0xFF4CAF50), fontSize: 13),
+                  ),
+                ],
+              ),
+            )
+          else ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF44336).withAlpha(40),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                          color: const Color(0xFFF44336).withAlpha(80)),
+                    ),
+                    child: Text(
+                      '$_alerts24h alert${_alerts24h > 1 ? 's' : ''}',
+                      style: const TextStyle(
+                          color: Color(0xFFF44336),
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  if (_mostRecentAlert != null) ...[
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'Last: ${_formatTime(_mostRecentAlert!.timestamp)} · ${_mostRecentAlert!.level}',
+                        style: const TextStyle(
+                            color: Colors.white54, fontSize: 12),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+          ],
+        ],
+      ),
+    );
+  }
+
+  // --- Session Stats Row (today) ---------------------------------------------
+
+  Widget _buildSessionStatsRow() {
+    final String monitoringTime = _formatElapsed(_appStartTimeMs);
+    final String peakPpv = _sessionStatsLoading
+        ? '...'
+        : '${_peakPpvToday.toStringAsFixed(2)} mm/s';
+    final String totalEvents = _alertsLoading ? '...' : '$_alerts24h';
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        children: [
+          _sessionStatChip(
+            icon: Icons.access_time_rounded,
+            label: 'Monitoring',
+            value: monitoringTime,
+            color: const Color(0xFF2196F3),
+          ),
+          const SizedBox(width: 8),
+          _sessionStatChip(
+            icon: Icons.speed_rounded,
+            label: 'Peak PPV',
+            value: peakPpv,
+            color: const Color(0xFFFFC107),
+          ),
+          const SizedBox(width: 8),
+          _sessionStatChip(
+            icon: Icons.notifications_active_rounded,
+            label: 'Events',
+            value: totalEvents,
+            color: _alerts24h > 0
+                ? const Color(0xFFF44336)
+                : const Color(0xFF4CAF50),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _sessionStatChip({
+    required IconData icon,
+    required String label,
+    required String value,
+    required Color color,
+  }) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        decoration: BoxDecoration(
+          color: color.withAlpha(20),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: color.withAlpha(60)),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: color, size: 14),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    value,
+                    style: TextStyle(
+                        color: color,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  Text(
+                    label,
+                    style: const TextStyle(
+                        color: Colors.white38, fontSize: 9),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   Widget _statChip(String label, int value, Color color) {
     return TweenAnimationBuilder<double>(
@@ -838,7 +1149,10 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
                 ],
               ),
 
-              const SizedBox(height: 20),
+              const SizedBox(height: 16),
+
+              // QUICK STATUS BANNER
+              _buildStatusBanner(),
 
               // OFFLINE SYNC (compact)
               if (_offlineDataCount > 0)
@@ -875,8 +1189,14 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
                   ),
                 ),
 
+              // SESSION STATS ROW (today: monitoring time, peak PPV, events)
+              _buildSessionStatsRow(),
+
               // QUICK STATS ROW (sessions / PPV / status)
               _buildQuickStatsRow(),
+
+              // RECENT ALERTS SUMMARY
+              _buildRecentAlertsSummaryCard(),
 
               // STATS
               CombinedStatCard(totalFindings: '$_totalFindings', todayFindings: '$_todayFindings'),
