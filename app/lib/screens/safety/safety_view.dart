@@ -205,7 +205,7 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
   bool _uiDirty = false; // Flag: new data arrived since last refresh
 
   // Connection attempt timeout feedback — show "Still connecting..." after 5 s
-  bool _connectingSlowly = false; // ignore: unused_field
+  bool _connectingSlowly = false;
   Timer? _connectingSlowTimer;
 
   // Simple/Detailed view mode toggle (simple by default for archaeologist UX)

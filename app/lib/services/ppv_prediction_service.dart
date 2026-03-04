@@ -1,4 +1,8 @@
+import 'dart:developer' as developer;
 import 'dart:math';
+
+import '../config/app_constants.dart';
+import '../utils/circular_buffer.dart';
 
 /// Simple Kalman filter compatible with PPVPredictionService.
 ///
@@ -29,6 +33,9 @@ class KalmanFilter {
   }
 
   double get estimate => _estimate;
+
+  /// Current error covariance (uncertainty) of the Kalman filter.
+  double get errorCovariance => _errorEstimate;
 
   void reset() {
     _estimate = 0.0;
@@ -231,6 +238,13 @@ class PPVTrendPredictor {
   }
 }
 
+/// A (predicted, actual) pair used for accuracy tracking.
+class _PredictionPair {
+  final double predicted;
+  final double actual;
+  const _PredictionPair(this.predicted, this.actual);
+}
+
 /// Service for real-time PPV prediction, Kalman smoothing, and trend analysis.
 ///
 /// Singleton that accumulates PPV samples, maintains a Kalman-filtered
@@ -242,6 +256,12 @@ class PPVPredictionService {
 
   static const int _maxHistory = 60;
 
+  /// Threshold above which prediction accuracy is considered degraded (mm/s).
+  static const double _maeWarningThreshold = 0.5;
+
+  /// BLE update interval in seconds (2 Hz default).
+  static const double _sampleIntervalSec = 0.5;
+
   final List<double> _ppvHistory = [];
   final List<double> _kalmanHistory = [];
   final KalmanFilter _kalman = KalmanFilter(
@@ -249,6 +269,17 @@ class PPVPredictionService {
     measurementNoise: 0.05,
   );
   final PPVTrendPredictor _predictor = PPVTrendPredictor();
+
+  /// Rolling buffer of the last 20 (predicted, actual) pairs for MAE tracking.
+  final CircularBuffer<_PredictionPair> _accuracyBuffer =
+      CircularBuffer<_PredictionPair>(20);
+
+  /// The last one-step-ahead prediction made before the most recent sample.
+  double? _pendingPrediction;
+
+  // ============================================================================
+  // Existing public API
+  // ============================================================================
 
   /// Unmodifiable view of raw PPV samples (newest last).
   List<double> get rawHistory => List.unmodifiable(_ppvHistory);
@@ -259,7 +290,20 @@ class PPVPredictionService {
   /// Add a new raw PPV measurement (mm/s).
   ///
   /// Also pushes through the Kalman filter and maintains the rolling window.
+  /// Records prediction accuracy if a pending prediction exists.
   void addSample(double ppv) {
+    // Record accuracy for the prediction made on the previous step.
+    if (_pendingPrediction != null) {
+      _accuracyBuffer.add(_PredictionPair(_pendingPrediction!, ppv));
+      if (predictionMae > _maeWarningThreshold) {
+        developer.log(
+          'PPV prediction accuracy degraded: MAE=${predictionMae.toStringAsFixed(3)} mm/s',
+          name: 'PPVPredictionService',
+          level: 900, // WARNING
+        );
+      }
+    }
+
     final filtered = _kalman.update(ppv);
     _ppvHistory.add(ppv);
     _kalmanHistory.add(filtered);
@@ -267,6 +311,9 @@ class PPVPredictionService {
       _ppvHistory.removeAt(0);
       _kalmanHistory.removeAt(0);
     }
+
+    // Store the next one-step-ahead Kalman prediction for accuracy tracking.
+    _pendingPrediction = filtered;
   }
 
   /// Current trend prediction based on Kalman-filtered history.
@@ -307,5 +354,209 @@ class PPVPredictionService {
     _ppvHistory.clear();
     _kalmanHistory.clear();
     _kalman.reset();
+    _accuracyBuffer.clear();
+    _pendingPrediction = null;
+  }
+
+  // ============================================================================
+  // New: Prediction accuracy tracking
+  // ============================================================================
+
+  /// Mean Absolute Error of the last ≤20 one-step-ahead predictions (mm/s).
+  ///
+  /// Returns 0.0 when no accuracy pairs have been recorded yet.
+  double get predictionMae {
+    if (_accuracyBuffer.isEmpty) return 0.0;
+    double sum = 0.0;
+    for (final pair in _accuracyBuffer.iter) {
+      sum += (pair.predicted - pair.actual).abs();
+    }
+    return sum / _accuracyBuffer.length;
+  }
+
+  // ============================================================================
+  // New: Trend velocity (mm/s per second)
+  // ============================================================================
+
+  /// Rate of change of PPV in mm/s per second (first derivative).
+  ///
+  /// Computed from the linear regression slope converted from per-sample
+  /// to per-second using [_sampleIntervalSec]. Positive = increasing,
+  /// negative = decreasing. Returns 0.0 when insufficient data.
+  double get ppvTrendVelocity {
+    final p = prediction;
+    if (p == null) return 0.0;
+    // slope is in mm/s per sample; divide by interval to get mm/s per second.
+    return p.slope / _sampleIntervalSec;
+  }
+
+  // ============================================================================
+  // New: Time-to-threshold estimate
+  // ============================================================================
+
+  /// Estimated time until PPV reaches the DIN 4150-3 warning threshold.
+  ///
+  /// Uses a simple linear extrapolation from the current Kalman estimate
+  /// and [ppvTrendVelocity]. Returns null when PPV is stable or decreasing,
+  /// or when the current PPV already exceeds the threshold.
+  /// Capped at 10 minutes to avoid misleading long-range predictions.
+  Duration? get estimatedTimeToThreshold {
+    final velocity = ppvTrendVelocity; // mm/s per second
+    if (velocity <= 0) return null;
+
+    final currentPpv =
+        _kalmanHistory.isNotEmpty ? _kalmanHistory.last : 0.0;
+    const threshold = AppConstants.ppvWarning;
+
+    if (currentPpv >= threshold) return null;
+
+    final secondsToThreshold = (threshold - currentPpv) / velocity;
+    if (secondsToThreshold <= 0) return null;
+
+    const maxSeconds = 10 * 60.0; // 10 minutes cap
+    final clamped = secondsToThreshold.clamp(0.0, maxSeconds);
+    return Duration(milliseconds: (clamped * 1000).round());
+  }
+
+  // ============================================================================
+  // New: 95 % confidence interval
+  // ============================================================================
+
+  /// 95 % confidence interval (±2σ) around the current Kalman estimate.
+  ///
+  /// Uses the Kalman filter's error covariance as the variance estimate
+  /// (σ = √P). If the covariance is unavailable or the history is empty,
+  /// falls back to ±10 % of the current estimate.
+  ///
+  /// Returns (lower, upper) bounds in mm/s (both ≥ 0).
+  (double lower, double upper) get ppvConfidenceInterval95 {
+    if (_kalmanHistory.isEmpty) return (0.0, 0.0);
+
+    final estimate = _kalmanHistory.last;
+    // KalmanFilter.errorCovariance is the posterior error covariance P.
+    final covariance = _kalman.errorCovariance;
+    final sigma = sqrt(max(0.0, covariance));
+    final halfWidth = sigma > 0 ? 2.0 * sigma : 0.1 * estimate;
+
+    return (
+      max(0.0, estimate - halfWidth),
+      estimate + halfWidth,
+    );
+  }
+}
+
+// ============================================================================
+// Seismic risk model
+// ============================================================================
+
+/// Risk level classification for seismic / vibration events.
+enum SeismicRiskLevel {
+  safe,
+  low,
+  moderate,
+  high,
+  critical,
+}
+
+/// Seismic risk assessment that combines PPV, trend velocity, and time-to-threshold
+/// into a human-readable description for field operators.
+///
+/// Constructed from the current state of [PPVPredictionService].
+class SeismicRiskModel {
+  /// Current (Kalman-filtered) PPV in mm/s.
+  final double currentPpv;
+
+  /// Trend velocity in mm/s per second.
+  final double trendVelocity;
+
+  /// Estimated time to warning threshold, or null if not applicable.
+  final Duration? timeToThreshold;
+
+  /// Derived risk level.
+  final SeismicRiskLevel riskLevel;
+
+  SeismicRiskModel._({
+    required this.currentPpv,
+    required this.trendVelocity,
+    required this.timeToThreshold,
+    required this.riskLevel,
+  });
+
+  /// Build a [SeismicRiskModel] from the current [PPVPredictionService] state.
+  factory SeismicRiskModel.fromService() {
+    final svc = PPVPredictionService.instance;
+    final ppv = svc.kalmanHistory.isNotEmpty ? svc.kalmanHistory.last : 0.0;
+    final velocity = svc.ppvTrendVelocity;
+    final ttThreshold = svc.estimatedTimeToThreshold;
+
+    final level = _classify(ppv);
+
+    return SeismicRiskModel._(
+      currentPpv: ppv,
+      trendVelocity: velocity,
+      timeToThreshold: ttThreshold,
+      riskLevel: level,
+    );
+  }
+
+  static SeismicRiskLevel _classify(double ppv) {
+    if (ppv >= AppConstants.ppvCritical) return SeismicRiskLevel.critical;
+    if (ppv >= AppConstants.ppvWarning) return SeismicRiskLevel.high;
+    if (ppv >= AppConstants.ppvSafeMax * 4) return SeismicRiskLevel.moderate;
+    if (ppv >= AppConstants.ppvSafeMax) return SeismicRiskLevel.low;
+    return SeismicRiskLevel.safe;
+  }
+
+  /// Human-readable sentence describing the current seismic risk for operators.
+  ///
+  /// Example: "Moderate vibration detected. PPV is trending upward at
+  /// 0.05 mm/s². Estimated 45s to warning threshold."
+  String get riskDescription {
+    final ppvStr = currentPpv.toStringAsFixed(2);
+    final buffer = StringBuffer();
+
+    switch (riskLevel) {
+      case SeismicRiskLevel.safe:
+        buffer.write('Vibration within safe limits (PPV $ppvStr mm/s).');
+      case SeismicRiskLevel.low:
+        buffer.write('Low vibration detected (PPV $ppvStr mm/s).');
+      case SeismicRiskLevel.moderate:
+        buffer.write('Moderate vibration detected (PPV $ppvStr mm/s).');
+      case SeismicRiskLevel.high:
+        buffer.write(
+          'High vibration — DIN 4150-3 warning threshold exceeded (PPV $ppvStr mm/s).',
+        );
+      case SeismicRiskLevel.critical:
+        buffer.write(
+          'CRITICAL vibration — immediate action required (PPV $ppvStr mm/s).',
+        );
+    }
+
+    if (trendVelocity > 0.001) {
+      buffer.write(
+        ' PPV is trending upward at ${trendVelocity.toStringAsFixed(3)} mm/s².',
+      );
+    } else if (trendVelocity < -0.001) {
+      buffer.write(
+        ' PPV is decreasing at ${trendVelocity.abs().toStringAsFixed(3)} mm/s².',
+      );
+    } else {
+      buffer.write(' PPV is stable.');
+    }
+
+    if (timeToThreshold != null) {
+      final secs = timeToThreshold!.inSeconds;
+      if (secs < 60) {
+        buffer.write(' Estimated ${secs}s to warning threshold.');
+      } else {
+        final mins = timeToThreshold!.inMinutes;
+        final remSecs = secs - mins * 60;
+        buffer.write(
+          ' Estimated ${mins}m${remSecs > 0 ? ' ${remSecs}s' : ''} to warning threshold.',
+        );
+      }
+    }
+
+    return buffer.toString();
   }
 }

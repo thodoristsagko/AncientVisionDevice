@@ -28,6 +28,7 @@ class DevicesScreen extends StatefulWidget {
 class _DevicesScreenState extends State<DevicesScreen> {
   bool _loading = true;
   _SavedDevice? _savedDevice;
+  DateTime? _lastSeenAt;
 
   @override
   void initState() {
@@ -42,12 +43,14 @@ class _DevicesScreenState extends State<DevicesScreen> {
     try {
       final id = await DeviceMemoryService.instance.getLastDeviceId();
       final name = await DeviceMemoryService.instance.getLastDeviceName();
+      final seenAt = await DeviceMemoryService.instance.getLastSeenAt();
 
       if (mounted) {
         setState(() {
           _savedDevice = (id != null && name != null)
               ? _SavedDevice(id: id, name: name)
               : null;
+          _lastSeenAt = seenAt;
           _loading = false;
         });
       }
@@ -55,6 +58,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
       if (mounted) {
         setState(() {
           _savedDevice = null;
+          _lastSeenAt = null;
           _loading = false;
         });
       }
@@ -96,6 +100,18 @@ class _DevicesScreenState extends State<DevicesScreen> {
         );
       }
     }
+  }
+
+  // ── Last-seen label helper ──────────────────────────────────────────────────
+
+  /// Returns a human-readable "last seen X ago" string, or null if unknown.
+  String? _lastSeenLabel(DateTime? seenAt) {
+    if (seenAt == null) return null;
+    final diff = DateTime.now().difference(seenAt);
+    if (diff.inSeconds < 60) return 'last seen just now';
+    if (diff.inMinutes < 60) return 'last seen ${diff.inMinutes}m ago';
+    if (diff.inHours < 24) return 'last seen ${diff.inHours}h ago';
+    return 'last seen ${diff.inDays}d ago';
   }
 
   // ── RSSI signal icon helper ─────────────────────────────────────────────────
@@ -220,6 +236,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
           child: _DeviceTile(
             device: device,
             rssiIcon: _rssiIcon(null), // last RSSI not persisted
+            lastSeenLabel: _lastSeenLabel(_lastSeenAt),
             onConnect: () {
               widget.onConnect?.call(device.id, device.name);
             },
@@ -254,12 +271,17 @@ class _SavedDevice {
 class _DeviceTile extends StatelessWidget {
   final _SavedDevice device;
   final Widget rssiIcon;
+
+  /// Human-readable "last seen X ago" label.  Null when unknown.
+  final String? lastSeenLabel;
+
   final VoidCallback onConnect;
   final VoidCallback onLongPress;
 
   const _DeviceTile({
     required this.device,
     required this.rssiIcon,
+    this.lastSeenLabel,
     required this.onConnect,
     required this.onLongPress,
   });
@@ -277,10 +299,24 @@ class _DeviceTile extends StatelessWidget {
         child: const Icon(Icons.sensors, color: AppColors.info, size: 24),
       ),
       title: Text(device.name, style: AppTextStyles.body),
-      subtitle: Text(
-        device.id,
-        style: AppTextStyles.caption,
-        overflow: TextOverflow.ellipsis,
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            device.id,
+            style: AppTextStyles.caption,
+            overflow: TextOverflow.ellipsis,
+          ),
+          if (lastSeenLabel != null)
+            Text(
+              lastSeenLabel!,
+              style: AppTextStyles.caption.copyWith(
+                color: AppColors.textHint,
+                fontSize: 10,
+              ),
+            ),
+        ],
       ),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
