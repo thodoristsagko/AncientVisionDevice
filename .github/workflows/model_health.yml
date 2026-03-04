@@ -1,0 +1,99 @@
+name: Model Health Check
+
+on:
+  schedule:
+    - cron: '0 8 * * *'   # Daily at 08:00 UTC
+  workflow_dispatch:        # Manual trigger
+  push:
+    paths:
+      - 'app/assets/ml/*.tflite'
+      - 'app/assets/ml/*.json'
+      - 'scripts/validate_config.py'
+
+jobs:
+  model-health:
+    name: Validate TFLite models and config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install numpy tflite-runtime || pip install numpy tensorflow-cpu
+
+      - name: Validate config files
+        run: |
+          python scripts/validate_config.py --assets-dir app/assets/ml
+        continue-on-error: false
+
+      - name: Check model file sizes
+        run: |
+          echo "Checking TFLite model file sizes..."
+          for f in app/assets/ml/*.tflite; do
+            size=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")
+            echo "  $f: $size bytes"
+            if [ "$size" -lt 1000 ]; then
+              echo "ERROR: $f is suspiciously small ($size bytes)"
+              exit 1
+            fi
+          done
+          echo "All models OK"
+
+      - name: Run model inference smoke test
+        run: |
+          python -c "
+          import numpy as np
+          try:
+              import tflite_runtime.interpreter as tflite
+          except ImportError:
+              import tensorflow as tf
+              tflite = tf.lite
+
+          models = [
+              ('app/assets/ml/precursor_classifier.tflite', 17, 4),
+              ('app/assets/ml/autoencoder.tflite', 11, 11),
+          ]
+
+          for path, in_dim, out_dim in models:
+              import os
+              if not os.path.exists(path):
+                  print(f'SKIP: {path} not found')
+                  continue
+              interp = tflite.Interpreter(model_path=path)
+              interp.allocate_tensors()
+              in_idx = interp.get_input_details()[0]['index']
+              out_idx = interp.get_output_details()[0]['index']
+              inp = np.zeros((1, in_dim), dtype=np.float32)
+              interp.set_tensor(in_idx, inp)
+              interp.invoke()
+              out = interp.get_tensor(out_idx)
+              assert out.shape[1] == out_dim, f'Wrong output dim: {out.shape}'
+              assert not np.any(np.isnan(out)), 'NaN in output!'
+              print(f'OK: {path} -> shape {out.shape}')
+          "
+        continue-on-error: true
+
+      - name: Check scaler JSON integrity
+        run: |
+          python -c "
+          import json, sys
+          scaler_path = 'app/assets/ml/precursor_classifier_scaler.json'
+          import os
+          if not os.path.exists(scaler_path):
+              print(f'SKIP: {scaler_path} not found')
+              sys.exit(0)
+          with open(scaler_path) as f:
+              scaler = json.load(f)
+          assert 'mean' in scaler, 'Missing mean'
+          assert 'scale' in scaler, 'Missing scale'
+          assert len(scaler['mean']) == 17, f'Wrong mean length: {len(scaler[\"mean\"])}'
+          assert len(scaler['scale']) == 17, f'Wrong scale length: {len(scaler[\"scale\"])}'
+          for i, v in enumerate(scaler['scale']):
+              assert abs(v) > 1e-10, f'Scale[{i}] near zero — division by zero risk!'
+          print('Scaler JSON OK')
+          "

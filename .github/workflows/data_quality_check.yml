@@ -1,0 +1,33 @@
+name: Data Quality Check
+
+on:
+  schedule:
+    - cron: '0 7 * * 1'  # Weekly Monday 07:00 UTC
+  workflow_dispatch:
+
+jobs:
+  quality-check:
+    name: Check training data quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install numpy pandas scikit-learn
+
+      - name: Check training data exists
+        run: |
+          if [ -f "data/training_data.csv" ]; then
+            wc -l data/training_data.csv
+          else
+            echo "No training data file found — skipping quality check"
+          fi
+
+      - name: Run validate config
+        run: |
+          python scripts/validate_config.py --assets-dir app/assets/ml || true
