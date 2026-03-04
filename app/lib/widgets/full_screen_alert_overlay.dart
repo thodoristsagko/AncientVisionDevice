@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../main.dart' show AlertMetrics;
 import 'ppv_sparkline.dart';
 
@@ -23,25 +25,123 @@ class FullScreenAlertOverlay extends StatefulWidget {
 }
 
 class _FullScreenAlertOverlayState extends State<FullScreenAlertOverlay>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
+    with TickerProviderStateMixin {
+  // Icon/scale pulse (existing)
+  late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
+
+  // Background color opacity pulse (CRITICAL only)
+  late AnimationController _bgPulseController;
+  late Animation<double> _bgOpacityAnimation;
+
+  // Escalation timer — how long the alert has been active
+  late Timer _elapsedTimer;
+  int _elapsedSeconds = 0;
+
+  // Auto-dismiss countdown (activates when level becomes SAFE)
+  Timer? _autoDismissTimer;
+  int _autoDismissCountdown = 5;
+  bool _autoDismissActive = false;
+
+  // Dismiss button visibility (delayed 3s to prevent accidental tap)
+  bool _dismissButtonVisible = false;
+  Timer? _dismissDelayTimer;
 
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
+
+    // Scale pulse
+    _pulseController = AnimationController(
       duration: const Duration(milliseconds: 1200),
       vsync: this,
     )..repeat(reverse: true);
     _pulseAnimation = Tween<double>(begin: 0.85, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
+
+    // Background opacity heartbeat for CRITICAL (1s period, 0.85–0.95)
+    _bgPulseController = AnimationController(
+      duration: const Duration(milliseconds: 1000),
+      vsync: this,
+    );
+    _bgOpacityAnimation = Tween<double>(begin: 0.85, end: 0.95).animate(
+      CurvedAnimation(parent: _bgPulseController, curve: Curves.easeInOut),
+    );
+    if (widget.level == 'critical') {
+      _bgPulseController.repeat(reverse: true);
+    }
+
+    // Escalation timer — fires every second
+    _elapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() => _elapsedSeconds++);
+    });
+
+    // Dismiss button appears after 3 seconds
+    _dismissDelayTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted) setState(() => _dismissButtonVisible = true);
+    });
+  }
+
+  @override
+  void didUpdateWidget(FullScreenAlertOverlay old) {
+    super.didUpdateWidget(old);
+
+    final wasCritical = old.level == 'critical';
+    final isCritical = widget.level == 'critical';
+
+    // Start/stop background heartbeat when level changes
+    if (isCritical && !wasCritical) {
+      _bgPulseController.repeat(reverse: true);
+    } else if (!isCritical && wasCritical) {
+      _bgPulseController.stop();
+      _bgPulseController.value = 0.0;
+    }
+
+    // When level becomes SAFE, start auto-dismiss countdown
+    if (!isCritical && wasCritical) {
+      _startAutoDismiss();
+    }
+
+    // If level escalates back to CRITICAL, cancel auto-dismiss
+    if (isCritical && !wasCritical) {
+      _cancelAutoDismiss();
+    }
+  }
+
+  void _startAutoDismiss() {
+    _autoDismissCountdown = 5;
+    _autoDismissActive = true;
+    _autoDismissTimer?.cancel();
+    _autoDismissTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) {
+        t.cancel();
+        return;
+      }
+      setState(() {
+        _autoDismissCountdown--;
+        if (_autoDismissCountdown <= 0) {
+          t.cancel();
+          _autoDismissActive = false;
+          widget.onDismiss();
+        }
+      });
+    });
+  }
+
+  void _cancelAutoDismiss() {
+    _autoDismissTimer?.cancel();
+    _autoDismissTimer = null;
+    if (mounted) setState(() => _autoDismissActive = false);
   }
 
   @override
   void dispose() {
-    _controller.dispose();
+    _pulseController.dispose();
+    _bgPulseController.dispose();
+    _elapsedTimer.cancel();
+    _autoDismissTimer?.cancel();
+    _dismissDelayTimer?.cancel();
     super.dispose();
   }
 
@@ -78,6 +178,100 @@ class _FullScreenAlertOverlayState extends State<FullScreenAlertOverlay>
     return 8.0;
   }
 
+  String _formatElapsed(int seconds) {
+    if (seconds < 60) return '${seconds}s';
+    final m = seconds ~/ 60;
+    final s = seconds % 60;
+    return '${m}m ${s.toString().padLeft(2, '0')}s';
+  }
+
+  void _showCallHelpDialog() {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1C2523),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.emergency, color: Color(0xFFE53935), size: 24),
+            SizedBox(width: 10),
+            Text(
+              'Emergency Steps',
+              style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _emergencyStep('1', 'Evacuate all personnel from the trench immediately.'),
+            _emergencyStep('2', 'Move to a safe distance (>15 m from the edge).'),
+            _emergencyStep('3', 'Call the site supervisor.'),
+            _emergencyStep('4', 'Do not re-enter until cleared by a structural engineer.'),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFE53935),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                icon: const Icon(Icons.phone, color: Colors.white),
+                label: const Text(
+                  'Call Emergency (112)',
+                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                ),
+                onPressed: () async {
+                  final uri = Uri(scheme: 'tel', path: '112');
+                  if (await canLaunchUrl(uri)) {
+                    await launchUrl(uri);
+                  }
+                },
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Close', style: TextStyle(color: Colors.white70)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _emergencyStep(String num, String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 22,
+            height: 22,
+            decoration: const BoxDecoration(
+              color: Color(0xFFE53935),
+              shape: BoxShape.circle,
+            ),
+            child: Center(
+              child: Text(
+                num,
+                style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(text, style: const TextStyle(color: Colors.white70, fontSize: 13, height: 1.4)),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final isCritical = widget.level == 'critical';
@@ -87,20 +281,30 @@ class _FullScreenAlertOverlayState extends State<FullScreenAlertOverlay>
 
     return Material(
       color: Colors.transparent,
-      child: Container(
-        width: double.infinity,
-        height: double.infinity,
-        decoration: BoxDecoration(
-          gradient: RadialGradient(
-            center: Alignment.center,
-            radius: 1.5,
-            colors: [
-              alertColor.withAlpha(200),
-              Colors.black.withAlpha(230),
-              Colors.black.withAlpha(250),
-            ],
-          ),
-        ),
+      child: AnimatedBuilder(
+        animation: _bgOpacityAnimation,
+        builder: (context, child) {
+          // Background: heartbeat opacity for CRITICAL, fixed otherwise
+          final bgAlpha = isCritical
+              ? (_bgOpacityAnimation.value * 255).round()
+              : (0.88 * 255).round();
+          return Container(
+            width: double.infinity,
+            height: double.infinity,
+            decoration: BoxDecoration(
+              gradient: RadialGradient(
+                center: Alignment.center,
+                radius: 1.5,
+                colors: [
+                  alertColor.withAlpha(bgAlpha),
+                  Colors.black.withAlpha(230),
+                  Colors.black.withAlpha(250),
+                ],
+              ),
+            ),
+            child: child,
+          );
+        },
         child: SafeArea(
           child: SingleChildScrollView(
             padding: const EdgeInsets.symmetric(vertical: 24),
@@ -146,6 +350,25 @@ class _FullScreenAlertOverlayState extends State<FullScreenAlertOverlay>
                     fontSize: 28,
                     fontWeight: FontWeight.w900,
                     letterSpacing: 2,
+                  ),
+                ),
+                const SizedBox(height: 8),
+
+                // Escalation time display
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: alertColor.withAlpha(50),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: alertColor.withAlpha(100)),
+                  ),
+                  child: Text(
+                    'Alert active for: ${_formatElapsed(_elapsedSeconds)}',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -306,48 +529,132 @@ class _FullScreenAlertOverlayState extends State<FullScreenAlertOverlay>
                   'Detected at ${DateTime.now().hour.toString().padLeft(2, '0')}:${DateTime.now().minute.toString().padLeft(2, '0')}:${DateTime.now().second.toString().padLeft(2, '0')}',
                   style: TextStyle(color: Colors.white.withAlpha(150), fontSize: 14),
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 16),
 
-                // ACKNOWLEDGE button
-                GestureDetector(
-                  onTap: widget.onDismiss,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(30),
-                    child: BackdropFilter(
-                      filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 16),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withAlpha(230),
-                          borderRadius: BorderRadius.circular(30),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withAlpha(60),
-                              blurRadius: 12,
-                              offset: const Offset(0, 4),
-                            ),
-                          ],
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.check_circle, color: alertColor, size: 26),
-                            const SizedBox(width: 10),
-                            Text(
-                              'ACKNOWLEDGE',
-                              style: TextStyle(
-                                color: alertColor,
-                                fontSize: 17,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: 1,
-                              ),
-                            ),
-                          ],
+                // Auto-dismiss countdown (shown when level returns to SAFE)
+                if (_autoDismissActive)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.green.withAlpha(50),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: Colors.green.withAlpha(100)),
+                      ),
+                      child: Text(
+                        'Auto-dismissing in ${_autoDismissCountdown}s...',
+                        style: const TextStyle(
+                          color: Colors.greenAccent,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
                     ),
                   ),
+
+                // Action buttons row
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: Row(
+                    children: [
+                      // ACKNOWLEDGE / Dismiss button (visible after 3s)
+                      Expanded(
+                        child: AnimatedOpacity(
+                          opacity: _dismissButtonVisible ? 1.0 : 0.0,
+                          duration: const Duration(milliseconds: 400),
+                          child: IgnorePointer(
+                            ignoring: !_dismissButtonVisible,
+                            child: GestureDetector(
+                              onTap: widget.onDismiss,
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(30),
+                                child: BackdropFilter(
+                                  filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withAlpha(230),
+                                      borderRadius: BorderRadius.circular(30),
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: Colors.black.withAlpha(60),
+                                          blurRadius: 12,
+                                          offset: const Offset(0, 4),
+                                        ),
+                                      ],
+                                    ),
+                                    child: Row(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        Icon(Icons.check_circle, color: alertColor, size: 24),
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          'ACKNOWLEDGE',
+                                          style: TextStyle(
+                                            color: alertColor,
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w800,
+                                            letterSpacing: 1,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      // CALL HELP button
+                      GestureDetector(
+                        onTap: _showCallHelpDialog,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFE53935).withAlpha(220),
+                            borderRadius: BorderRadius.circular(30),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withAlpha(60),
+                                blurRadius: 12,
+                                offset: const Offset(0, 4),
+                              ),
+                            ],
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.phone, color: Colors.white, size: 22),
+                              SizedBox(width: 8),
+                              Text(
+                                'CALL HELP',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 1,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
+                const SizedBox(height: 8),
+
+                // Hint: dismiss button is delayed
+                if (!_dismissButtonVisible)
+                  Text(
+                    'Acknowledge button appears in ${3 - _elapsedSeconds.clamp(0, 3)}s',
+                    style: TextStyle(color: Colors.white.withAlpha(120), fontSize: 12),
+                  ),
+
+                const SizedBox(height: 16),
               ],
             ),
           ),
