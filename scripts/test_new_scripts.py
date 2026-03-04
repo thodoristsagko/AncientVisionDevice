@@ -3623,3 +3623,726 @@ class TestSignalQualityReport:
         result = sqr.analyze_file(tmp_path / "session.csv")
         assert result["score"] >= 0
         assert "quality" in result
+
+
+# ===========================================================================
+# battery_life_estimator tests
+# ===========================================================================
+
+class TestBatteryLifeEstimatorEstimate:
+    """Tests for battery_life_estimator.estimate()."""
+
+    def test_active_mode_returns_required_keys(self):
+        import battery_life_estimator as ble
+        result = ble.estimate(200.0, "active", 1.0)
+        for key in ("mode", "runtime_hours", "effective_current_ma",
+                    "duty_cycle_pct", "usable_mah", "runtime_minutes"):
+            assert key in result, f"Missing key: {key}"
+
+    def test_active_mode_runtime_positive(self):
+        import battery_life_estimator as ble
+        result = ble.estimate(200.0, "active", 1.0)
+        assert result["runtime_hours"] > 0
+
+    def test_idle_mode_longer_than_active(self):
+        import battery_life_estimator as ble
+        active = ble.estimate(200.0, "active", 1.0)
+        idle = ble.estimate(200.0, "idle", 1.0)
+        assert idle["runtime_hours"] > active["runtime_hours"]
+
+    def test_low_power_longer_than_active(self):
+        import battery_life_estimator as ble
+        active = ble.estimate(200.0, "active", 1.0)
+        lp = ble.estimate(200.0, "low-power", 1.0)
+        assert lp["runtime_hours"] > active["runtime_hours"]
+
+    def test_larger_capacity_gives_longer_runtime(self):
+        import battery_life_estimator as ble
+        r200 = ble.estimate(200.0, "active", 1.0)
+        r500 = ble.estimate(500.0, "active", 1.0)
+        assert r500["runtime_hours"] > r200["runtime_hours"]
+
+    def test_duty_cycle_pct_matches_input(self):
+        import battery_life_estimator as ble
+        result = ble.estimate(200.0, "active", 0.5)
+        assert abs(result["duty_cycle_pct"] - 50.0) < 1e-9
+
+    def test_zero_duty_cycle_uses_idle_current(self):
+        """At 0% duty cycle all time is in idle mode."""
+        import battery_life_estimator as ble
+        result = ble.estimate(200.0, "active", 0.0)
+        idle_ma = ble.PROFILES["idle"]["mA"]
+        assert abs(result["effective_current_ma"] - idle_ma) < 1e-6
+
+    def test_full_duty_cycle_uses_active_current(self):
+        """At 100% duty cycle effective current == mode current."""
+        import battery_life_estimator as ble
+        result = ble.estimate(200.0, "dsp-on-device", 1.0)
+        assert abs(result["effective_current_ma"] - ble.PROFILES["dsp-on-device"]["mA"]) < 1e-6
+
+    def test_runtime_minutes_consistent_with_hours(self):
+        import battery_life_estimator as ble
+        result = ble.estimate(200.0, "active", 1.0)
+        assert abs(result["runtime_minutes"] - result["runtime_hours"] * 60.0) < 1.0
+
+    def test_all_profiles_accessible(self):
+        import battery_life_estimator as ble
+        for mode in ble.PROFILES:
+            r = ble.estimate(200.0, mode, 0.8)
+            assert r["runtime_hours"] > 0
+
+
+class TestBatteryLifeEstimatorMain:
+    """Tests for battery_life_estimator.main() CLI (patching sys.argv)."""
+
+    def test_main_default_runs_without_error(self, capsys):
+        import battery_life_estimator as ble
+        with patch("sys.argv", ["battery_life_estimator.py"]):
+            rc = ble.main()
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "Battery" in captured.out or "Hours" in captured.out or "Mode" in captured.out
+
+    def test_main_single_mode(self, capsys):
+        import battery_life_estimator as ble
+        with patch("sys.argv", ["battery_life_estimator.py", "--mode", "active"]):
+            rc = ble.main()
+        assert rc == 0
+
+    def test_main_invalid_duty_cycle_returns_nonzero(self, capsys):
+        import battery_life_estimator as ble
+        with patch("sys.argv", ["battery_life_estimator.py", "--duty-cycle", "1.5"]):
+            rc = ble.main()
+        assert rc != 0
+
+    def test_main_custom_capacity(self, capsys):
+        import battery_life_estimator as ble
+        with patch("sys.argv", ["battery_life_estimator.py",
+                                "--capacity", "500", "--mode", "active"]):
+            rc = ble.main()
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "500" in captured.out
+
+
+# ===========================================================================
+# site_comparison_heatmap tests
+# ===========================================================================
+
+def _make_gps_rows(lat_base: float, lon_base: float, n: int,
+                   ppv_values=None) -> list:
+    """Create n GPS rows spread across a small area."""
+    import math
+    rows = []
+    # Spread points across ~50m in each direction
+    step_deg = 0.0005  # ~55m per step
+    for i in range(n):
+        ppv = ppv_values[i] if ppv_values else 0.05
+        rows.append({
+            "lat": str(lat_base + (i % 5) * step_deg),
+            "lon": str(lon_base + (i // 5) * step_deg),
+            "ppv": str(ppv),
+            "timestamp": f"2026-03-04T10:00:{i:02d}Z",
+        })
+    return rows
+
+
+class TestSiteComparisonHeatmapBuildGrid:
+    """Tests for site_comparison_heatmap.build_grid()."""
+
+    def test_empty_rows_returns_empty_grid(self):
+        import site_comparison_heatmap as sch
+        grid, meta = sch.build_grid([], 5.0)
+        assert grid == []
+        assert meta["point_count"] == 0
+
+    def test_rows_without_coordinates_ignored(self):
+        import site_comparison_heatmap as sch
+        rows = [{"ppv": "0.5"}, {"lat": "bad", "lon": "bad", "ppv": "0.1"}]
+        grid, meta = sch.build_grid(rows, 5.0)
+        assert grid == []
+        assert meta["point_count"] == 0
+
+    def test_single_point_creates_1x1_grid(self):
+        import site_comparison_heatmap as sch
+        rows = [{"lat": "37.0", "lon": "22.0", "ppv": "0.05"}]
+        grid, meta = sch.build_grid(rows, 5.0)
+        assert meta["n_rows"] >= 1
+        assert meta["n_cols"] >= 1
+        assert meta["point_count"] == 1
+
+    def test_grid_dimensions_correct_for_spread_points(self):
+        import site_comparison_heatmap as sch
+        rows = _make_gps_rows(37.0, 22.0, 25)
+        grid, meta = sch.build_grid(rows, 5.0)
+        assert meta["n_rows"] >= 1
+        assert meta["n_cols"] >= 1
+        assert meta["point_count"] == 25
+        assert len(grid) == meta["n_rows"]
+        assert all(len(row) == meta["n_cols"] for row in grid)
+
+    def test_peak_ppv_stored_per_cell(self):
+        """When two points land in the same cell, the higher PPV wins."""
+        import site_comparison_heatmap as sch
+        # Very small area so all points fall in same cell
+        rows = [
+            {"lat": "37.0", "lon": "22.0", "ppv": "0.1"},
+            {"lat": "37.0000001", "lon": "22.0000001", "ppv": "2.0"},
+        ]
+        grid, meta = sch.build_grid(rows, 1000.0)  # huge cell
+        import math
+        flat = [grid[r][c] for r in range(meta["n_rows"])
+                for c in range(meta["n_cols"]) if not math.isnan(grid[r][c])]
+        assert max(flat) == pytest.approx(2.0)
+
+    def test_cell_size_affects_grid_dimensions(self):
+        """Smaller cells → more rows/cols for same geographic spread."""
+        import site_comparison_heatmap as sch
+        rows = _make_gps_rows(37.0, 22.0, 25)
+        _, meta_large = sch.build_grid(rows, 100.0)
+        _, meta_small = sch.build_grid(rows, 5.0)
+        total_large = meta_large["n_rows"] * meta_large["n_cols"]
+        total_small = meta_small["n_rows"] * meta_small["n_cols"]
+        assert total_small >= total_large
+
+
+class TestSiteComparisonHeatmapRenderHeatmap:
+    """Tests for site_comparison_heatmap.render_heatmap()."""
+
+    def test_empty_grid_returns_no_data_message(self):
+        import site_comparison_heatmap as sch
+        output = sch.render_heatmap([], {"n_rows": 0, "n_cols": 0,
+                                          "cell_size_m": 5, "point_count": 0,
+                                          "lat_min": 0, "lat_max": 0,
+                                          "lon_min": 0, "lon_max": 0})
+        assert "no GPS data" in output.lower() or "no" in output.lower()
+
+    def test_heatmap_contains_legend(self):
+        import site_comparison_heatmap as sch
+        rows = _make_gps_rows(37.0, 22.0, 9, ppv_values=[0.05] * 9)
+        grid, meta = sch.build_grid(rows, 5.0)
+        output = sch.render_heatmap(grid, meta)
+        assert "Legend" in output
+
+    def test_safe_ppv_uses_dot_symbol(self):
+        """All-safe PPV → grid contains '.' symbols."""
+        import site_comparison_heatmap as sch
+        rows = [{"lat": "37.0", "lon": "22.0", "ppv": "0.1"}]
+        grid, meta = sch.build_grid(rows, 5.0)
+        output = sch.render_heatmap(grid, meta)
+        assert "." in output
+
+    def test_critical_ppv_uses_hash_symbol(self):
+        """High PPV → grid contains '#' symbols."""
+        import site_comparison_heatmap as sch
+        rows = [{"lat": "37.0", "lon": "22.0", "ppv": "5.0"}]
+        grid, meta = sch.build_grid(rows, 5.0)
+        output = sch.render_heatmap(grid, meta)
+        assert "#" in output
+
+    def test_warning_ppv_uses_star_symbol(self):
+        """Mid-range PPV → grid contains '*' symbols."""
+        import site_comparison_heatmap as sch
+        rows = [{"lat": "37.0", "lon": "22.0", "ppv": "0.5"}]
+        grid, meta = sch.build_grid(rows, 5.0)
+        output = sch.render_heatmap(grid, meta)
+        assert "*" in output
+
+    def test_heatmap_contains_n_rows_grid_lines(self):
+        """Output has at least n_rows lines containing grid symbols."""
+        import site_comparison_heatmap as sch
+        rows = _make_gps_rows(37.0, 22.0, 9)
+        grid, meta = sch.build_grid(rows, 5.0)
+        output = sch.render_heatmap(grid, meta)
+        # Grid lines are prefixed with "  " and contain symbols
+        grid_lines = [ln for ln in output.splitlines()
+                      if ln.startswith("  ") and
+                      any(c in ln for c in (".", "*", "#", " "))]
+        assert len(grid_lines) >= meta["n_rows"]
+
+    def test_heatmap_output_mentions_grid_size(self):
+        import site_comparison_heatmap as sch
+        rows = _make_gps_rows(37.0, 22.0, 4)
+        grid, meta = sch.build_grid(rows, 5.0)
+        output = sch.render_heatmap(grid, meta)
+        assert "grid" in output.lower() or "x" in output
+
+
+class TestSiteComparisonHeatmapRenderStats:
+    """Tests for site_comparison_heatmap.render_stats()."""
+
+    def test_no_measurements_returns_message(self):
+        import site_comparison_heatmap as sch
+        import math
+        grid = [[float("nan")]]
+        meta = {"n_rows": 1, "n_cols": 1, "cell_size_m": 5,
+                "point_count": 0, "lat_min": 0, "lat_max": 0,
+                "lon_min": 0, "lon_max": 0}
+        out = sch.render_stats(grid, meta)
+        assert "no" in out.lower() or "0" in out
+
+    def test_stats_contains_max_ppv(self):
+        import site_comparison_heatmap as sch
+        rows = _make_gps_rows(37.0, 22.0, 4, ppv_values=[0.1, 0.5, 0.2, 0.05])
+        grid, meta = sch.build_grid(rows, 5.0)
+        stats = sch.render_stats(grid, meta)
+        assert "Max PPV" in stats or "max" in stats.lower()
+
+    def test_stats_contains_min_ppv(self):
+        import site_comparison_heatmap as sch
+        rows = _make_gps_rows(37.0, 22.0, 4, ppv_values=[0.1, 0.5, 0.2, 0.05])
+        grid, meta = sch.build_grid(rows, 5.0)
+        stats = sch.render_stats(grid, meta)
+        assert "Min PPV" in stats or "min" in stats.lower()
+
+
+class TestSiteComparisonHeatmapMain:
+    """Tests for site_comparison_heatmap.main() CLI using CSV input."""
+
+    def test_main_with_csv_input_runs(self, tmp_path, capsys):
+        import site_comparison_heatmap as sch
+        rows = _make_gps_rows(37.0, 22.0, 9)
+        _write_csv(tmp_path / "session.csv", rows)
+        rc = sch.main(["--input", str(tmp_path / "session.csv"), "--cell-size", "5"])
+        assert rc == 0
+
+    def test_main_output_contains_heatmap_markers(self, tmp_path, capsys):
+        import site_comparison_heatmap as sch
+        rows = _make_gps_rows(37.0, 22.0, 9)
+        _write_csv(tmp_path / "session.csv", rows)
+        sch.main(["--input", str(tmp_path / "session.csv")])
+        captured = capsys.readouterr()
+        assert "Heatmap" in captured.out or "grid" in captured.out.lower()
+
+    def test_main_empty_csv_still_returns_0(self, tmp_path, capsys):
+        import site_comparison_heatmap as sch
+        rows = [{"ts": "2026-03-04T10:00:00Z", "rms": "0.05"}]  # no lat/lon/ppv
+        _write_csv(tmp_path / "session.csv", rows)
+        rc = sch.main(["--input", str(tmp_path / "session.csv")])
+        assert rc == 0
+
+
+# ===========================================================================
+# compliance_report tests
+# ===========================================================================
+
+def _ppv_csv_rows(ppv_list: list) -> list:
+    """Create minimal rows with only a ppv field."""
+    return [{"ppv": str(v), "timestamp": f"2026-03-04T10:00:{i:02d}Z"}
+            for i, v in enumerate(ppv_list)]
+
+
+class TestComplianceReportCheckStandard:
+    """Unit tests for compliance_report.check_standard()."""
+
+    def test_all_below_din_category_i_fully_compliant(self):
+        import compliance_report as cr
+        ppv = [0.01, 0.05, 0.1, 0.2]  # all < 0.3
+        result = cr.check_standard(ppv, "din")
+        assert result["overall_compliant"] is True
+        for lvl in result["levels"]:
+            assert lvl["exceedances"] == 0
+            assert lvl["compliant"] is True
+
+    def test_exceeds_din_category_i_counted(self):
+        import compliance_report as cr
+        ppv = [0.1, 0.5, 0.8]  # 2 values > 0.3
+        result = cr.check_standard(ppv, "din")
+        assert result["overall_compliant"] is False
+        cat_i = result["levels"][0]
+        assert cat_i["exceedances"] == 2
+        assert cat_i["compliant"] is False
+
+    def test_exceeds_din_category_ii_but_not_iii(self):
+        import compliance_report as cr
+        ppv = [2.0]  # > 1.0 but < 5.0
+        result = cr.check_standard(ppv, "din")
+        levels = {lvl["label"]: lvl for lvl in result["levels"]}
+        # Category II (threshold 1.0) exceeded
+        cat_ii_key = next(k for k in levels if "II" in k and "III" not in k)
+        assert levels[cat_ii_key]["exceedances"] == 1
+        # Category III (threshold 5.0) not exceeded
+        cat_iii_key = next(k for k in levels if "III" in k)
+        assert levels[cat_iii_key]["exceedances"] == 0
+
+    def test_bs_all_compliant(self):
+        import compliance_report as cr
+        ppv = [0.1, 0.5, 1.0, 2.5]  # all < 3.0 (BS cat I)
+        result = cr.check_standard(ppv, "bs")
+        assert result["overall_compliant"] is True
+
+    def test_bs_exceedance_found(self):
+        import compliance_report as cr
+        ppv = [5.0, 12.0]  # 12.0 > 10.0 (BS cat II)
+        result = cr.check_standard(ppv, "bs")
+        assert result["overall_compliant"] is False
+
+    def test_iso_all_compliant(self):
+        import compliance_report as cr
+        ppv = [0.1, 0.3]  # all < 0.5 (ISO zone A)
+        result = cr.check_standard(ppv, "iso")
+        assert result["overall_compliant"] is True
+
+    def test_iso_zone_c_exceedance(self):
+        import compliance_report as cr
+        ppv = [15.0]  # > 10.0 (ISO zone C threshold)
+        result = cr.check_standard(ppv, "iso")
+        assert result["overall_compliant"] is False
+
+    def test_empty_ppv_returns_compliant_zero_counts(self):
+        import compliance_report as cr
+        result = cr.check_standard([], "din")
+        assert result["overall_compliant"] is True
+        assert result["total_samples"] == 0
+        assert result["max_ppv"] == 0.0
+        for lvl in result["levels"]:
+            assert lvl["exceedances"] == 0
+
+    def test_result_contains_required_keys(self):
+        import compliance_report as cr
+        result = cr.check_standard([0.1], "din")
+        for key in ("standard_key", "name", "description", "total_samples",
+                    "max_ppv", "levels", "overall_compliant"):
+            assert key in result, f"Missing key: {key}"
+
+    def test_max_ppv_is_correct(self):
+        import compliance_report as cr
+        ppv = [0.1, 2.5, 0.8]
+        result = cr.check_standard(ppv, "din")
+        assert result["max_ppv"] == pytest.approx(2.5)
+
+    def test_total_samples_is_correct(self):
+        import compliance_report as cr
+        ppv = [0.1, 0.2, 0.3]
+        result = cr.check_standard(ppv, "din")
+        assert result["total_samples"] == 3
+
+
+class TestComplianceReportRunAllChecks:
+    """Tests for compliance_report.run_compliance_checks()."""
+
+    def test_all_standards_checked_when_selected_all(self):
+        import compliance_report as cr
+        ppv = [0.05]
+        results = cr.run_compliance_checks(ppv, list(cr.STANDARDS.keys()))
+        assert len(results) == 3
+
+    def test_single_standard_check(self):
+        import compliance_report as cr
+        ppv = [0.05]
+        results = cr.run_compliance_checks(ppv, ["din"])
+        assert len(results) == 1
+        assert results[0]["standard_key"] == "din"
+
+    def test_exceedances_in_one_standard_dont_affect_others(self):
+        """A value that exceeds DIN (>0.3) but not BS (>3.0) is correctly reported."""
+        import compliance_report as cr
+        ppv = [0.5]  # exceeds DIN cat I but not BS cat I
+        results = cr.run_compliance_checks(ppv, ["din", "bs"])
+        din_r = next(r for r in results if r["standard_key"] == "din")
+        bs_r = next(r for r in results if r["standard_key"] == "bs")
+        assert din_r["overall_compliant"] is False
+        assert bs_r["overall_compliant"] is True
+
+
+class TestComplianceReportLoadCsv:
+    """Tests for CSV loading in compliance_report."""
+
+    def test_load_ppv_from_csv(self, tmp_path):
+        import compliance_report as cr
+        rows = _ppv_csv_rows([0.1, 0.2, 0.5])
+        _write_csv(tmp_path / "data.csv", rows)
+        values = cr.load_ppv_from_csv(str(tmp_path / "data.csv"))
+        assert values == pytest.approx([0.1, 0.2, 0.5])
+
+    def test_invalid_ppv_skipped(self, tmp_path):
+        import compliance_report as cr
+        rows = [
+            {"ppv": "0.1", "timestamp": "t1"},
+            {"ppv": "bad", "timestamp": "t2"},
+            {"ppv": "", "timestamp": "t3"},
+            {"ppv": "0.3", "timestamp": "t4"},
+        ]
+        _write_csv(tmp_path / "data.csv", rows)
+        values = cr.load_ppv_from_csv(str(tmp_path / "data.csv"))
+        assert len(values) == 2
+        assert 0.1 in values
+        assert 0.3 in values
+
+    def test_negative_ppv_excluded(self, tmp_path):
+        import compliance_report as cr
+        rows = [{"ppv": "-0.5", "timestamp": "t1"},
+                {"ppv": "0.2", "timestamp": "t2"}]
+        _write_csv(tmp_path / "data.csv", rows)
+        values = cr.load_ppv_from_csv(str(tmp_path / "data.csv"))
+        assert len(values) == 1
+        assert values[0] == pytest.approx(0.2)
+
+
+class TestComplianceReportMain:
+    """Tests for compliance_report.main() CLI."""
+
+    def test_main_compliant_data_exits_0(self, tmp_path):
+        import compliance_report as cr
+        rows = _ppv_csv_rows([0.01, 0.05, 0.02])
+        _write_csv(tmp_path / "data.csv", rows)
+        rc = cr.main(["--input", str(tmp_path / "data.csv"), "--standard", "all"])
+        assert rc == 0
+
+    def test_main_exceedance_data_exits_1(self, tmp_path):
+        import compliance_report as cr
+        # 5.0 mm/s exceeds all DIN thresholds up to Cat III
+        rows = _ppv_csv_rows([10.0])
+        _write_csv(tmp_path / "data.csv", rows)
+        rc = cr.main(["--input", str(tmp_path / "data.csv"), "--standard", "din"])
+        assert rc == 1
+
+    def test_main_empty_data_exits_1(self, tmp_path):
+        import compliance_report as cr
+        rows: list = []
+        _write_csv(tmp_path / "data.csv", rows)
+        rc = cr.main(["--input", str(tmp_path / "data.csv"), "--standard", "din"])
+        assert rc == 1
+
+    def test_main_output_contains_standard_name(self, tmp_path, capsys):
+        import compliance_report as cr
+        rows = _ppv_csv_rows([0.05])
+        _write_csv(tmp_path / "data.csv", rows)
+        cr.main(["--input", str(tmp_path / "data.csv"), "--standard", "din"])
+        captured = capsys.readouterr()
+        assert "DIN" in captured.out
+
+    def test_main_din_standard_only(self, tmp_path, capsys):
+        import compliance_report as cr
+        rows = _ppv_csv_rows([0.1, 0.2])
+        _write_csv(tmp_path / "data.csv", rows)
+        rc = cr.main(["--input", str(tmp_path / "data.csv"), "--standard", "din"])
+        captured = capsys.readouterr()
+        assert "DIN" in captured.out
+        assert rc == 0
+
+    def test_main_bs_standard_only(self, tmp_path, capsys):
+        import compliance_report as cr
+        rows = _ppv_csv_rows([0.5, 1.0, 2.5])
+        _write_csv(tmp_path / "data.csv", rows)
+        rc = cr.main(["--input", str(tmp_path / "data.csv"), "--standard", "bs"])
+        captured = capsys.readouterr()
+        assert "BS" in captured.out
+        assert rc == 0
+
+    def test_main_json_output_parseable(self, tmp_path, capsys):
+        import compliance_report as cr
+        rows = _ppv_csv_rows([0.05, 0.1])
+        _write_csv(tmp_path / "data.csv", rows)
+        cr.main(["--input", str(tmp_path / "data.csv"), "--json"])
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "total_measurements" in data
+        assert "all_compliant" in data
+
+    def test_main_json_exceedance_all_compliant_false(self, tmp_path, capsys):
+        import compliance_report as cr
+        rows = _ppv_csv_rows([20.0])
+        _write_csv(tmp_path / "data.csv", rows)
+        cr.main(["--input", str(tmp_path / "data.csv"), "--standard", "all", "--json"])
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["all_compliant"] is False
+
+
+# ===========================================================================
+# deployment_readiness tests
+# ===========================================================================
+
+class TestDeploymentReadinessCheckHelpers:
+    """Tests for deployment_readiness helper functions."""
+
+    def test_check_file_exists_passes_for_real_nonempty_file(self, tmp_path):
+        import deployment_readiness as dr
+        f = tmp_path / "model.tflite"
+        f.write_bytes(b"\x00" * 2048)
+        ok, detail = dr.check_file_exists(f)
+        assert ok is True
+        assert "OK" in detail
+
+    def test_check_file_exists_fails_for_missing_file(self, tmp_path):
+        import deployment_readiness as dr
+        ok, detail = dr.check_file_exists(tmp_path / "missing.tflite")
+        assert ok is False
+        assert "FAIL" in detail
+
+    def test_check_file_exists_fails_for_empty_file(self, tmp_path):
+        import deployment_readiness as dr
+        f = tmp_path / "empty.tflite"
+        f.write_bytes(b"")
+        ok, detail = dr.check_file_exists(f)
+        assert ok is False
+        assert "FAIL" in detail or "empty" in detail.lower()
+
+    def test_check_json_parseable_passes_for_valid_json(self, tmp_path):
+        import deployment_readiness as dr
+        f = tmp_path / "scaler.json"
+        f.write_text('{"mean": [1.0], "std": [0.5]}', encoding="utf-8")
+        ok, detail = dr.check_json_parseable(f)
+        assert ok is True
+        assert "OK" in detail
+
+    def test_check_json_parseable_fails_for_invalid_json(self, tmp_path):
+        import deployment_readiness as dr
+        f = tmp_path / "bad.json"
+        f.write_text("{not valid json", encoding="utf-8")
+        ok, detail = dr.check_json_parseable(f)
+        assert ok is False
+        assert "FAIL" in detail
+
+    def test_check_json_parseable_fails_for_missing_file(self, tmp_path):
+        import deployment_readiness as dr
+        ok, detail = dr.check_json_parseable(tmp_path / "ghost.json")
+        assert ok is False
+        assert "FAIL" in detail
+
+    def test_check_dir_exists_passes_for_existing_dir(self, tmp_path):
+        import deployment_readiness as dr
+        subdir = tmp_path / "data" / "field"
+        subdir.mkdir(parents=True)
+        ok, detail = dr.check_dir_exists(subdir)
+        assert ok is True
+        assert "OK" in detail
+
+    def test_check_dir_exists_returns_false_for_missing_dir(self, tmp_path):
+        import deployment_readiness as dr
+        ok, detail = dr.check_dir_exists(tmp_path / "nonexistent")
+        # The linter's version returns False but marks it non-fatal (WARN)
+        assert ok is False
+
+
+class TestDeploymentReadinessRunChecks:
+    """Tests for deployment_readiness.run_checks()."""
+
+    def test_run_checks_returns_list_of_dicts(self):
+        import deployment_readiness as dr
+        results, failures = dr.run_checks()
+        assert isinstance(results, list)
+        assert len(results) > 0
+        for r in results:
+            assert "label" in r
+            assert "ok" in r
+            assert "detail" in r
+            assert "fatal" in r
+
+    def test_run_checks_failures_count_matches_fatal_fails(self):
+        import deployment_readiness as dr
+        results, failures = dr.run_checks()
+        expected_failures = sum(
+            1 for r in results if not r["ok"] and r["fatal"]
+        )
+        assert failures == expected_failures
+
+    def test_run_checks_checks_tflite_models(self):
+        import deployment_readiness as dr
+        results, _ = dr.run_checks()
+        labels = [r["label"] for r in results]
+        # At least one check should mention a .tflite or ML model file
+        tflite_checks = [l for l in labels if "tflite" in l.lower() or
+                         "ml model" in l.lower() or "classifier" in l.lower()]
+        assert len(tflite_checks) >= 1
+
+    def test_run_checks_checks_docker_compose(self):
+        import deployment_readiness as dr
+        results, _ = dr.run_checks()
+        labels = [r["label"] for r in results]
+        compose_checks = [l for l in labels if "compose" in l.lower() or
+                          "docker" in l.lower()]
+        assert len(compose_checks) >= 1
+
+    def test_run_checks_includes_scaler_check(self):
+        import deployment_readiness as dr
+        results, _ = dr.run_checks()
+        labels = [r["label"] for r in results]
+        scaler_checks = [l for l in labels if "scaler" in l.lower() or
+                         "json" in l.lower()]
+        assert len(scaler_checks) >= 1
+
+
+class TestDeploymentReadinessPrintResults:
+    """Tests for deployment_readiness.print_results()."""
+
+    def test_print_results_shows_pass_for_ok_check(self, capsys):
+        import deployment_readiness as dr
+        results = [
+            {"label": "Test check", "ok": True, "detail": "OK  (1 KB)", "fatal": True}
+        ]
+        dr.print_results(results, 0)
+        captured = capsys.readouterr()
+        assert "PASS" in captured.out
+
+    def test_print_results_shows_fail_for_fatal_failure(self, capsys):
+        import deployment_readiness as dr
+        results = [
+            {"label": "Missing model", "ok": False, "detail": "FAIL (not found)", "fatal": True}
+        ]
+        dr.print_results(results, 1)
+        captured = capsys.readouterr()
+        assert "FAIL" in captured.out
+
+    def test_print_results_shows_ready_when_no_failures(self, capsys):
+        import deployment_readiness as dr
+        results = [
+            {"label": "Model", "ok": True, "detail": "OK  (3 KB)", "fatal": True}
+        ]
+        dr.print_results(results, 0)
+        captured = capsys.readouterr()
+        assert "READY" in captured.out
+
+    def test_print_results_shows_not_ready_when_failures(self, capsys):
+        import deployment_readiness as dr
+        results = [
+            {"label": "Missing model", "ok": False, "detail": "FAIL", "fatal": True}
+        ]
+        dr.print_results(results, 1)
+        captured = capsys.readouterr()
+        assert "NOT READY" in captured.out
+
+    def test_print_results_lists_all_check_labels(self, capsys):
+        import deployment_readiness as dr
+        results = [
+            {"label": "Alpha check", "ok": True, "detail": "OK", "fatal": True},
+            {"label": "Beta check", "ok": False, "detail": "FAIL", "fatal": False},
+        ]
+        dr.print_results(results, 0)
+        captured = capsys.readouterr()
+        assert "Alpha check" in captured.out
+        assert "Beta check" in captured.out
+
+
+class TestDeploymentReadinessMain:
+    """Tests for deployment_readiness.main() integration."""
+
+    def test_main_returns_int(self):
+        import deployment_readiness as dr
+        rc = dr.main()
+        assert isinstance(rc, int)
+        assert rc in (0, 1)
+
+    def test_main_output_contains_readiness_header(self, capsys):
+        import deployment_readiness as dr
+        dr.main()
+        captured = capsys.readouterr()
+        assert "Readiness" in captured.out or "AncientVision" in captured.out
+
+    def test_main_output_contains_pass_or_fail(self, capsys):
+        import deployment_readiness as dr
+        dr.main()
+        captured = capsys.readouterr()
+        assert "PASS" in captured.out or "FAIL" in captured.out
+
+    def test_main_all_items_checked(self, capsys):
+        """All CHECKS entries should appear in the output."""
+        import deployment_readiness as dr
+        dr.main()
+        captured = capsys.readouterr()
+        for check_label, _, _ in dr.CHECKS:
+            # The label should appear somewhere in the output
+            assert check_label in captured.out, (
+                f"Check label not found in output: {check_label!r}"
+            )
