@@ -122,11 +122,268 @@ class StandardClassification {
       'StandardClassification($standard, $level, limit=${limit}mm/s)';
 }
 
+// ---------------------------------------------------------------------------
+// Thresholds used for exceedance tracking
+// ---------------------------------------------------------------------------
+
+/// PPV threshold for exceedance tracking (mm/s). Uses FHWA ruins/ancient
+/// monuments limit — the strictest applicable to archaeological sites.
+const double _kPpvThreshold = 2.0;
+
+/// RMS acceleration threshold for exceedance tracking (g).
+const double _kRmsThreshold = 0.05;
+
+/// STA/LTA ratio threshold for exceedance tracking (dimensionless).
+const double _kStaLtaThreshold = 3.0;
+
 /// Pure-Dart computations for advanced vibration analysis.
 ///
 /// All methods are static and have no Flutter dependencies so they can run
 /// in an isolate or in unit tests without a widget binding.
+///
+/// In addition to the static analysis helpers, this class maintains a small
+/// stateful layer that is used by the live monitoring path:
+///
+/// - **Trending** — 10-sample rolling average per metric; [trends] returns
+///   "up", "down", or "stable" based on whether the current value has changed
+///   by more than 5 % relative to that average.
+/// - **Sustained exceedance** — [exceedanceDurations] tracks how long each
+///   metric has *continuously* exceeded its threshold.
+/// - **Rate of change** — [ppvRateOfChange] is the least-squares slope of PPV
+///   over the last 10 samples (mm/s per second).
+/// - **Session statistics** — [sessionPeakPpv], [sessionMeanPpv],
+///   [exceedanceCount]; reset with [resetSessionStats].
+/// - **Export summary** — [summary] bundles all key metrics into one map.
+///
+/// Call [recordSample] once per incoming BLE/DSP update to advance the
+/// stateful layer.
 class VibrationMetricsService {
+  // ---------------------------------------------------------------------------
+  // Stateful monitoring layer
+  // ---------------------------------------------------------------------------
+
+  // Rolling window size for trend and rate-of-change computations.
+  static const int _kWindowSize = 10;
+
+  // Per-metric circular history buffers (capacity = _kWindowSize).
+  final List<double> _ppvHistory = [];
+  final List<double> _rmsHistory = [];
+  final List<double> _staLtaHistory = [];
+
+  // Timestamps (seconds since epoch, fractional) corresponding to each PPV
+  // sample in _ppvHistory. Used for slope computation.
+  final List<double> _ppvTimestamps = [];
+
+  // Exceedance-start timestamps; null means metric is currently within limits.
+  DateTime? _ppvExceedanceStart;
+  DateTime? _rmsExceedanceStart;
+  DateTime? _staLtaExceedanceStart;
+
+  // Session statistics.
+  double _sessionPeakPpv = 0;
+  double _sessionSumPpv = 0;
+  int _sessionSampleCount = 0;
+  int _exceedanceCount = 0;
+  bool _ppvWasExceeded = false; // edge detector for exceedanceCount
+
+  // ---------------------------------------------------------------------------
+  // Public API — stateful layer
+  // ---------------------------------------------------------------------------
+
+  /// Record a new monitoring sample to advance all stateful computations.
+  ///
+  /// [ppv] is Peak Particle Velocity in mm/s. [rms] is RMS acceleration in g.
+  /// [staLta] is the STA/LTA ratio (dimensionless). [timestamp] defaults to
+  /// [DateTime.now] and is used for slope and exceedance-duration computations.
+  void recordSample({
+    required double ppv,
+    double rms = 0,
+    double staLta = 0,
+    DateTime? timestamp,
+  }) {
+    final now = timestamp ?? DateTime.now();
+    final nowSec = now.millisecondsSinceEpoch / 1000.0;
+
+    // --- Rolling history ---
+    _addToWindow(_ppvHistory, ppv);
+    _addToWindow(_rmsHistory, rms);
+    _addToWindow(_staLtaHistory, staLta);
+    _addToWindow(_ppvTimestamps, nowSec);
+
+    // --- Session statistics ---
+    if (ppv > _sessionPeakPpv) _sessionPeakPpv = ppv;
+    _sessionSumPpv += ppv;
+    _sessionSampleCount++;
+
+    // PPV exceedance edge detection (count each new exceedance episode).
+    final ppvExceeded = ppv >= _kPpvThreshold;
+    if (ppvExceeded && !_ppvWasExceeded) _exceedanceCount++;
+    _ppvWasExceeded = ppvExceeded;
+
+    // --- Sustained exceedance start/clear ---
+    _updateExceedanceStart(
+      exceeded: ppvExceeded,
+      startRef: _ppvExceedanceStart,
+      onSet: (t) => _ppvExceedanceStart = t,
+      onClear: () => _ppvExceedanceStart = null,
+    );
+    _updateExceedanceStart(
+      exceeded: rms >= _kRmsThreshold,
+      startRef: _rmsExceedanceStart,
+      onSet: (t) => _rmsExceedanceStart = t,
+      onClear: () => _rmsExceedanceStart = null,
+    );
+    _updateExceedanceStart(
+      exceeded: staLta >= _kStaLtaThreshold,
+      startRef: _staLtaExceedanceStart,
+      onSet: (t) => _staLtaExceedanceStart = t,
+      onClear: () => _staLtaExceedanceStart = null,
+    );
+  }
+
+  /// Trend direction for each metric relative to its 10-sample rolling mean.
+  ///
+  /// Returns a map with keys "ppv", "rms", "staLta". Each value is one of:
+  /// - "up"     — current value is more than 5 % above the rolling mean.
+  /// - "down"   — current value is more than 5 % below the rolling mean.
+  /// - "stable" — within ±5 % of the rolling mean, or fewer than 2 samples.
+  Map<String, String> get trends => {
+        'ppv': _trend(_ppvHistory),
+        'rms': _trend(_rmsHistory),
+        'staLta': _trend(_staLtaHistory),
+      };
+
+  /// How long each metric has *continuously* exceeded its threshold.
+  ///
+  /// Returns a map with keys "ppv", "rms", "staLta". Duration is [Duration.zero]
+  /// when the metric is currently within its threshold.
+  Map<String, Duration> get exceedanceDurations {
+    final now = DateTime.now();
+    return {
+      'ppv': _exceedanceDuration(_ppvExceedanceStart, now),
+      'rms': _exceedanceDuration(_rmsExceedanceStart, now),
+      'staLta': _exceedanceDuration(_staLtaExceedanceStart, now),
+    };
+  }
+
+  /// Least-squares slope of PPV over the last 10 samples in mm/s per second.
+  ///
+  /// Positive means PPV is increasing; negative means decreasing.
+  /// Returns 0.0 if fewer than 2 samples have been recorded.
+  double get ppvRateOfChange {
+    if (_ppvHistory.length < 2) return 0.0;
+    return _leastSquaresSlope(_ppvTimestamps, _ppvHistory);
+  }
+
+  // --- Session statistics ---
+
+  /// Maximum PPV seen since the last [resetSessionStats] call, in mm/s.
+  double get sessionPeakPpv => _sessionPeakPpv;
+
+  /// Rolling mean of all PPV samples since the last [resetSessionStats] call.
+  double get sessionMeanPpv =>
+      _sessionSampleCount == 0 ? 0.0 : _sessionSumPpv / _sessionSampleCount;
+
+  /// Number of times PPV has crossed above [_kPpvThreshold] (rising edge only)
+  /// since the last [resetSessionStats] call.
+  int get exceedanceCount => _exceedanceCount;
+
+  /// Reset session statistics (peak, mean, exceedance count).
+  ///
+  /// Does NOT clear the rolling history windows used for trending and slope.
+  void resetSessionStats() {
+    _sessionPeakPpv = 0;
+    _sessionSumPpv = 0;
+    _sessionSampleCount = 0;
+    _exceedanceCount = 0;
+    _ppvWasExceeded = false;
+  }
+
+  /// Export all key metrics as a JSON-compatible map for logging or upload.
+  ///
+  /// Includes trending, exceedance durations (in seconds), rate of change, and
+  /// session statistics.
+  Map<String, dynamic> get summary {
+    final exc = exceedanceDurations;
+    final tr = trends;
+    return {
+      'ppv': _ppvHistory.isNotEmpty ? _ppvHistory.last : 0.0,
+      'rms': _rmsHistory.isNotEmpty ? _rmsHistory.last : 0.0,
+      'staLta': _staLtaHistory.isNotEmpty ? _staLtaHistory.last : 0.0,
+      'ppvTrend': tr['ppv'],
+      'rmsTrend': tr['rms'],
+      'staLtaTrend': tr['staLta'],
+      'ppvExceedanceSec': exc['ppv']!.inSeconds,
+      'rmsExceedanceSec': exc['rms']!.inSeconds,
+      'staLtaExceedanceSec': exc['staLta']!.inSeconds,
+      'ppvRateOfChange': ppvRateOfChange,
+      'sessionPeakPpv': _sessionPeakPpv,
+      'sessionMeanPpv': sessionMeanPpv,
+      'exceedanceCount': _exceedanceCount,
+      'sampleCount': _sessionSampleCount,
+      'ppvThreshold': _kPpvThreshold,
+      'rmsThreshold': _kRmsThreshold,
+      'staLtaThreshold': _kStaLtaThreshold,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Internal helpers — stateful layer
+  // ---------------------------------------------------------------------------
+
+  static void _addToWindow(List<double> buf, double value) {
+    buf.add(value);
+    if (buf.length > _kWindowSize) buf.removeAt(0);
+  }
+
+  static String _trend(List<double> buf) {
+    if (buf.length < 2) return 'stable';
+    final current = buf.last;
+    // Rolling mean excluding the current sample to measure change against.
+    final history = buf.sublist(0, buf.length - 1);
+    final mean = history.fold(0.0, (s, v) => s + v) / history.length;
+    if (mean == 0) return 'stable';
+    final delta = (current - mean) / mean;
+    if (delta > 0.05) return 'up';
+    if (delta < -0.05) return 'down';
+    return 'stable';
+  }
+
+  static Duration _exceedanceDuration(DateTime? start, DateTime now) {
+    if (start == null) return Duration.zero;
+    return now.difference(start);
+  }
+
+  static void _updateExceedanceStart({
+    required bool exceeded,
+    required DateTime? startRef,
+    required void Function(DateTime) onSet,
+    required void Function() onClear,
+  }) {
+    if (exceeded) {
+      if (startRef == null) onSet(DateTime.now());
+    } else {
+      onClear();
+    }
+  }
+
+  /// Ordinary least-squares slope: dy/dx.
+  static double _leastSquaresSlope(List<double> xs, List<double> ys) {
+    assert(xs.length == ys.length);
+    final n = xs.length;
+    if (n < 2) return 0.0;
+    double sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+    for (int i = 0; i < n; i++) {
+      sumX += xs[i];
+      sumY += ys[i];
+      sumXY += xs[i] * ys[i];
+      sumX2 += xs[i] * xs[i];
+    }
+    final denom = n * sumX2 - sumX * sumX;
+    if (denom.abs() < 1e-30) return 0.0;
+    return (n * sumXY - sumX * sumY) / denom;
+  }
+
   // ---------------------------------------------------------------------------
   // Arias Intensity
   // ---------------------------------------------------------------------------
@@ -267,7 +524,7 @@ class VibrationMetricsService {
     if (windowCount == 0) return List.filled(nBins, 0);
 
     // SK(f) = <|X|^4> / <|X|^2>^2 - 2
-    final sk = List<double>.filled(nBins, 0);
+    final sk = List.filled(nBins, 0.0);
     for (int k = 0; k < nBins; k++) {
       final mean2 = sumMag2[k] / windowCount;
       final mean4 = sumMag4[k] / windowCount;
