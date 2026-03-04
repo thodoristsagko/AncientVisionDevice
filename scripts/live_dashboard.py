@@ -30,11 +30,12 @@ except ImportError:
 
 LABELS = ("normal", "soil_creep", "crack_propagation", "imminent_failure")
 
-LABEL_COLORS = {
-    "normal":            curses.COLOR_GREEN,
-    "soil_creep":        curses.COLOR_YELLOW,
-    "crack_propagation": curses.COLOR_MAGENTA,
-    "imminent_failure":  curses.COLOR_RED,
+# LABEL_COLORS only used internally by _init_colors(); guarded at call sites.
+_LABEL_COLORS_SPEC = {
+    "normal":            "GREEN",
+    "soil_creep":        "YELLOW",
+    "crack_propagation": "MAGENTA",
+    "imminent_failure":  "RED",
 }
 
 
