@@ -21,7 +21,8 @@
         training-history feature-importance-report \
         full-report \
         hyperparams model-size \
-        export-dataset label-data
+        export-dataset label-data \
+        ppv-forecast anomaly-scoring
 
 # ---------------------------------------------------------------------------
 # Help
@@ -817,3 +818,9 @@ export-dataset: ## Export collected data in ML training format
 
 label-data: ## Auto-label collected field data by PPV thresholds
 	python scripts/label_field_data.py --auto
+
+ppv-forecast: ## Forecast future PPV levels using exponential smoothing
+	python scripts/ppv_forecast.py
+
+anomaly-scoring: ## Composite anomaly scoring from multiple signal sources
+	python scripts/anomaly_scoring.py
