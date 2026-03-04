@@ -222,8 +222,14 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
             anomalyService.isInitialized ? anomalyService.modelVersion : 'N/A'),
         _DiagRow('Model type',
             anomalyService.isInitialized ? anomalyService.modelType : 'N/A'),
-        _DiagRow('Last inference time', lastMs),
         _DiagRow('Avg inference time', avgMs),
+        _DiagRow('Last inference time', lastMs),
+        _DiagRow(
+          'Min / Max inference',
+          timing.count > 0
+              ? '${timing.minMs.toStringAsFixed(1)} ms / ${timing.maxMs.toStringAsFixed(1)} ms'
+              : 'N/A',
+        ),
         _DiagRow('Total inferences', '${timing.count}'),
       ],
     );
