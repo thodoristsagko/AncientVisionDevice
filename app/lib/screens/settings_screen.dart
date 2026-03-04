@@ -20,6 +20,10 @@ const String _kBlePrefixKey = 'vibmon_ble_prefix';
 const String _kPpvThresholdKey = 'vibmon_ppv_threshold';
 const String _kInferenceFreqKey = 'vibmon_inference_freq';
 
+// Data management prefs keys
+const String _kDataRetentionDaysKey = 'data_retention_days';
+const String _kExportFormatKey = 'export_format';
+
 // Calibration prefs keys
 const String _kLastCalibrationTimeKey = 'last_calibration_time';
 
@@ -83,6 +87,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _autoUpload = false;
   String _collectorUrl = 'http://192.168.1.100:8765';
 
+  // Data management settings
+  int _dataRetentionDays = 30;
+  String _exportFormat = 'csv';
+
   @override
   void initState() {
     super.initState();
@@ -130,6 +138,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // Data / collector settings
     _autoUpload = prefs.getBool(_kAutoUploadKey) ?? false;
     _collectorUrl = prefs.getString(_kCollectorUrlKey) ?? 'http://192.168.1.100:8765';
+
+    // Data management settings
+    _dataRetentionDays = prefs.getInt(_kDataRetentionDaysKey) ?? 30;
+    _exportFormat = prefs.getString(_kExportFormatKey) ?? 'csv';
   }
 
   Future<void> _saveVibmonSettings() async {
@@ -282,6 +294,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       _buildAutoUploadTile(),
                       const Divider(height: 1, color: Colors.white12),
                       _buildCollectorUrlTile(),
+                      const Divider(height: 1, color: Colors.white12),
+                      _buildDataRetentionTile(),
+                      const Divider(height: 1, color: Colors.white12),
+                      _buildExportFormatTile(),
                     ]),
                     const SizedBox(height: AppSpacing.xxl),
 
@@ -465,8 +481,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           Slider(
             value: _ppvAlertThreshold,
             min: 0.1,
-            max: 2.0,
-            divisions: 19,
+            max: 5.0,
+            divisions: 49,
             activeColor: AppColors.accent,
             inactiveColor: AppColors.cardBorder,
             onChanged: (value) async {
@@ -1073,6 +1089,58 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Widget _buildDataRetentionTile() {
+    const options = <int>[7, 30, 90, -1]; // -1 = Forever
+    String label(int days) => days == -1 ? 'Forever' : '$days days';
+    return ListTile(
+      leading: const Icon(Icons.calendar_today, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('Keep field data', style: AppTextStyles.body),
+      subtitle: const Text('How long to retain recorded session data', style: AppTextStyles.subtitleSmall),
+      trailing: DropdownButton<int>(
+        value: options.contains(_dataRetentionDays) ? _dataRetentionDays : 30,
+        dropdownColor: AppColors.primaryDark,
+        underline: const SizedBox.shrink(),
+        style: AppTextStyles.body,
+        items: options.map((d) => DropdownMenuItem(value: d, child: Text(label(d)))).toList(),
+        onChanged: (value) async {
+          if (value != null) {
+            setState(() => _dataRetentionDays = value);
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setInt(_kDataRetentionDaysKey, value);
+          }
+        },
+      ),
+    );
+  }
+
+  Widget _buildExportFormatTile() {
+    return ListTile(
+      leading: const Icon(Icons.file_download, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+      title: const Text('Session export format', style: AppTextStyles.body),
+      subtitle: Text(
+        _exportFormat == 'csv' ? 'CSV — spreadsheet compatible' : 'JSON — structured data',
+        style: AppTextStyles.subtitleSmall,
+      ),
+      trailing: DropdownButton<String>(
+        value: _exportFormat,
+        dropdownColor: AppColors.primaryDark,
+        underline: const SizedBox.shrink(),
+        style: AppTextStyles.body,
+        items: const [
+          DropdownMenuItem(value: 'csv', child: Text('CSV')),
+          DropdownMenuItem(value: 'json', child: Text('JSON')),
+        ],
+        onChanged: (value) async {
+          if (value != null) {
+            setState(() => _exportFormat = value);
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setString(_kExportFormatKey, value);
+          }
+        },
+      ),
+    );
+  }
+
   // =========================================================================
   // SENSOR CALIBRATION TILES
   // =========================================================================
@@ -1555,6 +1623,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               await prefs.setInt(_kScanTimeoutSecondsKey, 10);
               await prefs.setBool(_kAutoUploadKey, false);
               await prefs.setString(_kCollectorUrlKey, 'http://192.168.1.100:8765');
+              await prefs.setInt(_kDataRetentionDaysKey, 30);
+              await prefs.setString(_kExportFormatKey, 'csv');
               if (mounted) {
                 setState(() {
                   _notificationsEnabled = true;
@@ -1566,6 +1636,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   _scanTimeoutSeconds = 10;
                   _autoUpload = false;
                   _collectorUrl = 'http://192.168.1.100:8765';
+                  _dataRetentionDays = 30;
+                  _exportFormat = 'csv';
                 });
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text('Settings reset to defaults', style: AppTextStyles.body)),
