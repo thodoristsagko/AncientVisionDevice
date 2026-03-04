@@ -6,6 +6,14 @@ services:
       dockerfile: docker/firmware/Dockerfile
     volumes:
       - ./.pio:/workspace/.pio
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
     # Output: .pio/build/m5stick-c-plus2/firmware.bin
 
   flutter:
@@ -14,6 +22,14 @@ services:
       dockerfile: docker/flutter/Dockerfile
     volumes:
       - ./app/build:/app/build
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 3G
+        reservations:
+          cpus: '1.0'
+          memory: 1500M
     # Output: app/build/app/outputs/flutter-apk/app-release.apk
 
   ml:
@@ -23,4 +39,12 @@ services:
     volumes:
       - ./app/assets/ml:/workspace/app/assets/ml
       - ./data:/workspace/data
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
     # Output: app/assets/ml/*.tflite + *.json
