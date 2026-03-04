@@ -1,16 +1,19 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../services/connectivity_monitor_service.dart';
 import '../services/critical_event_log_service.dart';
 import '../services/inference_timing_service.dart';
+import '../services/network_status_service.dart';
 import '../services/vibration_anomaly_service.dart';
 import '../services/device_memory_service.dart';
 import '../utils/ble_packet_tracker.dart';
 
 /// DiagnosticsScreen — read-only system diagnostic information panel.
 ///
-/// Displays BLE status, ML model stats, session metrics and system info.
-/// Pull down to refresh all values.
+/// Displays BLE status, firmware info, ML model stats, session metrics and
+/// system info. Pull down to refresh all values.
 class DiagnosticsScreen extends StatefulWidget {
   /// Optional live BLE state values provided by the caller (e.g. SafetyView).
   /// When null the screen shows "N/A" for fields it cannot retrieve itself.
@@ -53,6 +56,18 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
   int? _modelFileSizeBytes;
   bool _isLoading = true;
 
+  // ── Firmware fields read from SharedPreferences ──────────────────────────
+  String? _fwVersion;
+  int? _fwSeq;
+  int? _fwBoots;
+  bool? _fwGain;    // true = ±16g high-gain active
+  bool? _fwCal;     // true = calibration active
+  double? _fwTmp;   // °C
+  int? _fwUptime;   // seconds
+
+  // ── System / app fields ──────────────────────────────────────────────────
+  DateTime? _appStartTime;
+
   @override
   void initState() {
     super.initState();
@@ -80,10 +95,51 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
       fileSize = null;
     }
 
+    // Load firmware fields and app start time from SharedPreferences
+    String? fwVersion;
+    int? fwSeq;
+    int? fwBoots;
+    bool? fwGain;
+    bool? fwCal;
+    double? fwTmp;
+    int? fwUptime;
+    DateTime? appStartTime;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      fwVersion = prefs.getString('fw_version');
+      fwSeq = prefs.getInt('seq');
+      fwBoots = prefs.getInt('boots');
+      fwGain = prefs.getBool('gain');
+      fwCal = prefs.getBool('cal');
+      final tmpRaw = prefs.get('tmp');
+      if (tmpRaw is double) {
+        fwTmp = tmpRaw;
+      } else if (tmpRaw is int) {
+        fwTmp = tmpRaw.toDouble();
+      }
+      fwUptime = prefs.getInt('uptime');
+
+      final appStartMs = prefs.getInt('app_start_time');
+      if (appStartMs != null) {
+        appStartTime = DateTime.fromMillisecondsSinceEpoch(appStartMs);
+      }
+    } catch (_) {
+      // SharedPreferences unavailable — leave everything null.
+    }
+
     if (mounted) {
       setState(() {
         _lastDeviceName = lastDevice;
         _modelFileSizeBytes = fileSize;
+        _fwVersion = fwVersion;
+        _fwSeq = fwSeq;
+        _fwBoots = fwBoots;
+        _fwGain = fwGain;
+        _fwCal = fwCal;
+        _fwTmp = fwTmp;
+        _fwUptime = fwUptime;
+        _appStartTime = appStartTime;
         _isLoading = false;
         final anomalyService = VibrationAnomalyService();
         _modelFingerprint = anomalyService.isInitialized
@@ -121,6 +177,13 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
     return dt.toLocal().toString().substring(0, 19);
   }
 
+  /// Format raw uptime seconds as "Xh Ym Zs".
+  String _formatUptimeSeconds(int? totalSeconds) {
+    if (totalSeconds == null) return 'N/A';
+    final d = Duration(seconds: totalSeconds);
+    return _formatDuration(d);
+  }
+
   // ─── Build ──────────────────────────────────────────────────────────────────
 
   @override
@@ -155,6 +218,8 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
                 children: [
                   _buildBleSection(),
                   const SizedBox(height: 16),
+                  _buildFirmwareSection(),
+                  const SizedBox(height: 16),
                   _buildMlSection(),
                   const SizedBox(height: 16),
                   _buildSessionSection(),
@@ -162,6 +227,8 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
                   _buildSystemSection(),
                   const SizedBox(height: 24),
                   _buildExportButton(),
+                  const SizedBox(height: 12),
+                  _buildResetButton(),
                   const SizedBox(height: 32),
                 ],
               ),
@@ -195,6 +262,44 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
           'RSSI',
           d?.lastRssi != null ? '${d!.lastRssi} dBm' : 'N/A',
         ),
+      ],
+    );
+  }
+
+  Widget _buildFirmwareSection() {
+    String gainLabel;
+    if (_fwGain == null) {
+      gainLabel = 'N/A';
+    } else {
+      gainLabel = _fwGain! ? 'Active (±16g)' : 'Normal (±4g)';
+    }
+
+    String calLabel;
+    if (_fwCal == null) {
+      calLabel = 'N/A';
+    } else {
+      calLabel = _fwCal! ? 'Yes' : 'No';
+    }
+
+    String tmpLabel;
+    if (_fwTmp == null) {
+      tmpLabel = 'N/A';
+    } else {
+      tmpLabel = '${_fwTmp!.toStringAsFixed(1)} °C';
+    }
+
+    return _DiagCard(
+      title: 'Firmware',
+      icon: Icons.developer_board,
+      iconColor: const Color(0xFF00BCD4),
+      rows: [
+        _DiagRow('Version', _fwVersion ?? 'Not connected'),
+        _DiagRow('Sequence number', _fwSeq != null ? '$_fwSeq' : 'N/A'),
+        _DiagRow('Boot count', _fwBoots != null ? '$_fwBoots' : 'N/A'),
+        _DiagRow('High-gain mode', gainLabel),
+        _DiagRow('Calibration active', calLabel),
+        _DiagRow('Temperature', tmpLabel),
+        _DiagRow('Uptime', _formatUptimeSeconds(_fwUptime)),
       ],
     );
   }
@@ -265,6 +370,59 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
   }
 
   Widget _buildSystemSection() {
+    // App uptime
+    String appUptimeLabel;
+    if (_appStartTime != null) {
+      appUptimeLabel = _formatDuration(DateTime.now().difference(_appStartTime!));
+    } else {
+      appUptimeLabel = 'N/A';
+    }
+
+    // Connectivity monitor status
+    final connectivity = ConnectivityMonitorService.instance;
+    final healthStatus = connectivity.healthStatus;
+    String connectivityLabel;
+    switch (healthStatus) {
+      case CombinedHealthStatus.fullyConnected:
+        connectivityLabel = 'BLE + Network';
+        break;
+      case CombinedHealthStatus.bleOnlyConnected:
+        connectivityLabel = 'BLE only (no network)';
+        break;
+      case CombinedHealthStatus.networkOnlyConnected:
+        connectivityLabel = 'Network only (no BLE)';
+        break;
+      case CombinedHealthStatus.fullyDisconnected:
+        connectivityLabel = 'Disconnected';
+        break;
+      case CombinedHealthStatus.unknown:
+        connectivityLabel = 'Unknown';
+        break;
+    }
+
+    // BLE offline duration
+    final bleOffline = connectivity.bleOfflineDuration;
+    final bleOfflineLabel = connectivity.isBleConnected
+        ? 'Connected'
+        : (bleOffline == Duration.zero
+            ? 'Never connected'
+            : _formatDuration(bleOffline));
+
+    // Network status
+    final networkStatus = NetworkStatusService.instance.status;
+    String networkLabel;
+    switch (networkStatus) {
+      case NetworkStatus.connected:
+        networkLabel = 'Connected';
+        break;
+      case NetworkStatus.disconnected:
+        networkLabel = 'Disconnected';
+        break;
+      case NetworkStatus.unknown:
+        networkLabel = 'Unknown';
+        break;
+    }
+
     return _DiagCard(
       title: 'System',
       icon: Icons.settings_applications,
@@ -272,10 +430,11 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
       rows: [
         _DiagRow('Operating system', Platform.operatingSystem),
         _DiagRow('OS version', Platform.operatingSystemVersion),
-        _DiagRow(
-          'Available memory',
-          'See device settings (not available via Dart VM)',
-        ),
+        const _DiagRow('Memory usage', 'N/A (mobile)'),
+        _DiagRow('App uptime', appUptimeLabel),
+        _DiagRow('Connectivity status', connectivityLabel),
+        _DiagRow('Network status', networkLabel),
+        _DiagRow('BLE offline duration', bleOfflineLabel),
       ],
     );
   }
@@ -303,6 +462,19 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
     );
   }
 
+  Widget _buildResetButton() {
+    return Center(
+      child: TextButton(
+        style: TextButton.styleFrom(
+          foregroundColor: Colors.white54,
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+        ),
+        onPressed: _resetDiagnosticCounters,
+        child: const Text('Reset diagnostic counters'),
+      ),
+    );
+  }
+
   Future<void> _exportCriticalEvents() async {
     try {
       final service = CriticalEventLogService.instance;
@@ -323,6 +495,36 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Export failed: $e'),
+            backgroundColor: Colors.red[900],
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _resetDiagnosticCounters() async {
+    try {
+      // Reset ML inference timing counters
+      InferenceTimingService.instance.reset();
+
+      // Reset anomaly service baseline/adaptive counters
+      VibrationAnomalyService.instance.resetBaseline();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Diagnostic counters reset'),
+            backgroundColor: Color(0xFF1C2523),
+          ),
+        );
+        // Refresh the displayed values after reset
+        _refresh();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Reset failed: $e'),
             backgroundColor: Colors.red[900],
           ),
         );

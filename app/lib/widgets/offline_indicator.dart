@@ -30,17 +30,18 @@ IconData _connectivityIcon(_ConnectivityType type) {
   }
 }
 
-_ConnectivityType _resultToType(ConnectivityResult result) {
-  if (result == ConnectivityResult.wifi) return _ConnectivityType.wifi;
-  if (result == ConnectivityResult.mobile) return _ConnectivityType.mobile;
+_ConnectivityType _resultToType(List<ConnectivityResult> results) {
+  if (results.contains(ConnectivityResult.wifi)) return _ConnectivityType.wifi;
+  if (results.contains(ConnectivityResult.mobile)) return _ConnectivityType.mobile;
   return _ConnectivityType.none;
 }
 
-bool _hasConnection(ConnectivityResult result) {
-  return result == ConnectivityResult.wifi ||
-      result == ConnectivityResult.mobile ||
-      result == ConnectivityResult.ethernet ||
-      result == ConnectivityResult.vpn;
+bool _hasConnection(List<ConnectivityResult> results) {
+  return results.any((r) =>
+      r == ConnectivityResult.wifi ||
+      r == ConnectivityResult.mobile ||
+      r == ConnectivityResult.ethernet ||
+      r == ConnectivityResult.vpn);
 }
 
 // ---------------------------------------------------------------------------
@@ -79,7 +80,7 @@ class _OfflineIndicatorState extends State<OfflineIndicator>
   // -------------------------------------------------------------------------
   // Connectivity state
   // -------------------------------------------------------------------------
-  late StreamSubscription<ConnectivityResult> _subscription;
+  late StreamSubscription<List<ConnectivityResult>> _subscription;
   bool _isOffline = false;
   _ConnectivityType _connectivityType = _ConnectivityType.none;
 
@@ -129,9 +130,9 @@ class _OfflineIndicatorState extends State<OfflineIndicator>
     }
   }
 
-  void _updateConnectionStatus(ConnectivityResult result) {
-    final isOffline = !_hasConnection(result);
-    final type = _resultToType(result);
+  void _updateConnectionStatus(List<ConnectivityResult> results) {
+    final isOffline = !_hasConnection(results);
+    final type = _resultToType(results);
 
     if (!mounted) return;
 
@@ -340,7 +341,7 @@ class OfflineChip extends StatefulWidget {
 }
 
 class _OfflineChipState extends State<OfflineChip> {
-  late StreamSubscription<ConnectivityResult> _subscription;
+  late StreamSubscription<List<ConnectivityResult>> _subscription;
   bool _isOffline = false;
 
   @override
@@ -353,13 +354,13 @@ class _OfflineChipState extends State<OfflineChip> {
 
   Future<void> _checkConnectivity() async {
     try {
-      final result = await Connectivity().checkConnectivity();
-      _updateConnectionStatus(result);
+      final results = await Connectivity().checkConnectivity();
+      _updateConnectionStatus(results);
     } catch (_) {}
   }
 
-  void _updateConnectionStatus(ConnectivityResult result) {
-    final isOffline = !_hasConnection(result);
+  void _updateConnectionStatus(List<ConnectivityResult> results) {
+    final isOffline = !_hasConnection(results);
     if (isOffline != _isOffline && mounted) {
       setState(() => _isOffline = isOffline);
     }
@@ -420,13 +421,13 @@ class ConnectivityHelper {
   bool get isOnline => _isOnline;
 
   Future<void> initialize() async {
-    final result = await _connectivity.checkConnectivity();
-    _updateStatus(result);
+    final results = await _connectivity.checkConnectivity();
+    _updateStatus(results);
     _connectivity.onConnectivityChanged.listen(_updateStatus);
   }
 
-  void _updateStatus(ConnectivityResult result) {
-    final online = _hasConnection(result);
+  void _updateStatus(List<ConnectivityResult> results) {
+    final online = _hasConnection(results);
     if (online != _isOnline) {
       _isOnline = online;
       _controller.add(online);
@@ -434,8 +435,8 @@ class ConnectivityHelper {
   }
 
   Future<bool> checkConnectivity() async {
-    final result = await _connectivity.checkConnectivity();
-    return _hasConnection(result);
+    final results = await _connectivity.checkConnectivity();
+    return _hasConnection(results);
   }
 
   void dispose() {
