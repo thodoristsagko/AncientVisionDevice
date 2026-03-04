@@ -27,15 +27,15 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-# Force UTF-8 output on Windows
-if sys.platform == "win32":
+# Suppress TensorFlow warnings
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
+# Force UTF-8 output on Windows (only in main execution, not when imported for testing)
+if __name__ == "__main__" and sys.platform == "win32":
     try:
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
     except Exception:
         pass
-
-# Suppress TensorFlow warnings
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 
 # Constants
