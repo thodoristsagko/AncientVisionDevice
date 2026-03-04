@@ -20,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pytest pytest-cov flask werkzeug
+          pip install pytest pytest-cov pandas numpy scikit-learn flask werkzeug google-cloud-firestore==2.16.0
 
       - name: Run tests with coverage
         run: |
