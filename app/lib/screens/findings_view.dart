@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:share_plus/share_plus.dart';
 import '../models/finding_model.dart';
 import '../services/local_storage_service.dart';
+import '../services/critical_event_log_service.dart';
 import 'finding_details_page.dart';
 import 'findings_map_screen.dart';
 import 'quick_capture_screen.dart';
@@ -42,6 +43,13 @@ class FindingsViewState extends State<FindingsView> {
   // Type category filter: null = All
   String? _typeCategory; // 'artifact', 'structure', 'anomaly', 'note'
 
+  // Bulk selection mode
+  bool _selectionMode = false;
+  final Set<String> _selectedIds = {};
+
+  // Risk events: timestamps of critical events loaded from CriticalEventLogService
+  List<DateTime> _criticalEventTimestamps = [];
+
   final _siteService = SiteService();
   String _activeSite = '';
 
@@ -52,6 +60,33 @@ class FindingsViewState extends State<FindingsView> {
     _siteService.getActiveSite().then((s) {
       if (mounted) setState(() => _activeSite = s);
     });
+    _loadCriticalEvents();
+  }
+
+  Future<void> _loadCriticalEvents() async {
+    try {
+      final events = await CriticalEventLogService.instance.loadEvents();
+      if (mounted) {
+        setState(() {
+          _criticalEventTimestamps = events.map((e) => e.timestamp).toList();
+        });
+      }
+    } catch (_) {
+      // Non-critical; silently ignore
+    }
+  }
+
+  /// Returns true if this finding was recorded within 5 minutes of any critical event.
+  bool _recordedDuringAnomaly(Finding f) {
+    if (f.isSignificant) return true;
+    if (_criticalEventTimestamps.isEmpty) return false;
+    try {
+      final findingDate = DateTime.parse(f.date);
+      return _criticalEventTimestamps.any((ts) =>
+          ts.difference(findingDate).abs() < const Duration(minutes: 5));
+    } catch (_) {
+      return false;
+    }
   }
 
   @override
@@ -288,6 +323,166 @@ class FindingsViewState extends State<FindingsView> {
       csv,
       subject: 'AncientVision Findings Export — ${DateTime.now().toIso8601String().split('T')[0]}',
     );
+  }
+
+  Future<void> _exportJson(BuildContext context) async {
+    if (_filteredFindings.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No findings to export')),
+      );
+      return;
+    }
+
+    final jsonList = _filteredFindings.map((f) => {
+      'id': f.id,
+      'name': f.name,
+      'type': f.type,
+      'site': f.site,
+      'date': f.date,
+      'description': f.description,
+      'latitude': f.latitude,
+      'longitude': f.longitude,
+      'isSignificant': f.isSignificant,
+      'recordedDuringAnomaly': _recordedDuringAnomaly(f),
+      'source': f.source.label,
+      'imageUrl': f.imageUrl,
+      'model3dUrl': f.model3dUrl,
+    }).toList();
+
+    final jsonString = const JsonEncoder.withIndent('  ').convert({
+      'exported': DateTime.now().toIso8601String(),
+      'count': jsonList.length,
+      'findings': jsonList,
+    });
+
+    await Share.share(
+      jsonString,
+      subject: 'AncientVision Findings JSON — ${DateTime.now().toIso8601String().split('T')[0]}',
+    );
+  }
+
+  void _showExportMenu(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1C2523),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Export findings',
+              style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 12),
+            ListTile(
+              leading: const Icon(Icons.table_chart_rounded, color: Color(0xFF4CAF50)),
+              title: const Text('Export as CSV', style: TextStyle(color: Colors.white)),
+              subtitle: Text(
+                '${_filteredFindings.length} rows',
+                style: const TextStyle(color: Colors.white54, fontSize: 12),
+              ),
+              onTap: () {
+                Navigator.pop(context);
+                _exportCsv(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.data_object_rounded, color: Color(0xFF2196F3)),
+              title: const Text('Export as JSON', style: TextStyle(color: Colors.white)),
+              subtitle: Text(
+                '${_filteredFindings.length} findings + risk flags',
+                style: const TextStyle(color: Colors.white54, fontSize: 12),
+              ),
+              onTap: () {
+                Navigator.pop(context);
+                _exportJson(context);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _toggleSelectionMode() {
+    setState(() {
+      _selectionMode = !_selectionMode;
+      if (!_selectionMode) _selectedIds.clear();
+    });
+  }
+
+  void _toggleFindingSelection(String id) {
+    setState(() {
+      if (_selectedIds.contains(id)) {
+        _selectedIds.remove(id);
+      } else {
+        _selectedIds.add(id);
+      }
+    });
+  }
+
+  void _selectAll() {
+    setState(() {
+      _selectedIds
+        ..clear()
+        ..addAll(_filteredFindings.map((f) => f.id));
+    });
+  }
+
+  Future<void> _deleteSelected(BuildContext context) async {
+    if (_selectedIds.isEmpty) return;
+    final count = _selectedIds.length;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1C2523),
+        title: const Text('Delete findings', style: TextStyle(color: Colors.white)),
+        content: Text(
+          'Delete $count finding${count == 1 ? '' : 's'}? This cannot be undone.',
+          style: const TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    final ids = Set<String>.from(_selectedIds);
+    for (final id in ids) {
+      try {
+        await FirebaseFirestore.instance.collection('findings').doc(id).delete();
+      } catch (e) {
+        debugPrint('Delete $id failed: $e');
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _findings.removeWhere((f) => ids.contains(f.id));
+        _selectedIds.clear();
+        _selectionMode = false;
+      });
+      _filterFindings(_searchController.text);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Deleted $count finding${count == 1 ? '' : 's'}'),
+          backgroundColor: const Color(0xFF4CAF50),
+        ),
+      );
+    }
   }
 
   void showAddOptions(BuildContext context) {
@@ -710,14 +905,92 @@ class FindingsViewState extends State<FindingsView> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Findings',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 24,
-                    fontWeight: FontWeight.w700,
-                  ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _filteredFindings.isEmpty && !_isLoading
+                            ? 'Findings'
+                            : 'Findings (${_filteredFindings.length})',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 24,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    // Selection-mode toggle
+                    GestureDetector(
+                      onTap: _toggleSelectionMode,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: _selectionMode
+                              ? const Color(0xFFF44336).withAlpha(51)
+                              : Colors.white.withAlpha(26),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: _selectionMode
+                                ? const Color(0xFFF44336).withAlpha(128)
+                                : Colors.white.withAlpha(51),
+                          ),
+                        ),
+                        child: Text(
+                          _selectionMode ? 'Cancel' : 'Select',
+                          style: TextStyle(
+                            color: _selectionMode
+                                ? const Color(0xFFF44336)
+                                : Colors.white.withAlpha(179),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
+                // Bulk-action bar (visible when in selection mode)
+                if (_selectionMode) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF44336).withAlpha(30),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFFF44336).withAlpha(80)),
+                    ),
+                    child: Row(
+                      children: [
+                        Text(
+                          '${_selectedIds.length} selected',
+                          style: const TextStyle(color: Colors.white, fontSize: 13),
+                        ),
+                        const Spacer(),
+                        TextButton(
+                          onPressed: _selectAll,
+                          child: const Text('Select all',
+                              style: TextStyle(color: Color(0xFFFFC107), fontSize: 12)),
+                        ),
+                        const SizedBox(width: 8),
+                        TextButton(
+                          onPressed: _selectedIds.isEmpty
+                              ? null
+                              : () => _deleteSelected(context),
+                          child: Text(
+                            'Delete',
+                            style: TextStyle(
+                              color: _selectedIds.isEmpty
+                                  ? Colors.white38
+                                  : const Color(0xFFF44336),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 12),
 
                 // SEARCH BAR
@@ -884,9 +1157,9 @@ class FindingsViewState extends State<FindingsView> {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    // Export CSV button
+                    // Export button (CSV or JSON)
                     GestureDetector(
-                      onTap: () => _exportCsv(context),
+                      onTap: () => _showExportMenu(context),
                       child: Container(
                         padding: const EdgeInsets.all(8),
                         decoration: BoxDecoration(
@@ -1089,31 +1362,54 @@ class FindingsViewState extends State<FindingsView> {
                       ..._filteredFindings.asMap().entries.map((entry) {
                             final index = entry.key;
                             final f = entry.value;
-                            final isSelected = index == _selectedIndex;
+                            final isRowSelected = index == _selectedIndex;
+                            final isBulkSelected = _selectedIds.contains(f.id);
                             final typeColor = Finding.getTypeColor(f.type);
+                            final hasRisk = _recordedDuringAnomaly(f);
 
                             return GestureDetector(
                               key: Key(f.id),
                               onTap: () {
-                                setState(() => _selectedIndex = index);
+                                if (_selectionMode) {
+                                  _toggleFindingSelection(f.id);
+                                } else {
+                                  setState(() => _selectedIndex = index);
+                                }
                               },
                               child: Container(
                                   margin: const EdgeInsets.symmetric(vertical: 4),
                                   padding: const EdgeInsets.all(12),
                                   decoration: BoxDecoration(
-                                    color: isSelected
-                                        ? const Color(0xFFFFC107).withAlpha(51)
-                                        : Colors.white.withAlpha(13),
+                                    color: isBulkSelected
+                                        ? const Color(0xFFF44336).withAlpha(40)
+                                        : isRowSelected
+                                            ? const Color(0xFFFFC107).withAlpha(51)
+                                            : Colors.white.withAlpha(13),
                                     borderRadius: BorderRadius.circular(12),
                                     border: Border.all(
-                                      color: isSelected
-                                          ? const Color(0xFFFFC107).withAlpha(128)
-                                          : Colors.transparent,
+                                      color: isBulkSelected
+                                          ? const Color(0xFFF44336).withAlpha(150)
+                                          : isRowSelected
+                                              ? const Color(0xFFFFC107).withAlpha(128)
+                                              : Colors.transparent,
                                       width: 1,
                                     ),
                                   ),
                                   child: Row(
                                     children: [
+                                      // Bulk selection checkbox
+                                      if (_selectionMode) ...[
+                                        Icon(
+                                          isBulkSelected
+                                              ? Icons.check_circle_rounded
+                                              : Icons.radio_button_unchecked_rounded,
+                                          color: isBulkSelected
+                                              ? const Color(0xFFF44336)
+                                              : Colors.white38,
+                                          size: 20,
+                                        ),
+                                        const SizedBox(width: 8),
+                                      ],
                                       // Type color indicator
                                       Container(
                                         width: 4,
@@ -1165,6 +1461,49 @@ class FindingsViewState extends State<FindingsView> {
                                           ],
                                         ),
                                       ),
+                                      // Risk badge (red/amber) — shown when recorded during anomaly
+                                      if (hasRisk)
+                                        Container(
+                                          margin: const EdgeInsets.only(right: 6),
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 6, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: f.isSignificant
+                                                ? const Color(0xFFF44336).withAlpha(50)
+                                                : const Color(0xFFFF9800).withAlpha(50),
+                                            borderRadius: BorderRadius.circular(6),
+                                            border: Border.all(
+                                              color: f.isSignificant
+                                                  ? const Color(0xFFF44336).withAlpha(150)
+                                                  : const Color(0xFFFF9800).withAlpha(150),
+                                            ),
+                                          ),
+                                          child: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Icon(
+                                                f.isSignificant
+                                                    ? Icons.warning_rounded
+                                                    : Icons.notification_important_rounded,
+                                                color: f.isSignificant
+                                                    ? const Color(0xFFF44336)
+                                                    : const Color(0xFFFF9800),
+                                                size: 9,
+                                              ),
+                                              const SizedBox(width: 3),
+                                              Text(
+                                                f.isSignificant ? 'RISK' : 'ALERT',
+                                                style: TextStyle(
+                                                  color: f.isSignificant
+                                                      ? const Color(0xFFF44336)
+                                                      : const Color(0xFFFF9800),
+                                                  fontSize: 9,
+                                                  fontWeight: FontWeight.w700,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
                                       _sourceBadge(f.source),
                                       // 3D model indicator
                                       if (f.model3dUrl != null)
@@ -1183,29 +1522,31 @@ class FindingsViewState extends State<FindingsView> {
                                             ),
                                           ),
                                         ),
-                                      const SizedBox(width: 8),
-                                      GestureDetector(
-                                        onTap: () {
-                                          Navigator.push(
-                                            context,
-                                            MaterialPageRoute(
-                                              builder: (context) => FindingDetailsPage(finding: f),
+                                      if (!_selectionMode) ...[
+                                        const SizedBox(width: 8),
+                                        GestureDetector(
+                                          onTap: () {
+                                            Navigator.push(
+                                              context,
+                                              MaterialPageRoute(
+                                                builder: (context) => FindingDetailsPage(finding: f),
+                                              ),
+                                            );
+                                          },
+                                          child: Container(
+                                            padding: const EdgeInsets.all(8),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFFFFC107).withAlpha(51),
+                                              borderRadius: BorderRadius.circular(8),
                                             ),
-                                          );
-                                        },
-                                        child: Container(
-                                          padding: const EdgeInsets.all(8),
-                                          decoration: BoxDecoration(
-                                            color: const Color(0xFFFFC107).withAlpha(51),
-                                            borderRadius: BorderRadius.circular(8),
-                                          ),
-                                          child: const Icon(
-                                            Icons.arrow_forward_ios_rounded,
-                                            color: Color(0xFFFFC107),
-                                            size: 16,
+                                            child: const Icon(
+                                              Icons.arrow_forward_ios_rounded,
+                                              color: Color(0xFFFFC107),
+                                              size: 16,
+                                            ),
                                           ),
                                         ),
-                                      ),
+                                      ],
                                     ],
                                   ),
                                 ),
