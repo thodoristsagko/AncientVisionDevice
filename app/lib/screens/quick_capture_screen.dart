@@ -31,6 +31,7 @@ class _VibrationSnapshot {
   const _VibrationSnapshot({
     required this.level,
     required this.score,
+    // ignore: unused_element
     this.precursorPattern,
   });
 

@@ -19,8 +19,8 @@ void main() {
       await svc.add(level: 'warning', type: 'seismic', ppv: 3.5, message: 'Stop work');
       final entries = await svc.load();
       expect(entries.length, 1);
-      expect(entries.first['level'], 'warning');
-      expect(entries.first['ppv'], 3.5);
+      expect(entries.first.level, 'warning');
+      expect(entries.first.ppv, 3.5);
     });
 
     test('clear removes all entries', () async {
@@ -31,14 +31,14 @@ void main() {
       expect(entries, isEmpty);
     });
 
-    test('max 100 entries (FIFO eviction)', () async {
+    test('max 200 entries (FIFO eviction)', () async {
       final svc = AlertHistoryService();
-      for (int i = 0; i < 105; i++) {
+      for (int i = 0; i < 205; i++) {
         await svc.add(level: 'warning', type: 'seismic', ppv: i.toDouble(), message: 'msg $i');
       }
       final entries = await svc.load();
-      expect(entries.length, 100);
-      expect(entries.last['ppv'], 104.0);
+      expect(entries.length, 200);
+      expect(entries.last.ppv, 204.0);
     });
   });
 }
