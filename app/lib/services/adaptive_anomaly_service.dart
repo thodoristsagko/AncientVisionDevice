@@ -89,6 +89,12 @@ class AdaptiveAnomalyService {
   double? _lastPsdSlope;
   double? get lastPsdSlope => _lastPsdSlope;
 
+  // Last computed anomaly score — used for anomalyProbability
+  double? _lastScore;
+
+  // Last extracted feature vector — used for featureContributions
+  List<double>? _lastFeatureVector;
+
   int _sampleCount = 0;
   bool _isCalibrated = false;
 
@@ -105,6 +111,79 @@ class AdaptiveAnomalyService {
   int get calibrationTarget => _calibrationSamples;
   double get calibrationProgress => (_sampleCount / _calibrationSamples).clamp(0.0, 1.0);
   String get modeLabel => _isCalibrated ? 'Adaptive' : 'Calibrating (${(_sampleCount * 100 / _calibrationSamples).round()}%)';
+
+  /// Returns a multiplier for detection thresholds based on time-of-day.
+  ///
+  /// During construction hours (07:00–18:00), thresholds are raised by 25%
+  /// to reduce false positives from legitimate vibration sources.
+  double get _timeOfDayMultiplier {
+    final hour = DateTime.now().hour;
+    return (hour >= 7 && hour < 18) ? 1.25 : 1.0;
+  }
+
+  /// Quality of the most recent calibration (0.0–1.0).
+  ///
+  /// Based on: number of samples (more = better), variance stability
+  /// (lower variance across calibration windows = better).
+  double get calibrationQuality {
+    if (!_isCalibrated) return 0.0;
+    // Score based on sample count vs ideal (300 samples = perfect)
+    final sampleScore = (calibrationSampleCount / 300.0).clamp(0.0, 1.0);
+    // Score based on low variance (variance < 0.1 is good)
+    double varianceScore = 1.0;
+    // Compute mean variance across features
+    double totalVariance = 0;
+    int count = 0;
+    for (final key in _featureKeys) {
+      if (_stats.containsKey(key)) {
+        totalVariance += _stats[key]!.variance;
+        count++;
+      }
+    }
+    if (count > 0) {
+      final meanVariance = totalVariance / count;
+      varianceScore = (1.0 - (meanVariance / 1.0).clamp(0.0, 1.0));
+    }
+    return (sampleScore * 0.6 + varianceScore * 0.4).clamp(0.0, 1.0);
+  }
+
+  /// Human-readable calibration quality label.
+  String get calibrationQualityLabel {
+    final q = calibrationQuality;
+    if (q >= 0.8) return 'Excellent';
+    if (q >= 0.6) return 'Good';
+    if (q >= 0.4) return 'Fair';
+    return 'Poor';
+  }
+
+  /// Estimated probability that the current sample represents a genuine anomaly.
+  ///
+  /// Derived from the Mahalanobis-like distance of the current feature vector
+  /// from the baseline distribution.
+  double get anomalyProbability {
+    if (!_isCalibrated || _lastScore == null) return 0.0;
+    // Sigmoid transform of (score - low_threshold) / (high_threshold - low_threshold)
+    final norm = (_lastScore! - _dynamicThresholdLow) /
+                  (_dynamicThresholdHigh - _dynamicThresholdLow + 1e-10);
+    return 1.0 / (1.0 + exp(-5.0 * norm));
+  }
+
+  /// Per-feature z-score magnitudes — shows which features contributed most to anomaly score.
+  ///
+  /// Higher values indicate the feature is more deviated from baseline.
+  /// Returns empty map if not calibrated.
+  Map<String, double> get featureContributions {
+    if (!_isCalibrated || _lastFeatureVector == null) return {};
+    final result = <String, double>{};
+    for (int i = 0; i < _featureKeys.length && i < _lastFeatureVector!.length; i++) {
+      final key = _featureKeys[i];
+      if (_stats.containsKey(key)) {
+        final std = sqrt(_stats[key]!.variance + 1e-10);
+        result[key] = ((_lastFeatureVector![i] - _stats[key]!.mean) / std).abs();
+      }
+    }
+    return result;
+  }
 
   AdaptiveAnomalyService() {
     _serviceStopwatch.start();
@@ -272,9 +351,17 @@ class AdaptiveAnomalyService {
 
     final rmsZ = sqrt(sumZSq / featureCount);
 
-    // Use adaptive (calibration-derived) thresholds if available, else static defaults
-    final effectiveLow = _isCalibrated ? _dynamicThresholdLow : _thresholdLow;
-    final effectiveHigh = _isCalibrated ? _dynamicThresholdHigh : _thresholdHigh;
+    // Record the current feature vector for featureContributions
+    _lastFeatureVector = [for (final key in _featureKeys) features[key] ?? 0.0];
+
+    // Use adaptive (calibration-derived) thresholds if available, else static defaults.
+    // Apply time-of-day multiplier: during construction hours (07:00–18:00) raise
+    // thresholds by 25% to reduce false positives from legitimate vibration sources.
+    final todMultiplier = _timeOfDayMultiplier;
+    final adjustedLow = _dynamicThresholdLow * todMultiplier;
+    final adjustedHigh = _dynamicThresholdHigh * todMultiplier;
+    final effectiveLow = _isCalibrated ? adjustedLow : _thresholdLow;
+    final effectiveHigh = _isCalibrated ? adjustedHigh : _thresholdHigh;
 
     // Instantaneous classification
     double instantScore;
