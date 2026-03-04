@@ -27,6 +27,44 @@ class NotificationService {
   static const int safetyCriticalId = 6;
   static const int deviceDisconnectedId = 7;
 
+  // ---------------------------------------------------------------------------
+  // Deduplication cooldown
+  // ---------------------------------------------------------------------------
+
+  /// Don't fire the same notification type more than once within this window.
+  static const Duration _deduplicationCooldown = Duration(seconds: 30);
+
+  /// Tracks the last time each notification type was successfully fired.
+  final Map<String, DateTime> _lastNotified = {};
+
+  // ---------------------------------------------------------------------------
+  // Pending notification counter
+  // ---------------------------------------------------------------------------
+
+  /// In-memory count of notifications shown but not yet acknowledged.
+  int _pendingNotificationCount = 0;
+
+  /// Returns the count of unacknowledged notifications shown this session.
+  /// Reset via [clearUnreadCount].
+  int get pendingNotificationCount => _pendingNotificationCount;
+
+  // ---------------------------------------------------------------------------
+  // Deduplication helpers
+  // ---------------------------------------------------------------------------
+
+  /// Returns true when [type] has been fired within [_deduplicationCooldown].
+  bool _isDuplicate(String type) {
+    final last = _lastNotified[type];
+    if (last == null) return false;
+    return DateTime.now().difference(last) < _deduplicationCooldown;
+  }
+
+  /// Mark [type] as notified and increment the pending counter.
+  void _markNotified(String type) {
+    _lastNotified[type] = DateTime.now();
+    _pendingNotificationCount++;
+  }
+
   /// Initialize the notification service
   Future<void> initialize() async {
     if (_initialized) return;
@@ -121,6 +159,7 @@ class NotificationService {
     int? pointCount,
   }) async {
     if (!await areNotificationsEnabled()) return;
+    if (_isDuplicate('processing_complete')) return;
 
     final body = pointCount != null
         ? 'Your 3D model "$projectName" is ready with $pointCount points!'
@@ -132,6 +171,8 @@ class NotificationService {
       body: body,
       payload: 'processing_complete:$projectName',
     );
+
+    _markNotified('processing_complete');
 
     // Save to notification history
     await _saveNotification(
@@ -147,6 +188,7 @@ class NotificationService {
     String? errorMessage,
   }) async {
     if (!await areNotificationsEnabled()) return;
+    if (_isDuplicate('processing_failed')) return;
 
     final body = errorMessage ?? 'Processing failed for "$projectName". Please try again.';
 
@@ -156,6 +198,8 @@ class NotificationService {
       body: body,
       payload: 'processing_failed:$projectName',
     );
+
+    _markNotified('processing_failed');
 
     await _saveNotification(
       title: 'Processing Failed',
@@ -192,6 +236,7 @@ class NotificationService {
     required String achievementDescription,
   }) async {
     if (!await areNotificationsEnabled()) return;
+    if (_isDuplicate('achievement_$achievementTitle')) return;
 
     await _showNotification(
       id: achievementUnlockedId,
@@ -199,6 +244,8 @@ class NotificationService {
       body: '$achievementTitle - $achievementDescription',
       payload: 'achievement:$achievementTitle',
     );
+
+    _markNotified('achievement_$achievementTitle');
 
     await _saveNotification(
       title: 'Achievement Unlocked!',
@@ -213,6 +260,7 @@ class NotificationService {
     String? sensorType,
   }) async {
     if (!await areNotificationsEnabled()) return;
+    if (_isDuplicate('safety_warning')) return;
 
     final body = sensorType != null
         ? '⚠️ $sensorType: $message'
@@ -226,6 +274,8 @@ class NotificationService {
       isWarning: true,
     );
 
+    _markNotified('safety_warning');
+
     await _saveNotification(
       title: 'Safety Warning',
       body: body,
@@ -233,12 +283,16 @@ class NotificationService {
     );
   }
 
-  /// Show critical safety alert notification (highest priority)
+  /// Show critical safety alert notification (highest priority).
+  ///
+  /// Critical alerts are NOT deduplicated -- they always fire immediately
+  /// because suppressing a life-safety alert could be fatal.
   Future<void> showSafetyCritical({
     required String message,
     String? sensorType,
   }) async {
-    if (!await areNotificationsEnabled()) return;
+    // CRITICAL: notifications_enabled preference is intentionally bypassed --
+    // a user toggling notifications off must never silence a hazard alert.
 
     final body = sensorType != null
         ? '🚨 CRITICAL - $sensorType: $message'
@@ -252,6 +306,8 @@ class NotificationService {
       isWarning: false,
     );
 
+    _markNotified('safety_critical');
+
     await _saveNotification(
       title: 'CRITICAL SAFETY ALERT',
       body: body,
@@ -264,6 +320,7 @@ class NotificationService {
     required String deviceName,
   }) async {
     if (!await areNotificationsEnabled()) return;
+    if (_isDuplicate('device_disconnected')) return;
 
     await _showNotification(
       id: deviceDisconnectedId,
@@ -271,6 +328,8 @@ class NotificationService {
       body: '$deviceName has been disconnected. Attempting to reconnect...',
       payload: 'device_disconnected:$deviceName',
     );
+
+    _markNotified('device_disconnected');
 
     await _saveNotification(
       title: 'Sensor Disconnected',
@@ -296,6 +355,8 @@ class NotificationService {
       icon: '@mipmap/ic_launcher',
       fullScreenIntent: true,
       category: AndroidNotificationCategory.alarm,
+      // PUBLIC visibility ensures notification text is visible on the lock
+      // screen, bypassing Android DND for safety-critical alerts.
       visibility: NotificationVisibility.public,
       enableVibration: true,
       vibrationPattern: isWarning
@@ -313,6 +374,7 @@ class NotificationService {
       presentBadge: true,
       presentSound: true,
       sound: 'default',
+      // InterruptionLevel.critical bypasses iOS Focus / DND for safety alerts.
       interruptionLevel: InterruptionLevel.critical,
     );
 
@@ -468,8 +530,9 @@ class NotificationService {
     await prefs.setInt('unread_notifications', current + 1);
   }
 
-  /// Clear unread count
+  /// Clear unread count (also resets [pendingNotificationCount]).
   Future<void> clearUnreadCount() async {
+    _pendingNotificationCount = 0;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt('unread_notifications', 0);
   }

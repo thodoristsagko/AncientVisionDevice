@@ -79,6 +79,36 @@ class AlertEscalationService {
   String _currentLevel = 'normal';
 
   // ---------------------------------------------------------------------------
+  // Rate limiting
+  // ---------------------------------------------------------------------------
+
+  /// Maximum one [update] call processed per second to prevent notification spam.
+  static const Duration _minUpdateInterval = Duration(seconds: 1);
+
+  /// Wall-clock time of the most recent [update] call that was processed.
+  DateTime? _lastUpdateTime;
+
+  // ---------------------------------------------------------------------------
+  // Same-level repeat escalation
+  // ---------------------------------------------------------------------------
+
+  /// Escalation level at the start of the current rapid-repeat window.
+  String? _repeatLevel;
+
+  /// Time at which the current rapid-repeat window started.
+  DateTime? _repeatWindowStart;
+
+  /// How many times the same alert level has fired in [_repeatWindowDuration].
+  int _repeatCount = 0;
+
+  /// Duration of the rapid-repeat escalation detection window.
+  static const Duration _repeatWindowDuration = Duration(seconds: 30);
+
+  /// Number of same-level fires within [_repeatWindowDuration] that auto-escalates
+  /// the alert to the next severity level.
+  static const int _repeatEscalationThreshold = 3;
+
+  // ---------------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------------
 
@@ -87,9 +117,51 @@ class AlertEscalationService {
   /// [isAnomaly] should be true when the current reading is classified as
   /// anomalous (what was previously passed straight to update()).
   ///
+  /// Rate-limited to at most 1 processed call per [_minUpdateInterval] to
+  /// prevent notification spam.  Calls within the cooldown are silently dropped
+  /// (returning the current [isCritical] state unchanged).
+  ///
+  /// Same-level repeat escalation: if the same alert level fires
+  /// [_repeatEscalationThreshold] times within [_repeatWindowDuration], the
+  /// service auto-escalates to the next severity level.
+  ///
   /// Returns true if the system should display CRITICAL escalation.
   bool update(bool isAnomaly) {
     final now = DateTime.now();
+
+    // Rate limiting: drop calls that arrive faster than once per second.
+    if (_lastUpdateTime != null &&
+        now.difference(_lastUpdateTime!) < _minUpdateInterval) {
+      return _criticalActive;
+    }
+    _lastUpdateTime = now;
+
+    // Same-level repeat escalation check.
+    final currentInputLevel = isAnomaly ? 'anomaly' : 'normal';
+    if (currentInputLevel == _repeatLevel) {
+      if (_repeatWindowStart != null &&
+          now.difference(_repeatWindowStart!) <= _repeatWindowDuration) {
+        _repeatCount++;
+        if (_repeatCount >= _repeatEscalationThreshold && !_criticalActive) {
+          // Same level fired >= threshold times in the window; force critical.
+          _criticalActive = true;
+          _recordTransition(_currentLevel, 'critical', now);
+          debugPrint(
+            '[EscalationService] CRITICAL forced by  rapid repeats '
+            'of level ',
+          );
+        }
+      } else {
+        // Window expired -- start a fresh window.
+        _repeatWindowStart = now;
+        _repeatCount = 1;
+      }
+    } else {
+      // Level changed -- reset repeat tracking.
+      _repeatLevel = currentInputLevel;
+      _repeatWindowStart = now;
+      _repeatCount = 1;
+    }
 
     if (isAnomaly) {
       // Cancel any pending de-escalation — anomaly is back.
@@ -210,6 +282,10 @@ class AlertEscalationService {
     _deEscalationPendingSince = null;
     _history.clear();
     _currentLevel = 'normal';
+    _lastUpdateTime = null;
+    _repeatLevel = null;
+    _repeatWindowStart = null;
+    _repeatCount = 0;
     debugPrint('[EscalationService] Session reset');
   }
 
