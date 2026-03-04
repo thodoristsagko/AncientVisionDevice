@@ -518,6 +518,50 @@ Use the share button to send exports via email, cloud storage, or other apps.
 
   // ========== FAQs ==========
   static const List<FAQItem> faqs = [
+    // --- Safety / Vibration FAQs ---
+    FAQItem(
+      question: 'What does PPV mean?',
+      answer: 'PPV stands for Peak Particle Velocity, measured in mm/s. It quantifies the maximum ground vibration speed at the sensor location. '
+          'DIN 4150-3 sets a limit of 0.3 mm/s for heritage and masonry buildings. Values above this indicate elevated risk to sensitive structures.',
+      category: HelpCategory.fieldwork,
+    ),
+    FAQItem(
+      question: 'What is the anomaly score?',
+      answer: 'The anomaly score is the reconstruction error produced by the on-device autoencoder ML model. '
+              'A score above 1.0 is considered unusual and warrants monitoring. '
+              'A score above 2.5 indicates a probable anomaly that may precede a soil failure event.',
+      category: HelpCategory.fieldwork,
+    ),
+    FAQItem(
+      question: 'Why is the device showing CAUTION?',
+      answer: 'CAUTION is triggered when PPV is between 0.1 and 0.3 mm/s, or when the anomaly score is between 1.0 and 2.5. '
+              'This means vibration levels are elevated but not yet critical. '
+              'Continue monitoring and be prepared to evacuate if the level escalates to CRITICAL.',
+      category: HelpCategory.fieldwork,
+    ),
+    FAQItem(
+      question: 'How do I calibrate the sensor?',
+      answer: 'Go to Settings → Calibrate. Place the M5StickC device on a flat, stable surface away from vibration sources. '
+              'Keep it completely still for 30 seconds while calibration runs. '
+              'The app establishes a noise baseline, which improves anomaly detection accuracy.',
+      category: HelpCategory.fieldwork,
+    ),
+    FAQItem(
+      question: 'What are soil creep and crack propagation patterns?',
+      answer: 'These are pre-failure stress signatures detected by the ML precursor classifier:\n\n'
+              '• Soil creep: slow, continuous micro-displacement of soil grains under gravity. Indicates gradual slope instability.\n'
+              '• Crack propagation: rapid micro-fracturing events in the soil or rock mass. These short bursts of high-frequency energy can escalate to collapse.\n\n'
+              'Both patterns are precursor indicators — they appear before a visible failure occurs.',
+      category: HelpCategory.fieldwork,
+    ),
+    FAQItem(
+      question: 'What action should I take on a CRITICAL alert?',
+      answer: 'Immediately evacuate all personnel from the excavation area. '
+              'Do not re-enter until the site supervisor or a geotechnical engineer has assessed the hazard. '
+              'Note the PPV value, anomaly score, and time of the alert for the incident report.',
+      category: HelpCategory.fieldwork,
+    ),
+    // --- General FAQs ---
     FAQItem(
       question: 'Does the app work without internet?',
       answer: 'Yes! All core features work offline. Data syncs automatically when you reconnect. Cloud 3D processing is the only feature that requires internet.',

@@ -247,28 +247,315 @@ class _HelpScreenState extends State<HelpScreen> with SingleTickerProviderStateM
         ? TutorialService.helpArticles
         : _tutorialService.searchArticles(_searchQuery);
 
-    if (articles.isEmpty) {
-      return _buildEmptySearch();
-    }
-
     // Group by category
     final grouped = <HelpCategory, List<HelpArticle>>{};
     for (final article in articles) {
       grouped.putIfAbsent(article.category, () => []).add(article);
     }
 
+    final articleSection = grouped.entries.map<Widget>((entry) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildCategoryHeader(entry.key),
+          ...entry.value.map((article) => _buildArticleCard(article)),
+          const SizedBox(height: 16),
+        ],
+      );
+    }).toList();
+
+    if (articles.isEmpty && _searchQuery.isNotEmpty) {
+      return _buildEmptySearch();
+    }
+
     return ListView(
       padding: const EdgeInsets.symmetric(horizontal: 16),
-      children: grouped.entries.map((entry) {
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _buildCategoryHeader(entry.key),
-            ...entry.value.map((article) => _buildArticleCard(article)),
-            const SizedBox(height: 16),
-          ],
-        );
-      }).toList(),
+      children: [
+        // Quick Start guide — always shown (not filtered)
+        if (_searchQuery.isEmpty) ...[
+          _buildSectionTitle('Quick Start'),
+          _buildQuickStartGuide(),
+          const SizedBox(height: 16),
+          _buildSectionTitle('Safety Thresholds'),
+          _buildSafetyThresholdsCard(),
+          const SizedBox(height: 16),
+        ],
+
+        // Help articles (filtered or all)
+        ...articleSection,
+
+        // Contact / Support section at bottom
+        if (_searchQuery.isEmpty) ...[
+          _buildSectionTitle('Support & Contact'),
+          _buildContactSection(),
+          const SizedBox(height: 24),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildQuickStartGuide() {
+    final steps = [
+      (
+        '1',
+        'Turn on M5StickC and pair via BLE',
+        'Hold the power button until the screen lights up. Open the app and tap the Bluetooth icon to scan for the device.',
+        Icons.bluetooth_searching,
+      ),
+      (
+        '2',
+        'Place device at the monitoring point',
+        'Set the M5StickC on a stable, flat surface close to the excavation area. Avoid loose soil or surfaces that vibrate independently.',
+        Icons.place,
+      ),
+      (
+        '3',
+        'Calibrate (device must be still)',
+        'Go to Settings → Calibrate. Keep the device motionless for 30 seconds. This establishes the noise floor for accurate anomaly detection.',
+        Icons.tune,
+      ),
+      (
+        '4',
+        'Monitor PPV and anomaly level',
+        'Watch the Safety screen. Green = SAFE (<0.3 mm/s). Amber = CAUTION. Red = CRITICAL. The anomaly score shows ML-detected patterns.',
+        Icons.monitor_heart,
+      ),
+      (
+        '5',
+        'CRITICAL alert — evacuate immediately',
+        'If the device shows CRITICAL, all personnel must leave the excavation zone without delay. Contact the site supervisor before re-entry.',
+        Icons.warning_amber_rounded,
+      ),
+    ];
+
+    return Container(
+      padding: AppSpacing.cardPadding,
+      decoration: AppDecorations.card,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: steps.map((step) {
+          final isLast = step.$1 == '5';
+          final isWarning = step.$1 == '5';
+          return Padding(
+            padding: const EdgeInsets.only(bottom: AppSpacing.md),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Step number badge
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: isWarning
+                        ? AppColors.error.withAlpha(40)
+                        : AppColors.accent.withAlpha(40),
+                    shape: BoxShape.circle,
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    step.$1,
+                    style: TextStyle(
+                      color: isWarning ? AppColors.error : AppColors.accent,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: AppSpacing.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            step.$4,
+                            size: 16,
+                            color: isWarning ? AppColors.error : AppColors.accent,
+                          ),
+                          const SizedBox(width: AppSpacing.xs),
+                          Expanded(
+                            child: Text(
+                              step.$2,
+                              style: AppTextStyles.bodySmall
+                                  .copyWith(fontWeight: FontWeight.bold),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: AppSpacing.xs),
+                      Text(
+                        step.$3,
+                        style: AppTextStyles.caption.copyWith(height: 1.4),
+                      ),
+                      if (!isLast)
+                        const Padding(
+                          padding: EdgeInsets.only(top: AppSpacing.md),
+                          child: Divider(color: AppColors.cardBorder, height: 1),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildSafetyThresholdsCard() {
+    final thresholds = [
+      (
+        '0 – 0.3 mm/s',
+        'SAFE',
+        'DIN 4150-3 heritage buildings limit. Normal monitoring continues.',
+        AppColors.success,
+        Icons.check_circle_outline,
+      ),
+      (
+        '0.3 – 1.0 mm/s',
+        'CAUTION',
+        'Elevated risk. Increased monitoring frequency. Prepare for possible evacuation.',
+        AppColors.warning,
+        Icons.warning_amber_outlined,
+      ),
+      (
+        '> 1.0 mm/s',
+        'CRITICAL',
+        'Immediate action required. Evacuate all personnel. Notify site supervisor.',
+        AppColors.error,
+        Icons.crisis_alert,
+      ),
+    ];
+
+    return Container(
+      padding: AppSpacing.cardPadding,
+      decoration: AppDecorations.card,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.speed, color: AppColors.accent, size: AppSizes.iconMedium),
+              SizedBox(width: AppSpacing.sm),
+              Text(
+                'PPV Reference — DIN 4150-3 Heritage Buildings',
+                style: AppTextStyles.subtitleSmall,
+              ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.md),
+          ...thresholds.map((t) => Container(
+            margin: const EdgeInsets.only(bottom: AppSpacing.sm),
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.md,
+              vertical: AppSpacing.sm,
+            ),
+            decoration: BoxDecoration(
+              color: t.$4.withAlpha(25),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: t.$4.withAlpha(80)),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(t.$5, color: t.$4, size: 20),
+                const SizedBox(width: AppSpacing.sm),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text(
+                            t.$2,
+                            style: AppTextStyles.body.copyWith(
+                              color: t.$4,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(width: AppSpacing.sm),
+                          Text(t.$1, style: AppTextStyles.caption),
+                        ],
+                      ),
+                      const SizedBox(height: 2),
+                      Text(t.$3, style: AppTextStyles.caption.copyWith(height: 1.4)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          )),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildContactSection() {
+    return Container(
+      padding: AppSpacing.cardPadding,
+      decoration: AppDecorations.card,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.support_agent, color: AppColors.accent, size: AppSizes.iconMedium),
+              SizedBox(width: AppSpacing.sm),
+              Text('Field Support', style: AppTextStyles.h4),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.md),
+          AppWidgets.divider(),
+          const SizedBox(height: AppSpacing.md),
+          _buildContactRow(
+            Icons.email_outlined,
+            'Technical Issues',
+            'Report sensor or app problems to your site supervisor or the AncientVision project coordinator.',
+          ),
+          const SizedBox(height: AppSpacing.md),
+          _buildContactRow(
+            Icons.emergency_outlined,
+            'Safety Emergency',
+            'In case of a CRITICAL alert or observed soil movement, evacuate immediately and call emergency services.',
+          ),
+          const SizedBox(height: AppSpacing.md),
+          _buildContactRow(
+            Icons.bug_report_outlined,
+            'Bug Reports',
+            'Use the export function to save a session log and send it to the development team for diagnosis.',
+          ),
+          const SizedBox(height: AppSpacing.lg),
+          const Center(
+            child: Text(
+              'AncientVision v1.0.0 — Team Thodoris / FLL 2025-2026',
+              style: AppTextStyles.caption,
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildContactRow(IconData icon, String label, String detail) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, color: AppColors.textSecondary, size: AppSizes.iconMedium),
+        const SizedBox(width: AppSpacing.md),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label, style: AppTextStyles.body.copyWith(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 2),
+              Text(detail, style: AppTextStyles.caption.copyWith(height: 1.4)),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
