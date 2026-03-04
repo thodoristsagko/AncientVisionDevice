@@ -534,6 +534,16 @@ class _QuickCaptureScreenState extends State<QuickCaptureScreen> {
                           color: Colors.white.withAlpha(180),
                         ),
                       ),
+                      if (_gpsAccuracyLabel().isNotEmpty) ...[
+                        const SizedBox(width: 4),
+                        Text(
+                          _gpsAccuracyLabel(),
+                          style: AppTextStyles.caption.copyWith(
+                            color: _gpsAccuracyColor(),
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
                     ],
                   ),
               ],
@@ -1070,6 +1080,14 @@ class _QuickCaptureScreenState extends State<QuickCaptureScreen> {
         _quickNoteController.clear();
       }
 
+      // Get file size for feedback
+      String sizeLabel = '';
+      try {
+        final bytes = await File(photo.path).length();
+        final mb = bytes / (1024 * 1024);
+        sizeLabel = '${mb.toStringAsFixed(1)} MB';
+      } catch (_) {}
+
       setState(() {
         _capturedPhoto = photo;
         _vibrationSnapshot = snapshot;
@@ -1078,11 +1096,51 @@ class _QuickCaptureScreenState extends State<QuickCaptureScreen> {
         // Show CRITICAL banner if anomaly reached critical level
         if (isCritical) _showCriticalBanner = true;
       });
+
+      // Show brief feedback SnackBar
+      if (mounted) {
+        final gpsAccStr = _gpsAccuracyLabel();
+        final vibLabel = snapshot.levelLabel;
+        final parts = <String>[];
+        if (sizeLabel.isNotEmpty) parts.add('Photo saved ($sizeLabel)');
+        if (gpsAccStr.isNotEmpty) parts.add('GPS $gpsAccStr');
+        parts.add('Vibration: $vibLabel');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(parts.join(' • ')),
+            duration: const Duration(seconds: 2),
+            backgroundColor: AppColors.cardBackground,
+          ),
+        );
+      }
     } catch (e) {
       debugPrint('Error capturing photo: $e');
       setState(() => _isCapturing = false);
       HapticFeedback.heavyImpact();
     }
+  }
+
+  /// Returns a formatted GPS accuracy string (e.g. "±5m") or empty string.
+  String _gpsAccuracyLabel() {
+    if (_gpsLocation != null) {
+      final acc = _gpsLocation!.accuracy;
+      return '±${acc.toStringAsFixed(0)}m';
+    }
+    if (_currentPosition != null) {
+      final acc = _currentPosition!.accuracy;
+      return '±${acc.toStringAsFixed(0)}m';
+    }
+    return '';
+  }
+
+  /// Returns color for GPS accuracy: green <10m, amber 10-50m, red >50m.
+  Color _gpsAccuracyColor() {
+    double acc = double.infinity;
+    if (_gpsLocation != null) acc = _gpsLocation!.accuracy;
+    else if (_currentPosition != null) acc = _currentPosition!.accuracy;
+    if (acc < 10) return AppColors.success;
+    if (acc <= 50) return AppColors.warning;
+    return AppColors.error;
   }
 
   void _toggleFlash() async {

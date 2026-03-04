@@ -1013,6 +1013,7 @@ class HeroToolCard extends StatelessWidget {
   final String subtitle;
   final String statusLabel;
   final Color statusColor;
+  final String? lastUsedLabel;
   final VoidCallback onTap;
 
   const HeroToolCard({
@@ -1023,6 +1024,7 @@ class HeroToolCard extends StatelessWidget {
     required this.subtitle,
     required this.statusLabel,
     required this.statusColor,
+    this.lastUsedLabel,
     required this.onTap,
   });
 
@@ -1067,6 +1069,12 @@ class HeroToolCard extends StatelessWidget {
                   Text(subtitle,
                       style: TextStyle(
                           color: Colors.white.withAlpha(160), fontSize: 12)),
+                  if (lastUsedLabel != null) ...[
+                    const SizedBox(height: 3),
+                    Text(lastUsedLabel!,
+                        style: TextStyle(
+                            color: Colors.white.withAlpha(100), fontSize: 10)),
+                  ],
                 ],
               ),
             ),
@@ -1095,6 +1103,7 @@ class ToolCard extends StatelessWidget {
   final String title;
   final String description;
   final String? badge;
+  final String? lastUsedLabel;
   final Color color;
   final VoidCallback onTap;
 
@@ -1104,6 +1113,7 @@ class ToolCard extends StatelessWidget {
     required this.title,
     required this.description,
     this.badge,
+    this.lastUsedLabel,
     required this.color,
     required this.onTap,
   });
@@ -1167,6 +1177,16 @@ class ToolCard extends StatelessWidget {
                 fontSize: 14,
               ),
             ),
+            if (lastUsedLabel != null) ...[
+              const SizedBox(height: 6),
+              Text(
+                lastUsedLabel!,
+                style: TextStyle(
+                  color: Colors.white.withAlpha(100),
+                  fontSize: 11,
+                ),
+              ),
+            ],
           ],
         ),
       ),
