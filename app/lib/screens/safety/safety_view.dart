@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:async';
 import 'dart:math' as math;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -23,7 +24,7 @@ import '../../utils/ble_parser.dart' show RawAccelReassembler;
 import '../vibration_event_log_screen.dart';
 import '../../main.dart' show AlertMetrics;
 import '../../services/translation_service.dart';
-import '../../services/alert_history_service.dart';
+import '../../services/alert_history_service.dart' as ahs;
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../../services/session_export_service.dart';
 import '../../services/calibration_progress_service.dart';
@@ -72,7 +73,7 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
   bool _isConnecting = false;
   String _connectionStatus = 'Disconnected';
   int? _lastRssi;
-  final _alertHistory = AlertHistoryService();
+  final _alertHistory = ahs.AlertHistoryService();
   DateTime? _lastHistoryLogTime;
 
   double _accX = 0.0, _accY = 0.0, _accZ = 0.0;
@@ -284,6 +285,9 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
     DeviceMemoryService.instance.getLastDeviceId().then((id) {
       if (mounted) _lastDeviceId = id;
     });
+    // Record app start time for DiagnosticsScreen uptime tracking
+    SharedPreferences.getInstance().then((p) =>
+        p.setInt('app_start_time', DateTime.now().millisecondsSinceEpoch));
     // Throttled UI refresh: max 2 repaints/sec to prevent flickering
     _uiRefreshTimer = Timer.periodic(const Duration(milliseconds: 1000), (_) {
       if (_uiDirty && mounted) {
@@ -555,6 +559,9 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
       final deviceName = device.platformName.isNotEmpty ? device.platformName : deviceId;
       DeviceMemoryService.instance.saveDevice(id: deviceId, name: deviceName);
       if (mounted) setState(() => _lastDeviceHint = deviceName);
+      // Persist last device name for DiagnosticsScreen (fire-and-forget)
+      SharedPreferences.getInstance().then((p) =>
+          p.setString('last_device_name', deviceName));
 
       _dspService.reset();
       _rawAccelReassembler.reset();
@@ -1097,6 +1104,17 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
             'timestamp': DateTime.now().toIso8601String(),
           });
 
+          // Persist firmware diagnostic fields for DiagnosticsScreen (fire-and-forget)
+          SharedPreferences.getInstance().then((p) {
+            p.setString('fw_version', data['fw']?.toString() ?? '');
+            p.setInt('seq', data['seq'] is int ? data['seq'] as int : 0);
+            p.setInt('boots', data['boots'] is int ? data['boots'] as int : 0);
+            p.setBool('gain', data['gain'] is bool ? data['gain'] as bool : false);
+            p.setBool('cal', data['cal'] is bool ? data['cal'] as bool : false);
+            p.setDouble('tmp', data['tmp'] is num ? (data['tmp'] as num).toDouble() : 0.0);
+            p.setString('uptime', _formatUptime(data['up'] is int ? data['up'] as int : 0));
+          });
+
           debugPrint('>>> VIBRATION v4.0: PPV=${_ppv}mm/s Freq=${_dominantFreq}Hz Crest=$_crestFactor Kurt=$_kurtosis STA/LTA=$_staLtaRatio Arias=$_arias CAV=$_cav Temp=${_temp}C DWT=[$_dwt1,$_dwt2,$_dwt3] History=${_ppvHistory.length} pts ML=${_lastAnomalyResult.levelLabel}');
         } else if (charUuid.endsWith('26a9') || charUuid.contains('b26a9')) {
           // Moisture characteristic (also includes vibration for reliability)
@@ -1563,7 +1581,7 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
               ),
               const Divider(color: Colors.white12),
               Expanded(
-                child: FutureBuilder<List<Map<String, dynamic>>>(
+                child: FutureBuilder<List<ahs.AlertData>>(
                   future: _alertHistory.load(),
                   builder: (_, snap) {
                     if (!snap.hasData) return const Center(child: CircularProgressIndicator(color: Color(0xFFFFC107)));
@@ -1576,19 +1594,17 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
                       itemCount: entries.length,
                       itemBuilder: (_, i) {
                         final e = entries[i];
-                        final ts = DateTime.tryParse(e['timestamp'] ?? '');
-                        final diff = ts != null ? DateTime.now().difference(ts) : null;
-                        final ago = diff == null ? '' :
-                            diff.inMinutes < 1 ? 'just now' :
+                        final diff = DateTime.now().difference(e.timestamp);
+                        final ago = diff.inMinutes < 1 ? 'just now' :
                             diff.inHours < 1 ? '${diff.inMinutes}m ago' :
                             diff.inDays < 1 ? '${diff.inHours}h ago' :
                             '${diff.inDays}d ago';
-                        final isCritical = e['level'] == 'critical';
+                        final isCritical = e.level == 'critical';
                         return ListTile(
                           leading: Icon(Icons.warning_rounded,
                               color: isCritical ? Colors.red : const Color(0xFFFFC107)),
-                          title: Text(e['message'] ?? '', style: const TextStyle(color: Colors.white, fontSize: 13)),
-                          subtitle: Text('${e['type']} · ${((e['ppv'] as num?) ?? 0).toStringAsFixed(2)} mm/s',
+                          title: Text(e.message, style: const TextStyle(color: Colors.white, fontSize: 13)),
+                          subtitle: Text('${e.type} · ${e.ppv.toStringAsFixed(2)} mm/s',
                               style: const TextStyle(color: Colors.white54, fontSize: 11)),
                           trailing: Text(ago, style: const TextStyle(color: Colors.white38, fontSize: 11)),
                         );
@@ -1796,6 +1812,13 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
 
   String _formatTime(DateTime dt) {
     return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  String _formatUptime(int seconds) {
+    final h = seconds ~/ 3600;
+    final m = (seconds % 3600) ~/ 60;
+    final s = seconds % 60;
+    return '${h}h ${m}m ${s}s';
   }
 
   void _showError(String message) {
@@ -2030,12 +2053,12 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
                   width: double.infinity,
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
                   color: Colors.orange.withAlpha(220),
-                  child: Row(
+                  child: const Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(Icons.cloud_off_rounded, color: Colors.white, size: 16),
-                      const SizedBox(width: 8),
-                      const Text(
+                      Icon(Icons.cloud_off_rounded, color: Colors.white, size: 16),
+                      SizedBox(width: 8),
+                      Text(
                         'Offline — data not syncing',
                         style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
                       ),
@@ -2321,7 +2344,7 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
   /// Build STATUS tab - most important, shown first
   Widget _buildStatusTab(bool isConnected) {
     // P59: Check if anomaly has been sustained >15s → escalate display to CRITICAL
-    final bool _isEscalatedCritical = _anomalySince != null &&
+    final bool isEscalatedCritical = _anomalySince != null &&
         DateTime.now().difference(_anomalySince!).inSeconds > 15;
 
     return SingleChildScrollView(
@@ -2330,7 +2353,7 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // P59: Escalation banner — shown when anomaly sustained >15s
-          if (_isEscalatedCritical) ...[
+          if (isEscalatedCritical) ...[
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
