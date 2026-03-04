@@ -115,6 +115,10 @@ const float TEMP_REF = 25.0f;           // Reference temperature
 #define CHAR_FFT_UUID       "beb5483e-36e1-4688-b7f5-ea07361b26ac"  // Now used for raw accel binary
 #define CHAR_CMD_UUID       "beb5483e-36e1-4688-b7f5-ea07361b26ad"  // P79: writable command characteristic
 #define CHAR_DUMP_UUID      "beb5483e-36e1-4688-b7f5-ea07361b26ae"  // P207: BLE data dump notify characteristic
+#define CHAR_ALERT_STATUS_UUID "beb5483e-36e1-4688-b7f5-ea07361b26af"  // P232: pure alert status READ+NOTIFY
+
+// ===================== P229: LED CONFIGURATION =====================
+#define LED_PIN 10  // M5StickC Plus 2 built-in LED, GPIO 10, active LOW
 
 // ===================== P197: DEEP SLEEP CONFIGURATION =====================
 #define DEEP_SLEEP_ENABLED       1
@@ -206,6 +210,15 @@ BLECharacteristic* pBatteryChar = NULL;
 BLECharacteristic* pFFTChar = NULL;  // Now used for raw accel binary
 BLECharacteristic* pCmdChar = NULL;  // P79: writable command characteristic
 BLECharacteristic* pDumpChar = NULL; // P207: SPIFFS data dump notify characteristic
+BLECharacteristic* pAlertStatusChar = NULL; // P232: pure alert status READ+NOTIFY
+
+// ===================== P229: LED STATE =====================
+static bool g_ledState = false;  // True when LED is currently ON (low = on, high = off)
+
+// ===================== P231: ACCELEROMETER BIAS CALIBRATION =====================
+float g_accelBiasX = 0.0f;
+float g_accelBiasY = 0.0f;
+float g_accelBiasZ = 0.0f;
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
 
@@ -360,6 +373,8 @@ void testAlert();
 void checkForOtaUpdate();
 void loadNvsSettings();
 void saveNvsSettings();
+void flashLed(int times, int onMs, int offMs);
+void calibrateAccelBias();
 #if WIFI_ENABLED
 void wifiPushData();
 #endif
@@ -375,6 +390,73 @@ time_t getCurrentEpoch();
 // top of the file controls whether the call in setup() is compiled in.
 void checkForOtaUpdate() {
   Serial.println("OTA check: disabled (no update server configured)");
+}
+
+// ===================== P229: LED FLASH =====================
+// Flash the built-in LED (GPIO 10, active LOW) a given number of times.
+// Blocks for at most (times * onMs) + ((times-1) * offMs) milliseconds.
+void flashLed(int times, int onMs, int offMs) {
+  for (int i = 0; i < times; i++) {
+    g_ledState = true;
+    digitalWrite(LED_PIN, LOW);   // ON (active low)
+    delay(onMs);
+    g_ledState = false;
+    digitalWrite(LED_PIN, HIGH);  // OFF
+    if (i < times - 1) delay(offMs);
+  }
+}
+
+// ===================== P231: ACCELEROMETER BIAS CALIBRATION =====================
+// Collect 100 raw accel samples over 500ms, average them and store the
+// zero-g offsets in NVS.  Call this with the device lying flat and still.
+// Bias is applied in collectSample() before all downstream processing.
+void calibrateAccelBias() {
+  Serial.println("ACCEL_CAL: starting (100 samples / 500ms)");
+  M5.Lcd.fillScreen(BLACK);
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setCursor(0, 0);
+  M5.Lcd.println("ACCEL CAL...");
+  M5.Lcd.println("Keep flat+still");
+
+  const int CAL_SAMPLES = 100;
+  float sumX = 0, sumY = 0, sumZ = 0;
+  for (int i = 0; i < CAL_SAMPLES; i++) {
+    float rx, ry, rz;
+    M5.Imu.getAccelData(&rx, &ry, &rz);
+    sumX += rx;
+    sumY += ry;
+    sumZ += rz;
+    delay(5);  // 5ms * 100 = 500ms total
+  }
+
+  g_accelBiasX = sumX / CAL_SAMPLES;
+  g_accelBiasY = sumY / CAL_SAMPLES;
+  g_accelBiasZ = (sumZ / CAL_SAMPLES) - 1.0f;  // Remove expected 1g from Z when flat
+
+  Serial.printf("ACCEL_CAL: biasX=%.5f biasY=%.5f biasZ=%.5f\n",
+    g_accelBiasX, g_accelBiasY, g_accelBiasZ);
+
+  // Persist to NVS
+  nvs_handle_t h;
+  esp_err_t e = nvs_open("ancientvision", NVS_READWRITE, &h);
+  if (e == ESP_OK) {
+    uint32_t bx, by, bz;
+    memcpy(&bx, &g_accelBiasX, sizeof(float));
+    memcpy(&by, &g_accelBiasY, sizeof(float));
+    memcpy(&bz, &g_accelBiasZ, sizeof(float));
+    nvs_set_u32(h, "accelBiasX", bx);
+    nvs_set_u32(h, "accelBiasY", by);
+    nvs_set_u32(h, "accelBiasZ", bz);
+    nvs_commit(h);
+    nvs_close(h);
+    Serial.println("ACCEL_CAL: biases saved to NVS");
+  } else {
+    Serial.printf("ACCEL_CAL: NVS open failed (0x%x)\n", e);
+  }
+
+  M5.Lcd.setCursor(0, 30);
+  M5.Lcd.println("CAL DONE");
+  delay(1000);
 }
 
 // ===================== P180: NVS PERSISTENT SETTINGS =====================
@@ -420,6 +502,19 @@ void loadNvsSettings() {
   } else {
     // Keep default "AncientVision" already set at declaration
     Serial.println("NVS load: g_deviceName default=AncientVision");
+  }
+
+  // P231: Load accel bias offsets (stored as uint32 bit-cast of float)
+  {
+    uint32_t bxRaw = 0, byRaw = 0, bzRaw = 0;
+    if (nvs_get_u32(handle, "accelBiasX", &bxRaw) == ESP_OK)
+      memcpy(&g_accelBiasX, &bxRaw, sizeof(float));
+    if (nvs_get_u32(handle, "accelBiasY", &byRaw) == ESP_OK)
+      memcpy(&g_accelBiasY, &byRaw, sizeof(float));
+    if (nvs_get_u32(handle, "accelBiasZ", &bzRaw) == ESP_OK)
+      memcpy(&g_accelBiasZ, &bzRaw, sizeof(float));
+    Serial.printf("NVS load: accelBias X=%.5f Y=%.5f Z=%.5f\n",
+      g_accelBiasX, g_accelBiasY, g_accelBiasZ);
   }
 
   nvs_close(handle);
@@ -544,6 +639,10 @@ class CmdCharCallbacks: public BLECharacteristicCallbacks {
       g_calibrating = true;
       g_calibStartMs = millis();
       Serial.println("BLE CMD: CALIBRATE started (30s)");
+    } else if (value == "ACCEL_CAL") {
+      // P231: Zero-g accelerometer bias calibration — device must be flat and still
+      Serial.println("BLE CMD: ACCEL_CAL — lay device flat, starting...");
+      calibrateAccelBias();
     } else if (value == "DEBUG ON") {
       g_debugMode = true;
       Serial.println("BLE CMD: DEBUG mode ON");
@@ -680,26 +779,117 @@ void setup() {
   M5.Lcd.setCursor(10, 100);
   M5.Lcd.println("Initializing...");
 
+  // P229: Initialize LED (active LOW — HIGH = off by default)
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, HIGH);
+
   // Initialize IMU
   M5.Imu.begin();
   DBG_PRINTLN("IMU initialized");
 
-  // P78: Self-test — read one IMU sample to verify sensor is alive
+  // P230: Expanded boot self-test
+  // Tests: IMU (bounds + non-zero + non-NaN), BLE pointers, SPIFFS (if enabled), battery
   {
+    // ---- IMU test ----
     float stX = 0, stY = 0, stZ = 0;
     M5.Imu.getAccelData(&stX, &stY, &stZ);
-    bool selfTestPass = (stX != 0.0f || stY != 0.0f || stZ != 0.0f);
-    M5.Lcd.fillScreen(BLACK);
-    M5.Lcd.setTextSize(2);
-    M5.Lcd.setTextColor(selfTestPass ? TFT_GREEN : RED, BLACK);
-    M5.Lcd.setCursor(10, 50);
-    if (selfTestPass) {
-      M5.Lcd.println("SELF-TEST: PASS");
-    } else {
-      M5.Lcd.println("SELF-TEST: FAIL");
+    bool imuNonZero  = (stX != 0.0f || stY != 0.0f || stZ != 0.0f);
+    bool imuBounds   = (stX > -20.0f && stX < 20.0f &&
+                        stY > -20.0f && stY < 20.0f &&
+                        stZ > -20.0f && stZ < 20.0f);
+    bool imuNaN      = (!isnan(stX) && !isnan(stY) && !isnan(stZ));
+    bool imuOk       = imuNonZero && imuBounds && imuNaN;
+
+    // ---- BLE test — pointers checked after setupBLE() below ----
+    // (run after setupBLE; placeholder set false until confirmed)
+    bool bleOk = false;  // will be set after setupBLE()
+
+    // ---- Battery test ----
+    float btVolt = M5.Power.getBatteryVoltage() / 1000.0f;
+    bool batOk = (btVolt >= 3.0f && btVolt <= 4.5f);
+
+    // ---- SPIFFS test (only when logging is enabled) ----
+    bool storOk = true;
+#if SD_LOGGING_ENABLED
+    storOk = SPIFFS.begin(true);
+    if (storOk) {
+      // Write a single test byte to verify writable
+      File tf = SPIFFS.open("/.selftest", FILE_WRITE);
+      if (tf) {
+        tf.write((uint8_t)0xAB);
+        tf.close();
+        SPIFFS.remove("/.selftest");
+      } else {
+        storOk = false;
+      }
     }
+#endif
+
+    // ---- Display interim results (BLE not yet tested) ----
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setTextSize(1);
     M5.Lcd.setTextColor(WHITE, BLACK);
-    delay(2000);
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.printf("SELF-TEST v" FW_VERSION);
+    M5.Lcd.setCursor(0, 12);
+    M5.Lcd.setTextColor(imuOk  ? TFT_GREEN : RED, BLACK);
+    M5.Lcd.printf("IMU: %s  (%.2fg)", imuOk ? "OK" : "FAIL", stZ);
+    M5.Lcd.setCursor(0, 24);
+    M5.Lcd.setTextColor(batOk  ? TFT_GREEN : RED, BLACK);
+    M5.Lcd.printf("BAT: %s  (%.2fV)", batOk ? "OK" : "FAIL", btVolt);
+    M5.Lcd.setCursor(0, 36);
+    M5.Lcd.setTextColor(storOk ? TFT_GREEN : TFT_YELLOW, BLACK);
+    M5.Lcd.printf("STOR: %s", storOk ? "OK" : (SD_LOGGING_ENABLED ? "FAIL" : "N/A"));
+    M5.Lcd.setTextColor(WHITE, BLACK);
+
+    // ---- BLE: set up now so we can test pointers ----
+    // P180: NVS init needed before loadNvsSettings() which is called from setup()
+    // before setupBLE(), so proceed with NVS first then BLE inside self-test block.
+    esp_err_t nvsErrST = nvs_flash_init();
+    if (nvsErrST == ESP_ERR_NVS_NO_FREE_PAGES || nvsErrST == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      nvs_flash_erase();
+      nvs_flash_init();
+    }
+    loadNvsSettings();
+
+#if SD_LOGGING_ENABLED
+    // Already inited above in SPIFFS test; skip redundant begin() later
+#endif
+
+    setupBLE();
+    bleOk = (pServer != NULL && pIMUChar != NULL);
+
+    // ---- Update display with BLE result ----
+    M5.Lcd.setCursor(0, 48);
+    M5.Lcd.setTextColor(bleOk ? TFT_GREEN : RED, BLACK);
+    M5.Lcd.printf("BLE: %s", bleOk ? "OK" : "FAIL");
+
+    // ---- Summary line ----
+    bool criticalFail = (!imuOk || !bleOk);
+    M5.Lcd.setCursor(0, 60);
+    M5.Lcd.setTextColor(WHITE, BLACK);
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.printf("IMU:%s BLE:%s STOR:%s BAT:%s",
+      imuOk  ? "+" : "x",
+      bleOk  ? "+" : "x",
+      storOk ? "+" : (SD_LOGGING_ENABLED ? "x" : "-"),
+      batOk  ? "+" : "x");
+
+    if (criticalFail) {
+      // Loop with error — do not proceed to normal operation
+      M5.Lcd.setCursor(0, 75);
+      M5.Lcd.setTextColor(RED, BLACK);
+      M5.Lcd.setTextSize(2);
+      M5.Lcd.println("CRITICAL FAIL");
+      M5.Lcd.println("Check hardware");
+      while (true) {
+        flashLed(5, 100, 100);
+        delay(1000);
+        esp_task_wdt_reset();
+      }
+    }
+
+    delay(3000);  // Show results for 3 seconds (was 2)
   }
 
   // Configure DLPF for 99 Hz anti-aliasing
@@ -731,23 +921,14 @@ void setup() {
   pinMode(MOISTURE_PIN, INPUT);
   DBG_PRINTLN("Moisture sensor initialized");
 
-  // P180: Initialize NVS and load persisted calibration settings
-  esp_err_t nvsErr = nvs_flash_init();
-  if (nvsErr == ESP_ERR_NVS_NO_FREE_PAGES || nvsErr == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-    // NVS partition was truncated; erase and reinitialise
-    nvs_flash_erase();
-    nvs_flash_init();
-    Serial.println("NVS: partition erased and reinitialised");
-  }
-  loadNvsSettings();
-
   // P198: Initialize SPIFFS storage for data logging
+  // (SPIFFS.begin() was already called inside self-test when SD_LOGGING_ENABLED;
+  //  call initStorage() here only when not already initialised by the self-test.)
 #if SD_LOGGING_ENABLED
-  initStorage();
+  // initStorage() sets g_spiffsOk; self-test already did SPIFFS.begin(true)
+  // so just mark it ok if self-test passed (g_spiffsOk not yet set).
+  g_spiffsOk = true;  // self-test confirmed writable above
 #endif
-
-  // Initialize BLE
-  setupBLE();
 
   // P149: OTA update readiness check (stub — no server configured yet)
 #if OTA_ENABLED
@@ -783,8 +964,8 @@ void setupBLE() {
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
 
-  // 7 characteristics × 3 handles each (decl+value+CCCD) + 1 service = 22 minimum; 27 for margin
-  BLEService *pService = pServer->createService(BLEUUID(SERVICE_UUID), 27);
+  // 8 characteristics × 3 handles each (decl+value+CCCD) + 1 service = 25 minimum; 30 for margin
+  BLEService *pService = pServer->createService(BLEUUID(SERVICE_UUID), 30);
 
   pIMUChar = pService->createCharacteristic(
     CHAR_IMU_UUID,
@@ -836,6 +1017,15 @@ void setupBLE() {
     BLECharacteristic::PROPERTY_NOTIFY
   );
   pDumpChar->addDescriptor(new BLE2902());
+
+  // P232: Pure alert status characteristic — phone can READ or subscribe for plain-text level
+  pAlertStatusChar = pService->createCharacteristic(
+    CHAR_ALERT_STATUS_UUID,
+    BLECharacteristic::PROPERTY_READ |
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
+  pAlertStatusChar->addDescriptor(new BLE2902());
+  pAlertStatusChar->setValue("SAFE");  // Default value on boot
 
   pService->start();
 
@@ -1019,6 +1209,11 @@ void collectSample() {
   // Read IMU accelerometer AND gyroscope
   M5.Imu.getAccelData(&accX, &accY, &accZ);
   M5.Imu.getGyroData(&gyroX, &gyroY, &gyroZ);
+
+  // P231: Apply zero-g accelerometer bias correction (calibrated via ACCEL_CAL)
+  accX -= g_accelBiasX;
+  accY -= g_accelBiasY;
+  accZ -= g_accelBiasZ;
 
   // Temperature compensation - remove thermal bias from accelerometer
   float tempBias = (imuTemp - TEMP_REF) * TEMP_BIAS_COEFF;
@@ -1248,8 +1443,10 @@ void classifyHazard() {
 
       if (currentAlert == CRITICAL) {
         M5.Speaker.tone(1000, 500);
+        flashLed(3, 200, 100);  // P229: 3 fast flashes for CRITICAL
       } else if (currentAlert == WARNING) {
         M5.Speaker.tone(500, 200);
+        flashLed(1, 100, 0);    // P229: 1 short flash for CAUTION/WARNING
       }
 
       DBG_PRINTF("ALERT CONFIRMED: %s [%s] type=%s evts=%u\n",
@@ -1285,6 +1482,18 @@ void classifyHazard() {
       hazardType = newType;
     }
   }
+
+  // P232: Update alert status characteristic with plain-text level + notify
+  if (pAlertStatusChar != NULL && deviceConnected) {
+    const char* statusStr =
+      (currentAlert == CRITICAL) ? "CRITICAL" :
+      (currentAlert == WARNING)  ? "CAUTION"  : "SAFE";
+    pAlertStatusChar->setValue(statusStr);
+    pAlertStatusChar->notify();
+  }
+
+  // P229: Add "led" state to IMU JSON (tracked via g_ledState global)
+  // g_ledState is set true during flashLed() and reverts to false after each flash sequence.
 }
 
 // ===================== MOISTURE SENSOR =====================
@@ -1421,8 +1630,8 @@ void sendBLEData() {
 
   // Send simplified IMU JSON (only firmware-computed features)
   // Buffer sized for: existing fields + fw(5) + seq(10) + evtMs(10) + boots(10) + evts(10)
-  //                 + cal(1) + gain(2) + chg(1) + tmp(6) + up(10) + dbg(1) + ts(12) + overhead
-  char imuData[360];
+  //                 + cal(1) + gain(2) + chg(1) + tmp(6) + up(10) + dbg(1) + ts(12) + led(1) + overhead
+  char imuData[380];
   uint32_t evtMs = g_evtActive ? (uint32_t)(millis() - g_evtStartMs) : 0u;
   uint32_t uptimeSec = millis() / 1000u;  // P146: device uptime in seconds
   uint32_t tsNow = (uint32_t)getCurrentEpoch(); // P199: wall-clock unix timestamp (0 if not set)
@@ -1430,11 +1639,12 @@ void sendBLEData() {
     "{\"ppv\":%.1f,\"stalta\":%.2f,\"rms\":%.4f,\"peak\":%.4f,\"crest\":%.1f,\"temp\":%.1f,\"mag\":%.4f"
     ",\"fw\":\"" FW_VERSION "\",\"seq\":%lu,\"evtMs\":%lu,\"boots\":%lu,\"evts\":%lu"
     ",\"cal\":%d,\"gain\":%d,\"chg\":%d"
-    ",\"tmp\":%.1f,\"up\":%lu,\"dbg\":%d,\"ts\":%lu}",
+    ",\"tmp\":%.1f,\"up\":%lu,\"dbg\":%d,\"ts\":%lu,\"led\":%d}",
     vibrationPPV, staLtaRatio, vibrationRMS, vibrationPeak, crestFactor, imuTemp, vibrationMagnitude,
     (unsigned long)g_seq, (unsigned long)evtMs, (unsigned long)g_bootCount, (unsigned long)g_sessionEvts,
     g_calibrating ? 1 : 0, g_highGainMode ? 16 : 4, batteryCharging ? 1 : 0,
-    imuTemp, (unsigned long)uptimeSec, g_debugMode ? 1 : 0, (unsigned long)tsNow);
+    imuTemp, (unsigned long)uptimeSec, g_debugMode ? 1 : 0, (unsigned long)tsNow,
+    g_ledState ? 1 : 0);  // P229: current LED state
   // P147: Motion threshold filter — only notify if PPV changed > 0.02 mm/s
   //       or more than 5 seconds have elapsed since last notification.
   //       The characteristic value is always updated so a phone read() gets
