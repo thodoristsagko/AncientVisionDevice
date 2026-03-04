@@ -91,7 +91,7 @@ class TestAggregate:
             _row("2026-03-01T11:00:00Z", ppv=0.2),
             _row("2026-03-02T09:00:00Z", ppv=0.3),
         ]
-        buckets = aggregate(rows, "daily")
+        buckets, _, _ = aggregate(rows, "daily")
         assert len(buckets) == 2
         assert "2026-03-01" in buckets
         assert "2026-03-02" in buckets
@@ -104,7 +104,7 @@ class TestAggregate:
             _row("2026-03-01T10:30:00Z", ppv=0.2),  # same hour
             _row("2026-03-01T11:00:00Z", ppv=0.3),  # different hour
         ]
-        buckets = aggregate(rows, "hourly")
+        buckets, _, _ = aggregate(rows, "hourly")
         assert len(buckets) == 2
         assert "2026-03-01T10:00" in buckets
         assert "2026-03-01T11:00" in buckets
@@ -115,7 +115,7 @@ class TestAggregate:
             {"timestamp": "2026-03-01T10:00:00Z", "ppv": "bad"},
             {"timestamp": "2026-03-01T10:00:00Z", "ppv": "0.1"},
         ]
-        buckets = aggregate(rows, "daily")
+        buckets, _, _ = aggregate(rows, "daily")
         # Only 1 valid value in the bucket
         assert len(buckets["2026-03-01"]) == 1
 

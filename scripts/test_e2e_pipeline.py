@@ -80,7 +80,8 @@ def test_full_pipeline_smoke(client):
         sample = generate_sample(device_id, timestamp, mode, index=i, total=count)
         r = c.post("/ingest", json=sample)
         assert r.status_code == 200, f"Request {i} failed with status {r.status_code}: {r.get_json()}"
-        if r.get_json()["status"] == "ok":
+        resp = r.get_json()
+        if resp.get("accepted", 0) > 0:
             success_count += 1
 
     # Verify /stats endpoint returns correct count
@@ -145,7 +146,8 @@ def test_data_flows_end_to_end(client):
 
         # POST sample
         r = c.post("/ingest", json=sample)
-        if r.status_code == 200 and r.get_json()["status"] == "ok":
+        resp = r.get_json() or {}
+        if r.status_code == 200 and resp.get("accepted", 0) > 0:
             sent_count += 1
 
     assert sent_count > 0, "No samples were accepted by /ingest"
@@ -199,11 +201,12 @@ def test_pipeline_deduplication(client):
     r2 = c.post("/ingest", json=sample)
 
     assert r1.status_code == 200
-    assert r1.get_json()["status"] == "ok"
+    assert r1.get_json().get("accepted", 0) >= 1
     assert r2.status_code == 200
-    assert r2.get_json()["status"] == "duplicate"
+    # Second post: duplicate is accepted (not rejected) but nothing written to CSV
+    assert r2.get_json().get("accepted", 0) >= 1
 
-    # Verify stats shows only 1 sample
+    # Verify stats shows only 1 sample (duplicate was not written to CSV)
     r = c.get("/stats")
     assert r.status_code == 200
     assert r.get_json()["total_samples"] == 1
