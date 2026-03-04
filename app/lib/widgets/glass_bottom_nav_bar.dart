@@ -34,6 +34,8 @@ class GlassBottomNavBar extends StatelessWidget {
               isSelected: currentIndex == 2, onTap: onItemSelected),
           _NavItem(icon: Icons.shield_rounded, label: 'Monitor', index: 3,
               isSelected: currentIndex == 3, onTap: onItemSelected),
+          _NavItem(icon: Icons.history_rounded, label: 'History', index: 4,
+              isSelected: currentIndex == 4, onTap: onItemSelected),
           const SizedBox(width: 4),
           GestureDetector(
             onTap: onToggleMute,
