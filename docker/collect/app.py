@@ -901,6 +901,153 @@ def create_app():
             "freed_bytes": freed_bytes,
         })
 
+    # --- New endpoints: /anomaly_summary, /ppv_histogram, DELETE /data/device/<device_id> ---
+
+    @app.route("/anomaly_summary")
+    def anomaly_summary():
+        """Return counts by anomaly level (mapped from label field) across all stored data.
+
+        Mapping:
+        - "normal" -> "SAFE"
+        - "anomaly" -> "ANOMALY"
+        - "precursor" -> "ANOMALY" (treat as ANOMALY)
+        - "unknown" -> "unknown"
+        """
+        counts = {"SAFE": 0, "ANOMALY": 0, "unknown": 0}
+
+        for csv_path in sorted(field_dir.glob("*.csv")):
+            try:
+                with open(csv_path, newline="") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        label = row.get("label", "unknown")
+                        if label == "normal":
+                            counts["SAFE"] += 1
+                        elif label in ("anomaly", "precursor"):
+                            counts["ANOMALY"] += 1
+                        else:
+                            counts["unknown"] += 1
+            except Exception as exc:
+                jlog("warning", "anomaly_summary_read_error", file=csv_path.name, error=str(exc))
+
+        total = sum(counts.values())
+        return jsonify({
+            "counts": counts,
+            "total": total,
+            "anomaly_rate": round(counts.get("ANOMALY", 0) / max(total, 1), 4),
+        })
+
+    @app.route("/ppv_histogram")
+    def ppv_histogram():
+        """Return histogram of PPV values with configurable bin count.
+
+        Query parameters:
+        - bins (int, default 10): Number of bins (clamped 2-50)
+
+        Returns: {"bins": N, "min": X, "max": Y, "bin_width": W, "counts": [...], "total": N}
+        """
+        try:
+            bins = int(request.args.get("bins", 10))
+            bins = min(max(bins, 2), 50)  # Clamp 2-50
+        except (TypeError, ValueError):
+            bins = 10
+
+        ppv_values = []
+        for csv_path in sorted(field_dir.glob("*.csv")):
+            try:
+                with open(csv_path, newline="") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        try:
+                            ppv = float(row.get("ppv", "") or "0")
+                            if ppv >= 0:
+                                ppv_values.append(ppv)
+                        except (ValueError, TypeError):
+                            pass
+            except Exception as exc:
+                jlog("warning", "ppv_histogram_read_error", file=csv_path.name, error=str(exc))
+
+        if not ppv_values:
+            return jsonify({
+                "bins": bins,
+                "min": 0.0,
+                "max": 0.0,
+                "bin_width": 0.0,
+                "counts": [0] * bins,
+                "total": 0,
+            })
+
+        min_ppv = min(ppv_values)
+        max_ppv = max(ppv_values)
+        bin_width = (max_ppv - min_ppv) / bins if max_ppv > min_ppv else 1.0
+        histogram = [0] * bins
+
+        for v in ppv_values:
+            if max_ppv > min_ppv:
+                idx = min(int((v - min_ppv) / bin_width), bins - 1)
+            else:
+                idx = 0
+            histogram[idx] += 1
+
+        return jsonify({
+            "bins": bins,
+            "min": round(min_ppv, 6),
+            "max": round(max_ppv, 6),
+            "bin_width": round(bin_width, 6),
+            "counts": histogram,
+            "total": len(ppv_values),
+        })
+
+    @app.route("/data/device/<device_id>", methods=["DELETE"])
+    def delete_device_data(device_id: str):
+        """Delete all stored data for a given device_id.
+
+        Returns: {"status": "ok", "deleted_rows": N}
+        """
+        # Prevent path traversal
+        if ".." in device_id or "/" in device_id or "\\" in device_id or len(device_id) > 50:
+            return jsonify({"error": "invalid device_id"}), 400
+
+        total_deleted = 0
+        files_processed = 0
+
+        with _csv_lock:
+            for csv_path in sorted(field_dir.glob("*.csv")):
+                try:
+                    with open(csv_path, newline="") as f:
+                        reader = csv.DictReader(f)
+                        fieldnames = reader.fieldnames or []
+                        rows = list(reader)
+
+                    kept = []
+                    deleted = 0
+                    for row in rows:
+                        if row.get("device_id") != device_id:
+                            kept.append(row)
+                        else:
+                            deleted += 1
+
+                    if deleted > 0:
+                        with open(csv_path, "w", newline="") as f:
+                            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+                            writer.writeheader()
+                            writer.writerows(kept)
+                        total_deleted += deleted
+                        jlog("info", "delete_device_ok", device_id=device_id, file=csv_path.name,
+                             deleted=deleted, kept=len(kept))
+
+                    files_processed += 1
+                except Exception as exc:
+                    jlog("warning", "delete_device_error", device_id=device_id, file=csv_path.name,
+                         error=str(exc))
+
+        if total_deleted > 0:
+            _invalidate_stats_cache()
+
+        jlog("info", "delete_device_complete", device_id=device_id, deleted_rows=total_deleted,
+             files_processed=files_processed)
+        return jsonify({"status": "ok", "deleted_rows": total_deleted})
+
     # --- Sessions endpoints ---
 
     sessions_dir = data_dir / "sessions"

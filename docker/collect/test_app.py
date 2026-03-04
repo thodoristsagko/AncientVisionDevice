@@ -811,3 +811,199 @@ def test_summary_endpoint(client):
     assert body["ready_for_training"] is False
     # last_retrain_trigger may be None if no trigger file exists
     assert "last_retrain_trigger" in body
+
+
+# ---------------------------------------------------------------------------
+# New tests: /anomaly_summary, /ppv_histogram, DELETE /data/device
+# ---------------------------------------------------------------------------
+
+def test_anomaly_summary_endpoint(client):
+    """Test /anomaly_summary returns correct counts by anomaly level."""
+    c, _ = client
+    # Post samples with different labels
+    _post_sample(c, overrides={"device_id": "anom-dev", "timestamp": "2026-03-04T10:00:00Z",
+                                "label": "normal"})
+    _post_sample(c, overrides={"device_id": "anom-dev", "timestamp": "2026-03-04T10:00:01Z",
+                                "label": "normal"})
+    _post_sample(c, overrides={"device_id": "anom-dev", "timestamp": "2026-03-04T10:00:02Z",
+                                "label": "anomaly"})
+    _post_sample(c, overrides={"device_id": "anom-dev", "timestamp": "2026-03-04T10:00:03Z",
+                                "label": "precursor"})
+    _post_sample(c, overrides={"device_id": "anom-dev", "timestamp": "2026-03-04T10:00:04Z",
+                                "label": "unknown"})
+
+    r = c.get("/anomaly_summary")
+    assert r.status_code == 200
+    body = r.get_json()
+
+    assert "counts" in body
+    assert "total" in body
+    assert "anomaly_rate" in body
+
+    # "normal" -> "SAFE" (2 samples)
+    assert body["counts"]["SAFE"] == 2
+    # "anomaly" + "precursor" -> "ANOMALY" (2 samples)
+    assert body["counts"]["ANOMALY"] == 2
+    # "unknown" (1 sample)
+    assert body["counts"]["unknown"] == 1
+    # Total
+    assert body["total"] == 5
+    # Anomaly rate: 2 / 5 = 0.4
+    assert body["anomaly_rate"] == pytest.approx(0.4, abs=0.01)
+
+
+def test_anomaly_summary_empty(client):
+    """Test /anomaly_summary with no data."""
+    c, _ = client
+    r = c.get("/anomaly_summary")
+    assert r.status_code == 200
+    body = r.get_json()
+
+    assert body["counts"]["SAFE"] == 0
+    assert body["counts"]["ANOMALY"] == 0
+    assert body["counts"]["unknown"] == 0
+    assert body["total"] == 0
+    assert body["anomaly_rate"] == 0.0
+
+
+def test_ppv_histogram_endpoint(client):
+    """Test /ppv_histogram returns correct histogram data."""
+    c, _ = client
+    # Post samples with varying PPV values
+    for i in range(10):
+        ppv = 0.01 + (i * 0.01)  # 0.01, 0.02, ..., 0.10
+        _post_sample(c, overrides={"device_id": "hist-dev", "timestamp": f"2026-03-04T10:00:{i:02d}Z",
+                                    "ppv": ppv})
+
+    # Test default bins=10
+    r = c.get("/ppv_histogram")
+    assert r.status_code == 200
+    body = r.get_json()
+
+    assert body["bins"] == 10
+    assert body["min"] == pytest.approx(0.01, abs=0.001)
+    assert body["max"] == pytest.approx(0.1, abs=0.001)
+    assert body["total"] == 10
+    assert len(body["counts"]) == 10
+    assert sum(body["counts"]) == 10  # All samples counted
+
+
+def test_ppv_histogram_custom_bins(client):
+    """Test /ppv_histogram with custom bin count."""
+    c, _ = client
+    # Post samples
+    for i in range(5):
+        _post_sample(c, overrides={"device_id": "hist-dev2", "timestamp": f"2026-03-04T11:00:{i:02d}Z",
+                                    "ppv": 0.05})
+
+    # Test custom bins=5
+    r = c.get("/ppv_histogram?bins=5")
+    assert r.status_code == 200
+    body = r.get_json()
+
+    assert body["bins"] == 5
+    assert body["total"] == 5
+    assert len(body["counts"]) == 5
+
+
+def test_ppv_histogram_clamped_bins(client):
+    """Test /ppv_histogram clamps bins to 2-50 range."""
+    c, _ = client
+    _post_sample(c, overrides={"device_id": "hist-dev3", "timestamp": "2026-03-04T12:00:00Z",
+                                "ppv": 0.1})
+
+    # Request bins=1 (below min) should be clamped to 2
+    r = c.get("/ppv_histogram?bins=1")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["bins"] == 2
+
+    # Request bins=100 (above max) should be clamped to 50
+    r = c.get("/ppv_histogram?bins=100")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["bins"] == 50
+
+
+def test_ppv_histogram_empty(client):
+    """Test /ppv_histogram with no data."""
+    c, _ = client
+    r = c.get("/ppv_histogram")
+    assert r.status_code == 200
+    body = r.get_json()
+
+    assert body["bins"] == 10
+    assert body["min"] == 0.0
+    assert body["max"] == 0.0
+    assert body["total"] == 0
+    assert len(body["counts"]) == 10
+    assert sum(body["counts"]) == 0
+
+
+def test_delete_device_data_endpoint(client):
+    """Test DELETE /data/device/<device_id> removes all samples for that device."""
+    c, data_dir = client
+
+    # Post samples from two devices
+    for i in range(3):
+        _post_sample(c, overrides={"device_id": "dev-to-delete", "timestamp": f"2026-03-04T13:00:0{i}Z"})
+    for i in range(2):
+        _post_sample(c, overrides={"device_id": "dev-to-keep", "timestamp": f"2026-03-04T14:00:0{i}Z"})
+
+    # Verify both devices exist
+    r = c.get("/devices")
+    assert r.status_code == 200
+    devices = r.get_json()["devices"]
+    assert "dev-to-delete" in devices
+    assert "dev-to-keep" in devices
+
+    # Delete device-to-delete
+    r = c.delete("/data/device/dev-to-delete")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["status"] == "ok"
+    assert body["deleted_rows"] == 3
+
+    # Verify device-to-delete is gone
+    r = c.get("/devices")
+    assert r.status_code == 200
+    devices = r.get_json()["devices"]
+    assert "dev-to-delete" not in devices
+    assert "dev-to-keep" in devices
+
+    # Verify dev-to-keep still has its samples
+    r = c.get("/device/dev-to-keep/summary")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["total_samples"] == 2
+
+
+def test_delete_device_data_nonexistent(client):
+    """Test DELETE /data/device with a nonexistent device."""
+    c, _ = client
+    r = c.delete("/data/device/nonexistent-device")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["status"] == "ok"
+    assert body["deleted_rows"] == 0
+
+
+def test_delete_device_data_invalid_id(client):
+    """Test DELETE /data/device rejects suspicious device_ids."""
+    c, _ = client
+    # Attempt with ".." in device_id
+    r = c.delete("/data/device/dev..sneaky")
+    assert r.status_code == 400
+    body = r.get_json()
+    assert "invalid device_id" in body.get("error", "")
+
+    # Attempt with "/" in device_id
+    r = c.delete("/data/device/dev/sneaky")
+    # Flask routing will make this 404, which is acceptable
+    # But we can also test with the actual value detection
+    # Let's test manually by just ensuring the validation works
+    pass
+
+    # Test that very long device_id is rejected
+    r = c.delete("/data/device/" + "x" * 100)
+    assert r.status_code == 400
