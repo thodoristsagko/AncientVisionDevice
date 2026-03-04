@@ -22,7 +22,8 @@
         full-report \
         hyperparams model-size \
         export-dataset label-data \
-        ppv-forecast anomaly-scoring
+        ppv-forecast anomaly-scoring \
+        device-health signal-quality
 
 # ---------------------------------------------------------------------------
 # Help
@@ -824,3 +825,9 @@ ppv-forecast: ## Forecast future PPV levels using exponential smoothing
 
 anomaly-scoring: ## Composite anomaly scoring from multiple signal sources
 	python scripts/anomaly_scoring.py
+
+device-health: ## Quick health check for all known devices
+	python scripts/device_health_check.py
+
+signal-quality: ## Analyze BLE signal quality from collected data
+	python scripts/signal_quality_report.py

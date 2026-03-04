@@ -3294,3 +3294,332 @@ class TestAnomalyScoring:
         assert result.returncode == 0
         assert ("MONITOR" in result.stdout or "WARNING" in result.stdout
                 or "CRITICAL" in result.stdout)
+
+
+# ===========================================================================
+# Shared helpers for device_health_check / signal_quality_report tests
+# ===========================================================================
+
+def _health_row(device_id: str, ts_str: str, ppv: float = 0.05) -> dict:
+    """Single row suitable for device_health_check tests."""
+    return {
+        "device_id": device_id,
+        "timestamp": ts_str,
+        "ppv": str(ppv),
+        "rms": str(ppv * 0.7),
+        "ax": "0.001",
+        "ay": "0.001",
+        "az": "9.81",
+    }
+
+
+def _signal_row(idx: int, ts_str: str, ppv: float = 0.05, seq: int | None = None) -> dict:
+    """Single row suitable for signal_quality_report tests."""
+    row = {
+        "timestamp": ts_str,
+        "ppv": str(ppv),
+        "rms": str(ppv * 0.7),
+        "ax": "0.001",
+        "ay": "0.001",
+        "az": "9.81",
+    }
+    if seq is not None:
+        row["seq"] = str(seq)
+    return row
+
+
+# ===========================================================================
+# TestDeviceHealthCheck
+# ===========================================================================
+
+class TestDeviceHealthCheck:
+    """Tests for scripts/device_health_check.py"""
+
+    def _run(self, argv=None):
+        """Import and call device_health_check.main()."""
+        import device_health_check as dhc
+        import importlib
+        importlib.reload(dhc)
+        return dhc.main(argv or [])
+
+    def test_no_data_empty_dir(self, tmp_path):
+        """No CSV files — should exit 0 and print '0 devices'."""
+        rc = self._run(["--data-dir", str(tmp_path)])
+        assert rc == 0
+
+    def test_no_data_missing_dir(self, tmp_path):
+        """Non-existent directory — should exit 0 gracefully."""
+        missing = tmp_path / "does_not_exist"
+        rc = self._run(["--data-dir", str(missing)])
+        assert rc == 0
+
+    def test_no_data_output_message(self, tmp_path, capsys):
+        """No CSV files — output should mention no data."""
+        self._run(["--data-dir", str(tmp_path)])
+        captured = capsys.readouterr()
+        assert "No data" in captured.out or "0 devices" in captured.out
+
+    def test_healthy_device(self, tmp_path, capsys):
+        """Recent data, good sample rate — should report HEALTHY."""
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+        rows = []
+        for i in range(200):
+            ts = (base_ts + timedelta(seconds=i * 0.2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            rows.append(_health_row("AV-001", ts, ppv=0.05))
+        _write_csv(tmp_path / "session.csv", rows)
+
+        import device_health_check as dhc
+        import importlib
+        importlib.reload(dhc)
+
+        now = datetime.now(tz=timezone.utc)
+        all_rows = dhc.load_data(tmp_path)
+        results = dhc.analyze_devices(all_rows, now)
+
+        assert "AV-001" in results
+        assert results["AV-001"]["status"] == "HEALTHY"
+
+    def test_healthy_device_main_output(self, tmp_path, capsys):
+        """Recent data — main() output should contain HEALTHY."""
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+        rows = []
+        for i in range(200):
+            ts = (base_ts + timedelta(seconds=i * 0.2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            rows.append(_health_row("AV-001", ts, ppv=0.05))
+        _write_csv(tmp_path / "session.csv", rows)
+
+        self._run(["--data-dir", str(tmp_path)])
+        captured = capsys.readouterr()
+        assert "HEALTHY" in captured.out
+
+    def test_stale_device(self, tmp_path, capsys):
+        """Data older than 24 hours — should report STALE."""
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2020, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        rows = []
+        for i in range(100):
+            ts = (base_ts + timedelta(seconds=i * 0.5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            rows.append(_health_row("AV-OLD", ts, ppv=0.05))
+        _write_csv(tmp_path / "session.csv", rows)
+
+        import device_health_check as dhc
+        import importlib
+        importlib.reload(dhc)
+
+        now = datetime.now(tz=timezone.utc)
+        all_rows = dhc.load_data(tmp_path)
+        results = dhc.analyze_devices(all_rows, now)
+
+        assert "AV-OLD" in results
+        assert results["AV-OLD"]["status"] == "STALE"
+
+    def test_stale_device_main_output(self, tmp_path, capsys):
+        """Old data — main() output should contain STALE."""
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2020, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        rows = []
+        for i in range(100):
+            ts = (base_ts + timedelta(seconds=i * 0.5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            rows.append(_health_row("AV-OLD", ts, ppv=0.05))
+        _write_csv(tmp_path / "session.csv", rows)
+
+        self._run(["--data-dir", str(tmp_path)])
+        captured = capsys.readouterr()
+        assert "STALE" in captured.out
+
+    def test_summary_line_present(self, tmp_path, capsys):
+        """Output must include a summary line with device counts."""
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+        rows = []
+        for i in range(50):
+            ts = (base_ts + timedelta(seconds=i * 0.5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            rows.append(_health_row("AV-001", ts))
+        _write_csv(tmp_path / "session.csv", rows)
+
+        self._run(["--data-dir", str(tmp_path)])
+        captured = capsys.readouterr()
+        # Summary format: "N device(s): X healthy, Y stale, Z noisy, W silent"
+        assert "healthy" in captured.out
+        assert "stale" in captured.out
+
+    def test_multiple_devices(self, tmp_path, capsys):
+        """Multiple device_ids — each should appear in output."""
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+        rows = []
+        for i in range(100):
+            ts = (base_ts + timedelta(seconds=i * 0.5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            rows.append(_health_row("AV-001", ts))
+        for i in range(100):
+            ts = (base_ts + timedelta(seconds=i * 0.5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            rows.append(_health_row("AV-002", ts))
+        _write_csv(tmp_path / "session.csv", rows)
+
+        self._run(["--data-dir", str(tmp_path)])
+        captured = capsys.readouterr()
+        assert "AV-001" in captured.out
+        assert "AV-002" in captured.out
+
+
+# ===========================================================================
+# TestSignalQualityReport
+# ===========================================================================
+
+class TestSignalQualityReport:
+    """Tests for scripts/signal_quality_report.py"""
+
+    def _run(self, argv=None):
+        """Import and call signal_quality_report.main()."""
+        import signal_quality_report as sqr
+        import importlib
+        importlib.reload(sqr)
+        return sqr.main(argv or [])
+
+    def test_no_data_empty_dir(self, tmp_path):
+        """No CSV files — should exit 0."""
+        rc = self._run(["--data-dir", str(tmp_path)])
+        assert rc == 0
+
+    def test_no_data_missing_dir(self, tmp_path):
+        """Non-existent directory — should exit 0 gracefully."""
+        missing = tmp_path / "does_not_exist"
+        rc = self._run(["--data-dir", str(missing)])
+        assert rc == 0
+
+    def test_no_data_output_message(self, tmp_path, capsys):
+        """No CSV files — output should mention no data."""
+        self._run(["--data-dir", str(tmp_path)])
+        captured = capsys.readouterr()
+        assert "No" in captured.out or "N/A" in captured.out
+
+    def test_good_signal(self, tmp_path, capsys):
+        """Clean data with seq numbers and regular timestamps → EXCELLENT or GOOD."""
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = []
+        for i in range(100):
+            ts = (base_ts + timedelta(milliseconds=i * 50)).strftime(
+                "%Y-%m-%dT%H:%M:%S.%f"
+            )[:-3] + "Z"
+            rows.append(_signal_row(i, ts, ppv=0.05, seq=i))
+        _write_csv(tmp_path / "session.csv", rows)
+
+        import signal_quality_report as sqr
+        import importlib
+        importlib.reload(sqr)
+
+        result = sqr.analyze_file(tmp_path / "session.csv")
+        assert result["score"] >= 60
+        assert result["quality"] in ("EXCELLENT", "GOOD")
+
+    def test_good_signal_main_output(self, tmp_path, capsys):
+        """Clean data — main() output should contain EXCELLENT or GOOD."""
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = []
+        for i in range(100):
+            ts = (base_ts + timedelta(milliseconds=i * 50)).strftime(
+                "%Y-%m-%dT%H:%M:%S.%f"
+            )[:-3] + "Z"
+            rows.append(_signal_row(i, ts, ppv=0.05, seq=i))
+        _write_csv(tmp_path / "session.csv", rows)
+
+        self._run(["--data-dir", str(tmp_path)])
+        captured = capsys.readouterr()
+        assert ("EXCELLENT" in captured.out or "GOOD" in captured.out)
+
+    def test_gaps_detected(self, tmp_path, capsys):
+        """Seq number gaps should be detected and reduce score."""
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = []
+        # Create obvious gaps: seq jumps by 10 every sample
+        for i in range(50):
+            ts = (base_ts + timedelta(milliseconds=i * 50)).strftime(
+                "%Y-%m-%dT%H:%M:%S.%f"
+            )[:-3] + "Z"
+            rows.append(_signal_row(i, ts, ppv=0.05, seq=i * 10))
+        _write_csv(tmp_path / "session.csv", rows)
+
+        import signal_quality_report as sqr
+        import importlib
+        importlib.reload(sqr)
+
+        result = sqr.analyze_file(tmp_path / "session.csv")
+        # Should detect many gaps
+        assert result["gap_count"] > 0
+
+    def test_gaps_lower_score(self, tmp_path):
+        """Packet gaps should reduce score below a perfect 100."""
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = []
+        for i in range(50):
+            ts = (base_ts + timedelta(milliseconds=i * 50)).strftime(
+                "%Y-%m-%dT%H:%M:%S.%f"
+            )[:-3] + "Z"
+            rows.append(_signal_row(i, ts, ppv=0.05, seq=i * 10))
+        _write_csv(tmp_path / "session.csv", rows)
+
+        import signal_quality_report as sqr
+        import importlib
+        importlib.reload(sqr)
+
+        result = sqr.analyze_file(tmp_path / "session.csv")
+        assert result["score"] < 100
+
+    def test_duplicates_detected(self, tmp_path):
+        """Exact duplicate rows should be detected."""
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        ts = base_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Half the rows are exact duplicates
+        rows = [_signal_row(0, ts, ppv=0.05)] * 50 + [
+            _signal_row(i, (base_ts + timedelta(seconds=i)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            for i in range(1, 51)
+        ]
+        _write_csv(tmp_path / "session.csv", rows)
+
+        import signal_quality_report as sqr
+        import importlib
+        importlib.reload(sqr)
+
+        result = sqr.analyze_file(tmp_path / "session.csv")
+        assert result["duplicate_count"] > 0
+
+    def test_overall_quality_printed(self, tmp_path, capsys):
+        """Output should always include an 'Overall signal quality' line."""
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = []
+        for i in range(20):
+            ts = (base_ts + timedelta(seconds=i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            rows.append(_signal_row(i, ts, ppv=0.05))
+        _write_csv(tmp_path / "session.csv", rows)
+
+        self._run(["--data-dir", str(tmp_path)])
+        captured = capsys.readouterr()
+        assert "Overall signal quality" in captured.out
+
+    def test_no_seq_column_still_runs(self, tmp_path):
+        """If no seq column, script should still produce a score without crashing."""
+        from datetime import datetime, timezone, timedelta
+        base_ts = datetime(2026, 3, 3, 10, 0, 0, tzinfo=timezone.utc)
+        rows = []
+        for i in range(50):
+            ts = (base_ts + timedelta(milliseconds=i * 50)).strftime(
+                "%Y-%m-%dT%H:%M:%S.%f"
+            )[:-3] + "Z"
+            rows.append(_signal_row(i, ts, ppv=0.05))  # no seq
+        _write_csv(tmp_path / "session.csv", rows)
+
+        import signal_quality_report as sqr
+        import importlib
+        importlib.reload(sqr)
+
+        result = sqr.analyze_file(tmp_path / "session.csv")
+        assert result["score"] >= 0
+        assert "quality" in result

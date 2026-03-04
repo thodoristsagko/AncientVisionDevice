@@ -1,12 +1,23 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'location_service.dart';
 import 'local_notification_service.dart';
 
 // --------------------------------------------------------------------------
 // Data classes
 // --------------------------------------------------------------------------
+
+/// Categories of archaeological hazard zones.
+enum ArchaeologicalZoneType {
+  excavation, // active dig area
+  unstableSoil, // soil creep risk
+  cliffEdge, // fall hazard
+  structuralRuin, // collapse risk
+  access, // safe access corridor
+}
 
 /// A circular geofence zone.
 class GeofenceZone {
@@ -16,6 +27,7 @@ class GeofenceZone {
   final double radiusMeters;
   final GeofenceSeverity severity;
   final bool isActive;
+  final ArchaeologicalZoneType zoneType;
 
   const GeofenceZone({
     required this.id,
@@ -24,15 +36,42 @@ class GeofenceZone {
     required this.radiusMeters,
     this.severity = GeofenceSeverity.warning,
     this.isActive = true,
+    this.zoneType = ArchaeologicalZoneType.excavation,
   });
 
   Map<String, dynamic> toJson() => {
-    'id': id, 'name': name,
-    'lat': center.latitude, 'lon': center.longitude,
-    'radius': radiusMeters,
-    'severity': severity.name,
-    'active': isActive,
-  };
+        'id': id,
+        'name': name,
+        'lat': center.latitude,
+        'lon': center.longitude,
+        'radius': radiusMeters,
+        'severity': severity.name,
+        'active': isActive,
+        'zoneType': zoneType.name,
+      };
+
+  factory GeofenceZone.fromJson(Map<String, dynamic> json) {
+    return GeofenceZone(
+      id: json['id'] as String,
+      name: json['name'] as String,
+      center: GpsLocation(
+        latitude: (json['lat'] as num).toDouble(),
+        longitude: (json['lon'] as num).toDouble(),
+        accuracy: 1.0,
+        timestamp: DateTime.now(),
+      ),
+      radiusMeters: (json['radius'] as num).toDouble(),
+      severity: GeofenceSeverity.values.firstWhere(
+        (s) => s.name == json['severity'],
+        orElse: () => GeofenceSeverity.warning,
+      ),
+      isActive: json['active'] as bool? ?? true,
+      zoneType: ArchaeologicalZoneType.values.firstWhere(
+        (t) => t.name == json['zoneType'],
+        orElse: () => ArchaeologicalZoneType.excavation,
+      ),
+    );
+  }
 }
 
 enum GeofenceSeverity { info, warning, danger, critical }
@@ -231,7 +270,7 @@ class GeofencingService {
         body: '${zone.name}: ${distStr}m away — exercise caution.',
       );
     } else if (next == GeofenceStatus.inside) {
-      // Entering a danger or critical zone → high-priority alert.
+      // Entering a danger or critical zone — high-priority alert.
       if (zone.severity == GeofenceSeverity.danger ||
           zone.severity == GeofenceSeverity.critical) {
         await LocalNotificationService.instance.showAnomalyAlert(
@@ -251,7 +290,7 @@ class GeofencingService {
     }
 
     debugPrint('[GeofencingService] Transition '
-        '${prev?.name ?? "none"} → ${next.name} '
+        '${prev?.name ?? "none"} -> ${next.name} '
         'for zone "${zone.id}" dist=${distStr}m');
   }
 
@@ -307,11 +346,96 @@ class GeofencingService {
     for (final zone in _zones.values) {
       if (!zone.isActive) continue;
       if (zone.severity != GeofenceSeverity.danger &&
-          zone.severity != GeofenceSeverity.critical) { continue; }
+          zone.severity != GeofenceSeverity.critical) {
+        continue;
+      }
       final dist = _distanceMeters(location, zone.center);
       if (dist <= zone.radiusMeters) return true;
     }
     return false;
+  }
+
+  /// Returns the distance in metres to the nearest active zone whose severity
+  /// is [GeofenceSeverity.danger] or [GeofenceSeverity.critical].
+  ///
+  /// Returns null if no danger/critical zones exist.
+  double? distanceToNearestDangerZone(GpsLocation position) {
+    double? nearest;
+
+    for (final zone in _zones.values) {
+      if (!zone.isActive) continue;
+      if (zone.severity != GeofenceSeverity.danger &&
+          zone.severity != GeofenceSeverity.critical) {
+        continue;
+      }
+      final d = _distanceMeters(position, zone.center);
+      if (nearest == null || d < nearest) nearest = d;
+    }
+
+    return nearest;
+  }
+
+  /// Returns true if [position] is within any active zone of type
+  /// [ArchaeologicalZoneType.access].
+  bool isInSafeCorridor(GpsLocation position) {
+    for (final zone in _zones.values) {
+      if (!zone.isActive) continue;
+      if (zone.zoneType != ArchaeologicalZoneType.access) continue;
+      if (_distanceMeters(position, zone.center) <= zone.radiusMeters) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Returns a map of each [GeofenceSeverity] level to the count of active
+  /// zones at that severity.
+  Map<GeofenceSeverity, int> get zoneSummary {
+    final summary = <GeofenceSeverity, int>{
+      for (final s in GeofenceSeverity.values) s: 0,
+    };
+    for (final zone in _zones.values) {
+      if (!zone.isActive) continue;
+      summary[zone.severity] = (summary[zone.severity] ?? 0) + 1;
+    }
+    return summary;
+  }
+
+  // -------------------------------------------------------------------------
+  // Zone persistence
+  // -------------------------------------------------------------------------
+
+  static const String _prefKey = 'geofencing_zones_v1';
+
+  /// Serialize all registered zones to [SharedPreferences].
+  Future<void> saveZones() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final list = _zones.values.map((z) => z.toJson()).toList();
+      await prefs.setString(_prefKey, jsonEncode(list));
+      debugPrint('[GeofencingService] Saved ${list.length} zone(s).');
+    } catch (e) {
+      debugPrint('[GeofencingService] saveZones failed: $e');
+    }
+  }
+
+  /// Deserialize zones previously saved via [saveZones] and register them.
+  ///
+  /// Existing zones with matching IDs will be replaced.
+  Future<void> loadZones() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_prefKey);
+      if (raw == null || raw.isEmpty) return;
+
+      final list = jsonDecode(raw) as List<dynamic>;
+      for (final item in list) {
+        addZone(GeofenceZone.fromJson(item as Map<String, dynamic>));
+      }
+      debugPrint('[GeofencingService] Loaded ${list.length} zone(s).');
+    } catch (e) {
+      debugPrint('[GeofencingService] loadZones failed: $e');
+    }
   }
 
   // -------------------------------------------------------------------------
