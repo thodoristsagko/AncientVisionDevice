@@ -92,6 +92,18 @@ class PrecursorClassifierService {
 
       _isLoaded = true;
       if (kDebugMode) debugPrint('PrecursorClassifier: loaded (${_classNames.length} classes, scaler=${_scalerMean.isNotEmpty})');
+
+      // P49: Model warm-up — run one dummy inference to pre-warm the TFLite interpreter
+      // so the first real classification call does not incur JIT/cache-miss latency.
+      try {
+        final dummyInput = [List<double>.filled(_inputDim, 0.0)];
+        final dummyOutput = [List<double>.filled(_classNames.length, 0.0)];
+        _interpreter!.run(dummyInput, dummyOutput);
+        if (kDebugMode) debugPrint('PrecursorClassifier: warm-up complete');
+      } catch (e) {
+        if (kDebugMode) debugPrint('PrecursorClassifier: warm-up failed (non-fatal): $e');
+      }
+
       return true;
     } catch (e) {
       if (kDebugMode) debugPrint('PrecursorClassifier: load failed: $e');

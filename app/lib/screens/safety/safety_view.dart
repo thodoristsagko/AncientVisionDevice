@@ -2604,6 +2604,23 @@ class _SafetyViewState extends State<SafetyView> with AutomaticKeepAliveClientMi
               ),
             ),
           ],
+          // P48: Inference timing chip — only shown after at least one timed inference
+          if (_mlModelLoaded && _hasReceivedVibData && InferenceTimingService.instance.count > 0) ...[
+            const SizedBox(height: 4),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Row(
+                children: [
+                  Icon(Icons.timer_outlined, color: Colors.white.withAlpha(80), size: 12),
+                  const SizedBox(width: 4),
+                  Text(
+                    'ML: ${InferenceTimingService.instance.rollingAvgMs.toStringAsFixed(1)} ms avg',
+                    style: TextStyle(color: Colors.white.withAlpha(100), fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+          ],
           if (_mlModelLoaded && _hasReceivedVibData)
             const SizedBox(height: 12),
 

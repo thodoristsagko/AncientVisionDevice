@@ -111,6 +111,18 @@ class MlAnomalyService {
 
       _isLoaded = true;
       if (kDebugMode) debugPrint('MlAnomalyService: loaded v$_modelVersion');
+
+      // P49: Model warm-up — run one dummy inference to pre-warm the TFLite interpreter
+      // so the first real inference does not incur JIT/cache-miss latency.
+      try {
+        final dummyInput = [List<double>.filled(inputDim, 0.0)];
+        final dummyOutput = [List<double>.filled(inputDim, 0.0)];
+        _interpreter!.run(dummyInput, dummyOutput);
+        if (kDebugMode) debugPrint('MlAnomalyService: warm-up complete');
+      } catch (e) {
+        if (kDebugMode) debugPrint('MlAnomalyService: warm-up failed (non-fatal): $e');
+      }
+
       return true;
     } catch (e) {
       _isLoaded = false;
