@@ -354,7 +354,7 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
                 ),
                 onChanged: (value) => setState(() => _searchQuery = value),
               )
-            : const Text('Field Journal', style: AppTextStyles.h3),
+            : Text('Field Journal (${_entries.length})', style: AppTextStyles.h3),
         backgroundColor: Colors.transparent,
         foregroundColor: AppColors.textPrimary,
         elevation: 0,
@@ -440,7 +440,7 @@ class _FieldJournalScreenState extends State<FieldJournalScreen> {
           Text('No journal entries yet', style: AppTextStyles.h3.copyWith(color: AppColors.textSecondary)),
           const SizedBox(height: AppSpacing.sm),
           const Text(
-            'Start documenting your fieldwork',
+            'No journal entries yet. Start monitoring to record events.',
             style: TextStyle(
               color: AppColors.textHint,
               fontSize: 14,
