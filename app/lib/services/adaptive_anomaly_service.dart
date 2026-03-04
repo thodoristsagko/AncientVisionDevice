@@ -100,6 +100,8 @@ class AdaptiveAnomalyService {
   double get dynamicThresholdLow => _dynamicThresholdLow;
   double get dynamicThresholdHigh => _dynamicThresholdHigh;
   int get sampleCount => _sampleCount;
+  /// Number of calibration samples accepted so far (alias for sampleCount).
+  int get calibrationSampleCount => _sampleCount;
   int get calibrationTarget => _calibrationSamples;
   double get calibrationProgress => (_sampleCount / _calibrationSamples).clamp(0.0, 1.0);
   String get modeLabel => _isCalibrated ? 'Adaptive' : 'Calibrating (${(_sampleCount * 100 / _calibrationSamples).round()}%)';
@@ -119,6 +121,32 @@ class AdaptiveAnomalyService {
   /// Feed a new sample to update the baseline model.
   /// Call this for EVERY BLE packet received, even during detection phase.
   void updateBaseline(Map<String, double> features) {
+    // Outlier rejection during calibration phase: reject any sample where one
+    // or more features deviate more than 3σ from the running mean.
+    // Uses Welford's online statistics already tracked in _stats.
+    // (Requires at least 10 samples to have a stable enough estimate.)
+    if (!_isCalibrated && _sampleCount >= 10) {
+      bool isOutlier = false;
+      for (final key in _featureKeys) {
+        final stats = _stats[key]!;
+        if (stats.count > 1) {
+          final stdDev = sqrt(stats.variance);
+          if (stdDev > 1e-12) {
+            final z = ((features[key] ?? 0.0) - stats.mean).abs() / stdDev;
+            if (z > 3.0) {
+              isOutlier = true;
+              if (kDebugMode) {
+                debugPrint('AdaptiveAnomalyService: calibration outlier rejected '
+                    '(feature=$key z=${z.toStringAsFixed(2)})');
+              }
+              break;
+            }
+          }
+        }
+      }
+      if (isOutlier) return; // Skip this sample — don't increment counter
+    }
+
     _sampleCount++;
 
     for (final key in _featureKeys) {
