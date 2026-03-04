@@ -12,6 +12,8 @@ import '../services/notification_service.dart';
 import '../services/site_service.dart';
 import '../services/session_history_service.dart';
 import '../services/vibration_anomaly_service.dart';
+import '../services/connectivity_monitor_service.dart';
+import '../services/critical_event_log_service.dart';
 import 'notifications_screen.dart';
 import 'qr_scanner_screen.dart';
 import 'analytics_screen.dart';
@@ -61,6 +63,12 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
   AlertData? _mostRecentAlert;
   bool _alertsLoading = true;
 
+  // --- Critical Events & Health ---
+  int _totalCriticalEvents = 0;
+  double _lastEventPpv = 0.0;
+  DateTime? _lastEventTime;
+  double _healthScore = 0.0;
+
   @override
   void initState() {
     super.initState();
@@ -76,6 +84,7 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
     _loadSystemStatus();
     _loadAppStartTime();
     _loadRecentAlerts();
+    _loadCriticalEventsAndHealth();
   }
 
   // ---------------------------------------------------------------------------
@@ -180,6 +189,29 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
     } catch (e) {
       debugPrint('_loadRecentAlerts error: $e');
       if (mounted) setState(() => _alertsLoading = false);
+    }
+  }
+
+  Future<void> _loadCriticalEventsAndHealth() async {
+    try {
+      // Load critical events from CriticalEventLogService
+      await CriticalEventLogService.instance.initialize();
+      final events = CriticalEventLogService.instance.events;
+      final mostRecent = CriticalEventLogService.instance.mostRecentEvent;
+
+      // Get health score from ConnectivityMonitorService
+      final healthScore = ConnectivityMonitorService.instance.healthScore;
+
+      if (mounted) {
+        setState(() {
+          _totalCriticalEvents = events.length;
+          _lastEventPpv = mostRecent?.ppv ?? 0.0;
+          _lastEventTime = mostRecent?.timestamp;
+          _healthScore = healthScore;
+        });
+      }
+    } catch (e) {
+      debugPrint('_loadCriticalEventsAndHealth error: $e');
     }
   }
 
@@ -603,75 +635,43 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
   // --- Quick stats row (sessions / PPV / ML status) -------------------------
 
   Widget _buildQuickStatsRow() {
-    final anomalyService = VibrationAnomalyService.instance;
-    final bool isConnected = anomalyService.isInitialized;
-
-    // Derive current anomaly label from ML mode label — simplified badge
-    String statusLabel = 'SAFE';
-    Color statusColor = const Color(0xFF4CAF50);
-    if (!isConnected) {
-      statusLabel = 'NO DEVICE';
-      statusColor = Colors.white38;
-    }
-
     return Padding(
       padding: const EdgeInsets.fromLTRB(0, 0, 0, 16),
-      child: Row(
-        children: [
-          // Sessions today
-          Expanded(
-            child: _quickStatCard(
-              icon: Icons.sensors_rounded,
-              label: 'Sessions Today',
-              value: _sessionStatsLoading ? '...' : '$_sessionsToday',
-              color: const Color(0xFF2196F3),
-            ),
-          ),
-          const SizedBox(width: 10),
-          // Peak PPV today
-          Expanded(
-            child: _quickStatCard(
-              icon: Icons.speed_rounded,
-              label: 'Peak PPV',
-              value: _sessionStatsLoading
-                  ? '...'
-                  : '${_peakPpvToday.toStringAsFixed(2)} mm/s',
-              color: const Color(0xFFFFC107),
-            ),
-          ),
-          const SizedBox(width: 10),
-          // Status badge
-          Expanded(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-              decoration: BoxDecoration(
-                color: statusColor.withAlpha(30),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: statusColor.withAlpha(80)),
-              ),
-              child: Column(
-                children: [
-                  Icon(Icons.shield_outlined, color: statusColor, size: 18),
-                  const SizedBox(height: 4),
-                  Text(
-                    statusLabel,
-                    style: TextStyle(
-                      color: statusColor,
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 2),
-                  const Text(
-                    'Status',
-                    style: TextStyle(color: Colors.white38, fontSize: 10),
-                  ),
-                ],
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            // Sessions today
+            SizedBox(
+              width: 100,
+              child: _quickStatCard(
+                icon: Icons.sensors_rounded,
+                label: 'Sessions',
+                value: _sessionStatsLoading ? '...' : _sessionsToday.toString(),
+                color: const Color(0xFF2196F3),
               ),
             ),
-          ),
-        ],
+            const SizedBox(width: 10),
+            // Peak PPV today
+            SizedBox(
+              width: 100,
+              child: _quickStatCard(
+                icon: Icons.speed_rounded,
+                label: 'Peak PPV',
+                value: _sessionStatsLoading
+                    ? '...'
+                    : '${_peakPpvToday.toStringAsFixed(2)}',
+                color: const Color(0xFFFFC107),
+              ),
+            ),
+            const SizedBox(width: 10),
+            // Health score indicator
+            SizedBox(
+              width: 100,
+              child: _buildHealthScoreIndicator(),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -918,6 +918,204 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+    );
+  }
+
+  // --- Health Score Indicator --------------------------------------------------
+
+  Widget _buildHealthScoreIndicator() {
+    Color healthColor = const Color(0xFF4CAF50); // Green
+    String healthLabel = 'Excellent';
+
+    if (_healthScore > 0.7) {
+      healthColor = const Color(0xFF4CAF50);
+      healthLabel = 'Excellent';
+    } else if (_healthScore > 0.4) {
+      healthColor = const Color(0xFFFFC107);
+      healthLabel = 'Good';
+    } else {
+      healthColor = const Color(0xFFF44336);
+      healthLabel = 'Poor';
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: healthColor.withAlpha(20),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: healthColor.withAlpha(60)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.favorite, color: healthColor, size: 14),
+          const SizedBox(width: 6),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                healthLabel,
+                style: TextStyle(
+                  color: healthColor,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              Text(
+                'Health',
+                style: TextStyle(
+                  color: healthColor.withAlpha(150),
+                  fontSize: 9,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // --- Last Event Summary Card --------------------------------------------------
+
+  Widget _buildLastEventSummaryCard() {
+    if (_totalCriticalEvents == 0) {
+      return const SizedBox.shrink();
+    }
+
+    String timeSinceLastEvent = 'Unknown';
+    if (_lastEventTime != null) {
+      final diff = DateTime.now().difference(_lastEventTime!);
+      if (diff.inMinutes < 1) {
+        timeSinceLastEvent = 'Just now';
+      } else if (diff.inHours < 1) {
+        timeSinceLastEvent = '${diff.inMinutes}m ago';
+      } else if (diff.inDays < 1) {
+        timeSinceLastEvent = '${diff.inHours}h ago';
+      } else {
+        timeSinceLastEvent = '${diff.inDays}d ago';
+      }
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(18),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withAlpha(26)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.warning_rounded, color: Color(0xFFF44336), size: 16),
+                const SizedBox(width: 8),
+                const Text(
+                  'Last Critical Event',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const Spacer(),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF44336).withAlpha(30),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: const Color(0xFFF44336).withAlpha(80)),
+                  ),
+                  child: Text(
+                    '${_lastEventPpv.toStringAsFixed(2)} mm/s',
+                    style: const TextStyle(
+                      color: Color(0xFFF44336),
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Total Events',
+                        style: TextStyle(
+                          color: Colors.white38,
+                          fontSize: 11,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '$_totalCriticalEvents',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Peak PPV',
+                        style: TextStyle(
+                          color: Colors.white38,
+                          fontSize: 11,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${_lastEventPpv.toStringAsFixed(3)} mm/s',
+                        style: const TextStyle(
+                          color: Color(0xFFF44336),
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Time Since',
+                        style: TextStyle(
+                          color: Colors.white38,
+                          fontSize: 11,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        timeSinceLastEvent,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1192,8 +1390,11 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
               // SESSION STATS ROW (today: monitoring time, peak PPV, events)
               _buildSessionStatsRow(),
 
-              // QUICK STATS ROW (sessions / PPV / status)
+              // QUICK STATS ROW (sessions / PPV / health)
               _buildQuickStatsRow(),
+
+              // LAST EVENT SUMMARY CARD (if events exist)
+              _buildLastEventSummaryCard(),
 
               // RECENT ALERTS SUMMARY
               _buildRecentAlertsSummaryCard(),
