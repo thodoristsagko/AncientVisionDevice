@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../widgets/dashboard_home_widgets.dart';
+import '../widgets/battery_indicator.dart';
 import '../services/auth_service.dart';
 import '../services/alert_history_service.dart';
 import '../services/local_storage_service.dart';
@@ -69,6 +70,14 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
   DateTime? _lastEventTime;
   double _healthScore = 0.0;
 
+  // --- Battery (last known from BLE, persisted in SharedPreferences) ---
+  double _batteryVoltage = 0.0;
+  int _batteryPercent = -1; // -1 = unknown
+  bool _batteryCharging = false;
+
+  // --- Pull-to-refresh ---
+  bool _isRefreshing = false;
+
   @override
   void initState() {
     super.initState();
@@ -85,6 +94,7 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
     _loadAppStartTime();
     _loadRecentAlerts();
     _loadCriticalEventsAndHealth();
+    _loadBatteryState();
   }
 
   // ---------------------------------------------------------------------------
@@ -213,6 +223,49 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
     } catch (e) {
       debugPrint('_loadCriticalEventsAndHealth error: $e');
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Battery state (persisted by safety_view when BLE packets arrive)
+  // ---------------------------------------------------------------------------
+
+  Future<void> _loadBatteryState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final voltage = prefs.getDouble('last_battery_voltage') ?? 0.0;
+      final percent = prefs.getInt('last_battery_percent') ?? -1;
+      final charging = prefs.getBool('last_battery_charging') ?? false;
+      if (mounted) {
+        setState(() {
+          _batteryVoltage = voltage;
+          _batteryPercent = percent;
+          _batteryCharging = charging;
+        });
+      }
+    } catch (e) {
+      debugPrint('_loadBatteryState error: $e');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pull-to-refresh: reload all data sources
+  // ---------------------------------------------------------------------------
+
+  Future<void> _refreshAll() async {
+    if (_isRefreshing) return;
+    setState(() => _isRefreshing = true);
+    await Future.wait([
+      _loadStats(),
+      _loadLastFindings(),
+      _checkOfflineData(),
+      _loadUnreadNotifications(),
+      _loadSessionStats(),
+      _loadSystemStatus(),
+      _loadRecentAlerts(),
+      _loadCriticalEventsAndHealth(),
+      _loadBatteryState(),
+    ]);
+    if (mounted) setState(() => _isRefreshing = false);
   }
 
   // ---------------------------------------------------------------------------
@@ -363,10 +416,12 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
 
   Widget _buildStatusBanner() {
     final anomalyService = VibrationAnomalyService.instance;
-    final bool isConnected = anomalyService.isInitialized;
-    final String modeLabel = isConnected ? anomalyService.modeLabel : 'Disconnected';
-    final Color bleColor =
-        isConnected ? const Color(0xFF4CAF50) : Colors.white38;
+    final connectivity = ConnectivityMonitorService.instance;
+    final bool bleOk = anomalyService.isInitialized;
+    final bool cloudOk = connectivity.isFullyConnected || connectivity.isBleConnected;
+    final String modeLabel = bleOk ? anomalyService.modeLabel : 'Disconnected';
+    final Color bleColor = bleOk ? const Color(0xFF4CAF50) : const Color(0xFFF44336);
+    final Color cloudColor = cloudOk ? const Color(0xFF4CAF50) : Colors.white38;
     final String elapsedStr = _formatElapsed(_appStartTimeMs);
 
     return Container(
@@ -375,22 +430,32 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
       decoration: BoxDecoration(
         color: Colors.white.withAlpha(14),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white.withAlpha(20)),
+        border: Border.all(
+          color: bleOk ? bleColor.withAlpha(60) : Colors.white.withAlpha(20),
+        ),
       ),
       child: Row(
         children: [
-          // BLE dot
+          // BLE status
           Container(
             width: 10,
             height: 10,
             decoration: BoxDecoration(color: bleColor, shape: BoxShape.circle),
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 6),
           Text(
-            isConnected ? 'Connected' : 'No Device',
-            style: TextStyle(color: bleColor, fontSize: 12, fontWeight: FontWeight.w600),
+            bleOk ? 'BLE' : 'No BLE',
+            style: TextStyle(color: bleColor, fontSize: 11, fontWeight: FontWeight.w600),
           ),
-          const SizedBox(width: 12),
+          const SizedBox(width: 10),
+          // Cloud / network status
+          Icon(Icons.cloud_rounded, color: cloudColor, size: 14),
+          const SizedBox(width: 4),
+          Text(
+            cloudOk ? 'Online' : 'Offline',
+            style: TextStyle(color: cloudColor, fontSize: 11, fontWeight: FontWeight.w500),
+          ),
+          const SizedBox(width: 10),
           // Mode badge
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -1158,13 +1223,19 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
             value: _lastSync,
             valueColor: Colors.white70,
           ),
-          const SizedBox(height: 8),
-          _statusRow(
-            icon: Icons.storage_rounded,
-            label: 'Data Files',
-            value: 'N/A (mobile)',
-            valueColor: Colors.white38,
-          ),
+          if (_batteryPercent >= 0) ...[
+            const SizedBox(height: 8),
+            _statusRow(
+              icon: Icons.battery_full_rounded,
+              label: 'Device Battery',
+              value: '$_batteryPercent%${_batteryCharging ? ' (charging)' : ''}',
+              valueColor: _batteryPercent > 50
+                  ? const Color(0xFF4CAF50)
+                  : _batteryPercent > 20
+                      ? const Color(0xFFFFC107)
+                      : const Color(0xFFF44336),
+            ),
+          ],
         ],
       ),
     );
@@ -1300,9 +1371,14 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
         ),
       ),
       child: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-          child: Column(
+        child: RefreshIndicator(
+          onRefresh: _refreshAll,
+          color: const Color(0xFFFFC107),
+          backgroundColor: const Color(0xFF1C2523),
+          child: SingleChildScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+            child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               // HEADER: greeting + actions
@@ -1387,8 +1463,18 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
                   ),
                 ),
 
+              // TODAY AT A GLANCE (event count, max PPV, status)
+              _buildTodayAtAGlance(),
+              const SizedBox(height: 8),
+
               // SESSION STATS ROW (today: monitoring time, peak PPV, events)
               _buildSessionStatsRow(),
+
+              // BATTERY INDICATOR (if known)
+              if (_batteryPercent >= 0) ...[
+                _buildBatteryCard(),
+                const SizedBox(height: 8),
+              ],
 
               // QUICK STATS ROW (sessions / PPV / health)
               _buildQuickStatsRow(),
@@ -1427,8 +1513,150 @@ class DashboardHomeViewState extends State<DashboardHomeView> {
             ],
           ),
         ),
+        ),
       ),
     );
+  }
+
+  // --- Today at a Glance -------------------------------------------------------
+
+  /// Three compact chips: event count today, max PPV today, overall status.
+  Widget _buildTodayAtAGlance() {
+    // Determine overall status
+    final String statusLabel;
+    final Color statusColor;
+    if (_alertsLoading || _sessionStatsLoading) {
+      statusLabel = 'Loading…';
+      statusColor = Colors.white38;
+    } else if (_alerts24h == 0 && _peakPpvToday < 0.3) {
+      statusLabel = 'All Clear';
+      statusColor = const Color(0xFF4CAF50);
+    } else if (_dinCriticalCount > 0 || _peakPpvToday >= 5.0) {
+      statusLabel = 'Alert';
+      statusColor = const Color(0xFFF44336);
+    } else {
+      statusLabel = 'Active';
+      statusColor = const Color(0xFFFFC107);
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withAlpha(18)),
+      ),
+      child: Row(
+        children: [
+          const Text(
+            'Today',
+            style: TextStyle(
+              color: Colors.white54,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(width: 12),
+          _glanceChip(
+            icon: Icons.notifications_active_rounded,
+            label: _alertsLoading ? '…' : '$_alerts24h events',
+            color: _alerts24h > 0
+                ? const Color(0xFFF44336)
+                : const Color(0xFF4CAF50),
+          ),
+          const SizedBox(width: 8),
+          _glanceChip(
+            icon: Icons.speed_rounded,
+            label: _sessionStatsLoading
+                ? '…'
+                : '${_peakPpvToday.toStringAsFixed(2)} mm/s',
+            color: const Color(0xFFFFC107),
+          ),
+          const SizedBox(width: 8),
+          _glanceChip(
+            icon: statusLabel == 'All Clear'
+                ? Icons.check_circle_outline
+                : statusLabel == 'Alert'
+                    ? Icons.warning_rounded
+                    : Icons.sensors_rounded,
+            label: statusLabel,
+            color: statusColor,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _glanceChip({
+    required IconData icon,
+    required String label,
+    required Color color,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withAlpha(25),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withAlpha(60)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 12),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // --- Battery Card --------------------------------------------------------
+
+  Widget _buildBatteryCard() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withAlpha(18)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.device_hub_rounded, color: Colors.white38, size: 16),
+          const SizedBox(width: 8),
+          const Text(
+            'Device Battery',
+            style: TextStyle(color: Colors.white54, fontSize: 12),
+          ),
+          const Spacer(),
+          BatteryIndicator(
+            voltage: _batteryVoltage,
+            isCharging: _batteryCharging,
+            percentage: _batteryPercent >= 0
+                ? _batteryPercent.toDouble()
+                : null,
+          ),
+        ],
+      ),
+    );
+  }
+
+  // --- Connectivity status (enhanced) ----------------------------------------
+  // Note: _buildStatusBanner already shows BLE + mode + elapsed time.
+  // The _buildSystemStatusCard has a placeholder "N/A (mobile)" for Data Files
+  // which we fix here by removing that row.
+
+  int get _dinCriticalCount {
+    // Derived locally from _peakPpvToday as a quick indicator only.
+    // Full compliance counts are in AnalyticsScreen.
+    return _peakPpvToday >= 5.0 ? 1 : 0;
   }
 
   Widget _headerIcon(IconData icon, {int badge = 0, required VoidCallback onTap}) {

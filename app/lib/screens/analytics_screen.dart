@@ -657,8 +657,18 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          // Time Period Filter
+                          // Date Range Picker (replaces old 3-button period filter)
                           _buildPeriodFilter(),
+                          const SizedBox(height: 16),
+
+                          // Peak PPV card — most safety-critical stat at the top
+                          _buildPeakPpvCard(),
+                          const SizedBox(height: 16),
+
+                          // DIN 4150-3 Compliance summary
+                          _buildSectionHeader('DIN 4150-3 Compliance', Icons.shield_outlined),
+                          const SizedBox(height: 12),
+                          _buildDinComplianceCard(),
                           const SizedBox(height: 20),
 
                           // P156: Data Quality summary card
@@ -675,6 +685,12 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
 
                           // P157: Vibration Statistics Card (PPV, Alert Rate, Session Duration)
                           _buildVibrationStatsCard(),
+                          const SizedBox(height: 24),
+
+                          // Events by Hour chart
+                          _buildSectionHeader('Events by Hour', Icons.access_time_rounded),
+                          const SizedBox(height: 12),
+                          _buildEventsByHourChart(),
                           const SizedBox(height: 24),
 
                           // Weekly Activity Chart
@@ -1914,6 +1930,231 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
       ),
     );
   }
+
+  // ─── New: Peak PPV Stat Card ──────────────────────────────────────────────────
+
+  /// Large highlighted card showing the peak PPV for the current period.
+  /// Green < 1.0 mm/s, Amber 1.0–3.0 mm/s, Red > 3.0 mm/s (DIN 4150-3).
+  Widget _buildPeakPpvCard() {
+    final Color ppvColor;
+    final String ppvLabel;
+    final String statusText;
+
+    if (_peakPpv <= 0) {
+      ppvColor = Colors.white38;
+      ppvLabel = 'N/A';
+      statusText = 'No data';
+    } else if (_peakPpv < 1.0) {
+      ppvColor = const Color(0xFF4CAF50);
+      ppvLabel = '${_peakPpv.toStringAsFixed(3)} mm/s';
+      statusText = 'Safe';
+    } else if (_peakPpv < _dinWarningThreshold) {
+      ppvColor = const Color(0xFFFFC107);
+      ppvLabel = '${_peakPpv.toStringAsFixed(3)} mm/s';
+      statusText = 'Elevated';
+    } else {
+      ppvColor = const Color(0xFFF44336);
+      ppvLabel = '${_peakPpv.toStringAsFixed(3)} mm/s';
+      statusText = 'Warning';
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: ppvColor.withAlpha(25),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: ppvColor.withAlpha(80)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.speed_rounded, color: ppvColor, size: 18),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'Peak PPV (Session)',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  ppvLabel,
+                  style: TextStyle(
+                    color: ppvColor,
+                    fontSize: 32,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: -0.5,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Mean: ${_meanPpv > 0 ? "${_meanPpv.toStringAsFixed(3)} mm/s" : "N/A"}',
+                  style: TextStyle(
+                    color: Colors.white.withAlpha(140),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              color: ppvColor.withAlpha(40),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: ppvColor.withAlpha(100)),
+            ),
+            child: Text(
+              statusText,
+              style: TextStyle(
+                color: ppvColor,
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─── New: Events by Hour Chart ────────────────────────────────────────────────
+
+  /// 24-bar chart of event counts by hour of day (pure Flutter, no packages).
+  Widget _buildEventsByHourChart() {
+    final total = _eventsByHour.fold(0, (a, b) => a + b);
+    if (total == 0) {
+      return _buildEmptyCard(
+          'No events recorded in the selected period.\nEvents will appear here as vibration alerts are logged.');
+    }
+
+    return Container(
+      height: 180,
+      padding: const EdgeInsets.fromLTRB(12, 14, 12, 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(20),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withAlpha(30)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Total: $total events · $_dateRangeLabel',
+            style: TextStyle(color: Colors.white.withAlpha(160), fontSize: 11),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: CustomPaint(
+              size: Size.infinite,
+              painter: _HourBarsPainter(
+                counts: _eventsByHour,
+                maxCount: _eventsByHour.fold(1, (a, b) => a > b ? a : b),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─── New: DIN 4150-3 Compliance Card ─────────────────────────────────────────
+
+  Widget _buildDinComplianceCard() {
+    final bool passes = _dinCriticalCount == 0 && _dinWarningCount == 0;
+    final bool hasCritical = _dinCriticalCount > 0;
+
+    final Color cardColor = hasCritical
+        ? const Color(0xFFF44336)
+        : _dinWarningCount > 0
+            ? const Color(0xFFFFC107)
+            : const Color(0xFF4CAF50);
+
+    final String verdictText = passes ? 'PASS' : 'FAIL';
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: cardColor.withAlpha(20),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: cardColor.withAlpha(80)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.shield_outlined, color: cardColor, size: 18),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'DIN 4150-3 Compliance',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                decoration: BoxDecoration(
+                  color: cardColor.withAlpha(40),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: cardColor.withAlpha(120)),
+                ),
+                child: Text(
+                  verdictText,
+                  style: TextStyle(
+                    color: cardColor,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: _buildStatItem(
+                  'Above warning (≥${_dinWarningThreshold.toStringAsFixed(0)} mm/s)',
+                  '$_dinWarningCount events',
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: _buildStatItem(
+                  'Above critical (≥${_dinCriticalThreshold.toStringAsFixed(0)} mm/s)',
+                  '$_dinCriticalCount events',
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Thresholds per DIN 4150-3 (residential buildings). Period: $_dateRangeLabel.',
+            style: TextStyle(
+              color: Colors.white.withAlpha(100),
+              fontSize: 10,
+              height: 1.4,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 // ─── CustomPainter: Session PPV bar chart ─────────────────────────────────────
@@ -2059,4 +2300,89 @@ class _MaterialData {
   final Color color;
 
   _MaterialData(this.name, this.count, this.color);
+}
+
+// ─── CustomPainter: 24-hour event bar chart ────────────────────────────────────
+
+class _HourBarsPainter extends CustomPainter {
+  final List<int> counts; // length == 24
+  final int maxCount;
+
+  _HourBarsPainter({required this.counts, required this.maxCount});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (maxCount == 0) return;
+
+    const n = 24;
+    final slotW = size.width / n;
+    final barW = slotW * 0.6;
+    const labelH = 16.0;
+    final chartH = size.height - labelH;
+
+    final barPaint = Paint()..color = const Color(0xFF2196F3);
+    final peakPaint = Paint()..color = const Color(0xFFFFC107);
+    final gridPaint = Paint()
+      ..color = Colors.white.withAlpha(15)
+      ..strokeWidth = 1;
+
+    // Horizontal mid-grid line
+    canvas.drawLine(
+      Offset(0, chartH / 2),
+      Offset(size.width, chartH / 2),
+      gridPaint,
+    );
+
+    final textStyle = TextStyle(
+      color: Colors.white.withAlpha(110),
+      fontSize: 8,
+    );
+
+    final peakIdx =
+        counts.indexOf(counts.fold(0, (a, b) => a > b ? a : b));
+
+    for (int i = 0; i < n; i++) {
+      final count = counts[i];
+      if (count == 0) {
+        // Still draw hour labels for 0, 6, 12, 18
+        if (i % 6 == 0) {
+          final label = '${i.toString().padLeft(2, '0')}h';
+          final tp = TextPainter(
+            text: TextSpan(text: label, style: textStyle),
+            textDirection: TextDirection.ltr,
+          )..layout(maxWidth: slotW);
+          tp.paint(canvas, Offset(slotW * i, chartH + 2));
+        }
+        continue;
+      }
+
+      final frac = count / maxCount;
+      final barH = (chartH * frac).clamp(2.0, chartH);
+      final left = slotW * i + (slotW - barW) / 2;
+      final top = chartH - barH;
+
+      final paint = i == peakIdx ? peakPaint : barPaint;
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(left, top, barW, barH),
+          const Radius.circular(2),
+        ),
+        paint,
+      );
+
+      // Hour labels at 0, 6, 12, 18
+      if (i % 6 == 0) {
+        final label = '${i.toString().padLeft(2, '0')}h';
+        final tp = TextPainter(
+          text: TextSpan(text: label, style: textStyle),
+          textDirection: TextDirection.ltr,
+        )..layout(maxWidth: slotW);
+        tp.paint(canvas, Offset(left, chartH + 2));
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_HourBarsPainter old) =>
+      old.counts != counts || old.maxCount != maxCount;
 }
