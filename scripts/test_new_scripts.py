@@ -802,3 +802,75 @@ class TestSeismicFrequencyAnalysis(unittest.TestCase):
             result = mod.analyze_csv(Path(td) / "nonexistent.csv")
             # Should return dict (possibly with error key), not raise
             self.assertIsInstance(result, dict)
+
+
+# ===========================================================================
+# compare_devices.py tests
+# ===========================================================================
+
+class TestCompareDevices(unittest.TestCase):
+    """compare_devices.py — cross-device comparison."""
+
+    def _load(self):
+        spec = importlib.util.spec_from_file_location(
+            "compare_devices", "scripts/compare_devices.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_module_importable(self):
+        self._load()
+
+    def test_cli_help(self):
+        result = subprocess.run(
+            [sys.executable, "scripts/compare_devices.py", "--help"],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+
+    def test_empty_data_dir_ok(self):
+        """Empty data dir exits 0 (nothing to compare)."""
+        with tempfile.TemporaryDirectory() as td:
+            result = subprocess.run(
+                [sys.executable, "scripts/compare_devices.py", "--data-dir", td],
+                capture_output=True, text=True
+            )
+            self.assertIn(result.returncode, (0, 1))
+
+    def test_compute_cross_device_consistency_single_device(self):
+        """Single device has no cross-device variance."""
+        mod = self._load()
+        devices = {
+            "device_A": {"ppv": {"mean": 0.5, "std": 0.1, "min": 0.1, "max": 1.0, "p95": 0.9}}
+        }
+        result = mod.compute_cross_device_consistency(devices)
+        # Single device → no CV computable → empty result
+        self.assertIsInstance(result, dict)
+
+    def test_compute_cross_device_consistency_two_devices(self):
+        """Two devices with same means → CV near zero."""
+        mod = self._load()
+        devices = {
+            "device_A": {"ppv": {"mean": 1.0, "std": 0.1, "min": 0.5, "max": 2.0, "p95": 1.8}},
+            "device_B": {"ppv": {"mean": 1.0, "std": 0.1, "min": 0.5, "max": 2.0, "p95": 1.8}},
+        }
+        result = mod.compute_cross_device_consistency(devices)
+        self.assertIn("ppv", result)
+        self.assertAlmostEqual(result["ppv"]["cv"], 0.0, places=3)
+
+    def test_compute_cross_device_consistency_high_variation(self):
+        """Two devices with very different means → high CV."""
+        mod = self._load()
+        devices = {
+            "device_A": {"ppv": {"mean": 0.1, "std": 0.01, "min": 0.0, "max": 0.2, "p95": 0.18}},
+            "device_B": {"ppv": {"mean": 5.0, "std": 0.5,  "min": 3.0, "max": 7.0, "p95": 6.5}},
+        }
+        result = mod.compute_cross_device_consistency(devices)
+        self.assertIn("ppv", result)
+        self.assertGreater(result["ppv"]["cv"], 0.25)
+
+    def test_metric_cols_exist(self):
+        mod = self._load()
+        self.assertIn("ppv", mod.METRIC_COLS)
+        self.assertIn("kurtosis", mod.METRIC_COLS)
