@@ -17,6 +17,7 @@ from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
 
 import pytest
+import numpy as np
 
 _SCRIPTS_DIR = Path(__file__).parent
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -943,3 +944,116 @@ class TestSiteSummaryReport(unittest.TestCase):
                 capture_output=True, text=True
             )
             self.assertIn(result.returncode, (0, 1))
+
+
+# ===========================================================================
+# ppv_exceedance_analysis.py tests
+# ===========================================================================
+
+class TestPpvExceedanceAnalysis(unittest.TestCase):
+    """ppv_exceedance_analysis.py — DIN threshold exceedance analysis."""
+
+    def _load(self):
+        spec = importlib.util.spec_from_file_location(
+            "ppv_exceedance", "scripts/ppv_exceedance_analysis.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_module_importable(self):
+        self._load()
+
+    def test_cli_help(self):
+        result = subprocess.run(
+            [sys.executable, "scripts/ppv_exceedance_analysis.py", "--help"],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+
+    def test_compute_exceedance_all_exceed(self):
+        mod = self._load()
+        values = np.array([1.0, 2.0, 3.0])
+        prob = mod.compute_exceedance(values, 0.5)
+        self.assertAlmostEqual(prob, 1.0)
+
+    def test_compute_exceedance_none_exceed(self):
+        mod = self._load()
+        values = np.array([0.1, 0.2, 0.3])
+        prob = mod.compute_exceedance(values, 1.0)
+        self.assertAlmostEqual(prob, 0.0)
+
+    def test_compute_exceedance_half(self):
+        mod = self._load()
+        values = np.array([0.5, 1.5])
+        prob = mod.compute_exceedance(values, 1.0)
+        self.assertAlmostEqual(prob, 0.5)
+
+    def test_standard_thresholds_dict_nonempty(self):
+        mod = self._load()
+        self.assertGreater(len(mod.STANDARD_THRESHOLDS), 0)
+
+    def test_compute_percentiles_keys(self):
+        mod = self._load()
+        values = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        pct = mod.compute_percentiles(values)
+        self.assertIn("p95", pct)
+        self.assertIn("mean", pct)
+        self.assertIn("max", pct)
+
+
+# ===========================================================================
+# export_gps_track.py tests
+# ===========================================================================
+
+class TestExportGpsTrack(unittest.TestCase):
+    """export_gps_track.py — GPX/KML export."""
+
+    def _load(self):
+        spec = importlib.util.spec_from_file_location(
+            "export_gps_track", "scripts/export_gps_track.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_module_importable(self):
+        self._load()
+
+    def test_cli_help(self):
+        result = subprocess.run(
+            [sys.executable, "scripts/export_gps_track.py", "--help"],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+
+    def test_empty_dir_ok(self):
+        with tempfile.TemporaryDirectory() as td:
+            result = subprocess.run(
+                [sys.executable, "scripts/export_gps_track.py", "--data-dir", td],
+                capture_output=True, text=True
+            )
+            self.assertIn(result.returncode, (0, 1))
+
+    def test_export_gpx_writes_file(self):
+        import pandas as pd
+        mod = self._load()
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "track.gpx"
+            df = pd.DataFrame({
+                "lat": [37.0, 37.001, 37.002],
+                "lon": [23.0, 23.001, 23.002],
+                "ppv": [0.1, 0.5, 0.2],
+                "anomaly_level": ["SAFE", "ANOMALY", "SAFE"],
+            })
+            count = mod.export_gpx(df, output)
+            self.assertEqual(count, 3)
+            self.assertTrue(output.exists())
+            content = output.read_text()
+            self.assertIn("<gpx", content)
+            self.assertIn("<trkpt", content)
+
+    def test_kml_colors_dict_nonempty(self):
+        mod = self._load()
+        self.assertIn("CRITICAL", mod.KML_COLORS)
+        self.assertIn("SAFE", mod.KML_COLORS)
