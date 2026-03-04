@@ -1,11 +1,18 @@
 import 'dart:convert';
+import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
+import '../config/app_constants.dart';
+import '../services/device_memory_service.dart';
+import '../services/session_history_service.dart';
+import '../services/vibration_anomaly_service.dart';
 import '../utils/app_styles.dart';
 
-/// AboutScreen — app info, device status, ML model details, open source notice,
-/// and a safety notice. Accessible from Settings or the tools menu.
+/// AboutScreen — app info, device status, ML model details, build info,
+/// diagnostics export, third-party libraries, and a safety notice.
+/// Accessible from Settings or the tools menu.
 class AboutScreen extends StatefulWidget {
   /// Optional: pass the latest BLE-reported firmware version and device name.
   final String? firmwareVersion;
@@ -26,66 +33,144 @@ class AboutScreen extends StatefulWidget {
 }
 
 class _AboutScreenState extends State<AboutScreen> {
+  // ML config data
   Map<String, dynamic>? _classifierConfig;
-  bool _configLoaded = false;
+  Map<String, dynamic>? _autoencoderConfig;
+  bool _mlConfigLoaded = false;
+
+  // Device memory data
+  String? _savedDeviceName;
+  String? _savedDeviceId;
+  bool _deviceMemoryLoaded = false;
+
+  // Session stats
+  SessionRecord? _lastSession;
+  bool _sessionLoaded = false;
 
   @override
   void initState() {
     super.initState();
     _loadMlConfig();
+    _loadDeviceMemory();
+    _loadLastSession();
   }
 
+  // ── Data loading ──────────────────────────────────────────────────────────────
+
   Future<void> _loadMlConfig() async {
+    Map<String, dynamic>? classifier;
+    Map<String, dynamic>? autoencoder;
+
     try {
-      final raw = await rootBundle.loadString('assets/ml/precursor_classifier_config.json');
-      final parsed = jsonDecode(raw) as Map<String, dynamic>;
-      if (mounted) {
-        setState(() {
-          _classifierConfig = parsed;
-          _configLoaded = true;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _configLoaded = true);
-      }
+      final raw = await rootBundle.loadString(
+          'assets/ml/precursor_classifier_config.json');
+      classifier = jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {}
+
+    try {
+      final raw = await rootBundle
+          .loadString('assets/ml/vibration_model_config.json');
+      autoencoder = jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {}
+
+    if (mounted) {
+      setState(() {
+        _classifierConfig = classifier;
+        _autoencoderConfig = autoencoder;
+        _mlConfigLoaded = true;
+      });
     }
   }
 
+  Future<void> _loadDeviceMemory() async {
+    final id = await DeviceMemoryService.instance.getLastDeviceId();
+    final name = await DeviceMemoryService.instance.getLastDeviceName();
+    if (mounted) {
+      setState(() {
+        _savedDeviceId = id;
+        _savedDeviceName = name;
+        _deviceMemoryLoaded = true;
+      });
+    }
+  }
+
+  Future<void> _loadLastSession() async {
+    final sessions = await SessionHistoryService.instance.getSessions();
+    if (mounted) {
+      setState(() {
+        _lastSession = sessions.isNotEmpty ? sessions.first : null;
+        _sessionLoaded = true;
+      });
+    }
+  }
+
+  // ── Diagnostics export ───────────────────────────────────────────────────────
+
   Future<void> _shareDiagnosticReport() async {
     final firmware = widget.firmwareVersion ?? 'Unknown';
-    final device = widget.deviceName ?? 'Not connected';
-    final id = widget.deviceId ?? 'N/A';
-    final modelVersion = _classifierConfig?['model_version'] as String? ?? 'Unknown';
+    final deviceName = widget.deviceName ??
+        _savedDeviceName ??
+        'Not connected';
+    final deviceId = widget.deviceId ?? _savedDeviceId ?? 'N/A';
     final connected = widget.isConnected ? 'Connected' : 'Disconnected';
+
+    final classifierVersion =
+        _classifierConfig?['model_version'] as String? ?? 'Unknown';
+    final autoencoderVersion =
+        _autoencoderConfig?['model_version'] as String? ?? 'Unknown';
+    final fingerprint =
+        VibrationAnomalyService.instance.modelFingerprint;
+
+    String sessionStats = 'No sessions recorded';
+    if (_lastSession != null) {
+      final s = _lastSession!;
+      final dur = s.duration;
+      sessionStats = 'Last session: ${s.start.toIso8601String()}\n'
+          '  Duration: ${dur.inMinutes}m ${dur.inSeconds % 60}s\n'
+          '  Samples: ${s.sampleCount}  Anomaly events: ${s.anomalyEvents}\n'
+          '  Peak PPV: ${s.peakPpv.toStringAsFixed(3)} mm/s  '
+          'Peak score: ${s.peakScore.toStringAsFixed(3)}';
+    }
+
+    final platform = kIsWeb
+        ? 'Web'
+        : '${Platform.operatingSystem} ${Platform.operatingSystemVersion}';
 
     final report = '''AncientVision Diagnostic Report
 ================================
-App Version   : 5.1.0
-Device Name   : $device
-Device ID     : $id
-Connection    : $connected
-Firmware      : $firmware
-ML Model      : v$modelVersion
-Generated     : ${DateTime.now().toIso8601String()}
+App Version        : 5.1.0
+Platform           : $platform
+Flutter            : 3.x.x
+Device Name        : $deviceName
+Device ID          : $deviceId
+Connection         : $connected
+Firmware           : $firmware
+Precursor Model    : v$classifierVersion
+Autoencoder Model  : v$autoencoderVersion
+Model Fingerprint  : 0x$fingerprint
+BLE Service UUID   : ${AppConstants.bleServiceUuid.substring(0, 8)}...
+$sessionStats
+Generated          : ${DateTime.now().toIso8601String()}
 ''';
 
     await Share.share(report, subject: 'AncientVision Diagnostic Report');
   }
 
-  // ── Section: App Info ────────────────────────────────────────────────────────
+  // ── Section builders ──────────────────────────────────────────────────────────
+
   Widget _buildAppInfoCard() {
-    return _SectionCard(
+    return const _SectionCard(
       icon: Icons.info_outline,
       title: 'App Info',
       child: Column(
-        children: const [
+        children: [
           _InfoRow(label: 'Application', value: 'AncientVision'),
           _InfoRow(label: 'Version', value: '5.1.0'),
           _InfoRow(label: 'Build Date', value: '2026-03-03'),
           _InfoRow(
             label: 'Description',
-            value: 'Seismic precursor detection for archaeological site safety',
+            value:
+                'Seismic precursor detection for archaeological site safety',
             multiLine: true,
           ),
         ],
@@ -93,37 +178,14 @@ Generated     : ${DateTime.now().toIso8601String()}
     );
   }
 
-  // ── Section: Device Info ─────────────────────────────────────────────────────
-  Widget _buildDeviceInfoCard() {
-    final firmware = widget.firmwareVersion ?? 'Not connected';
-    final deviceName = widget.deviceName ?? 'Not connected';
-    final deviceId = widget.deviceId ?? 'N/A';
-
-    return _SectionCard(
-      icon: Icons.developer_board,
-      title: 'Device Info',
-      child: Column(
-        children: [
-          _InfoRow(label: 'Firmware', value: firmware),
-          _InfoRow(label: 'Device Name', value: deviceName),
-          _InfoRow(label: 'Device ID', value: deviceId),
-          _InfoRow(
-            label: 'Status',
-            value: widget.isConnected ? 'Connected' : 'Disconnected',
-            valueColor: widget.isConnected ? AppColors.success : AppColors.error,
-          ),
-        ],
-      ),
-    );
-  }
-
   // ── Section: ML Model ────────────────────────────────────────────────────────
+
   Widget _buildMlModelCard() {
-    if (!_configLoaded) {
-      return _SectionCard(
+    if (!_mlConfigLoaded) {
+      return const _SectionCard(
         icon: Icons.psychology,
         title: 'ML Model',
-        child: const Padding(
+        child: Padding(
           padding: EdgeInsets.symmetric(vertical: 8),
           child: Center(
             child: SizedBox(
@@ -139,79 +201,298 @@ Generated     : ${DateTime.now().toIso8601String()}
       );
     }
 
-    if (_classifierConfig == null) {
-      return _SectionCard(
+    if (_classifierConfig == null && _autoencoderConfig == null) {
+      return const _SectionCard(
         icon: Icons.psychology,
         title: 'ML Model',
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 8),
+          padding: EdgeInsets.symmetric(vertical: 8),
           child: Row(
-            children: const [
-              Icon(Icons.warning_amber_outlined, color: AppColors.warning, size: 18),
+            children: [
+              Icon(Icons.warning_amber_outlined,
+                  color: AppColors.warning, size: 18),
               SizedBox(width: 8),
-              Text('Config not available', style: AppTextStyles.subtitle),
+              Text('Model files not found', style: AppTextStyles.subtitle),
             ],
           ),
         ),
       );
     }
 
-    final version = _classifierConfig!['model_version'] as String? ?? 'Unknown';
-    final inputDim = _classifierConfig!['input_dim'] as int? ?? 0;
-    final outputDim = _classifierConfig!['output_dim'] as int? ?? 0;
-    final classNames = (_classifierConfig!['class_names'] as List<dynamic>?)
-            ?.map((e) => e.toString())
-            .join(', ') ??
-        'Unknown';
+    final classifierVersion =
+        _classifierConfig?['model_version'] as String? ?? 'Unknown';
+    final autoencoderVersion =
+        _autoencoderConfig?['model_version'] as String? ?? 'Unknown';
+    final classifierInputDim =
+        _classifierConfig?['input_dim'] as int? ?? 0;
+    final autoencoderInputDim =
+        _autoencoderConfig?['input_dim'] as int? ?? 0;
+    final classNames =
+        (_classifierConfig?['class_names'] as List<dynamic>?)
+                ?.map((e) => e.toString())
+                .join(', ') ??
+            'Unknown';
+
+    // Git SHA from config (if present)
+    final classifierSha =
+        _classifierConfig?['git_sha'] as String? ?? '';
+    final autoencoderSha =
+        _autoencoderConfig?['git_sha'] as String? ?? '';
+
+    // Created date
+    final classifierDate =
+        _classifierConfig?['created_at'] as String? ??
+            _classifierConfig?['date'] as String? ??
+            '—';
+    final autoencoderDate =
+        _autoencoderConfig?['created_at'] as String? ??
+            _autoencoderConfig?['date'] as String? ??
+            '—';
+
+    // Model fingerprint from service
+    final fingerprint =
+        VibrationAnomalyService.instance.modelFingerprint;
+    final fingerprintDisplay =
+        fingerprint.isEmpty || fingerprint == '0' ? '—' : '0x$fingerprint';
 
     return _SectionCard(
       icon: Icons.psychology,
       title: 'ML Model',
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _InfoRow(label: 'Model', value: 'Precursor Classifier'),
-          _InfoRow(label: 'Version', value: 'v$version'),
-          _InfoRow(label: 'Input Features', value: '$inputDim'),
-          _InfoRow(label: 'Output Classes', value: '$outputDim'),
+          // Precursor classifier
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Text('Precursor Classifier',
+                style: AppTextStyles.subtitle
+                    .copyWith(color: AppColors.accent)),
+          ),
+          _InfoRow(label: 'Version', value: 'v$classifierVersion'),
+          if (classifierDate != '—')
+            _InfoRow(label: 'Created', value: classifierDate),
+          if (classifierSha.isNotEmpty)
+            _InfoRow(
+                label: 'Git SHA',
+                value: classifierSha.length > 8
+                    ? classifierSha.substring(0, 8)
+                    : classifierSha),
+          _InfoRow(label: 'Input dim', value: '$classifierInputDim'),
           _InfoRow(label: 'Classes', value: classNames, multiLine: true),
+
+          const SizedBox(height: 10),
+          AppWidgets.divider(),
+          const SizedBox(height: 10),
+
+          // Autoencoder
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Text('Autoencoder',
+                style: AppTextStyles.subtitle
+                    .copyWith(color: AppColors.accent)),
+          ),
+          _InfoRow(label: 'Version', value: 'v$autoencoderVersion'),
+          if (autoencoderDate != '—')
+            _InfoRow(label: 'Created', value: autoencoderDate),
+          if (autoencoderSha.isNotEmpty)
+            _InfoRow(
+                label: 'Git SHA',
+                value: autoencoderSha.length > 8
+                    ? autoencoderSha.substring(0, 8)
+                    : autoencoderSha),
+          _InfoRow(label: 'Input dim', value: '$autoencoderInputDim'),
+          _InfoRow(
+              label: 'Fingerprint',
+              value: fingerprintDisplay),
         ],
       ),
     );
   }
 
-  // ── Section: Open Source ─────────────────────────────────────────────────────
-  Widget _buildOpenSourceCard() {
-    final components = [
-      (Icons.model_training, 'TensorFlow Lite', 'On-device ML inference engine'),
-      (Icons.flutter_dash, 'Flutter', 'Cross-platform UI framework'),
-      (Icons.memory, 'PlatformIO', 'Embedded firmware build system'),
-      (Icons.bluetooth, 'flutter_blue_plus', 'BLE communication layer'),
-    ];
+  // ── Section: Connected Device ────────────────────────────────────────────────
+
+  Widget _buildDeviceInfoCard() {
+    // Prefer live widget params; fall back to last-seen from DeviceMemoryService
+    final firmware = widget.firmwareVersion ?? 'Unknown';
+    final deviceName = widget.deviceName ??
+        (_deviceMemoryLoaded ? (_savedDeviceName ?? 'Never connected') : '…');
+    final deviceId = widget.deviceId ??
+        (_deviceMemoryLoaded ? (_savedDeviceId ?? 'N/A') : '…');
+
+    // BLE UUID — first 8 chars of service UUID
+    final blePrefix = AppConstants.bleServiceUuid.length >= 8
+        ? '${AppConstants.bleServiceUuid.substring(0, 8)}…'
+        : AppConstants.bleServiceUuid;
 
     return _SectionCard(
-      icon: Icons.code,
-      title: 'Open Source',
+      icon: Icons.developer_board,
+      title: 'Connected Device',
+      child: Column(
+        children: [
+          _InfoRow(label: 'Device Name', value: deviceName),
+          _InfoRow(label: 'Device ID', value: deviceId),
+          _InfoRow(label: 'Firmware', value: firmware),
+          _InfoRow(label: 'BLE Service', value: blePrefix),
+          _InfoRow(
+            label: 'Status',
+            value: widget.isConnected ? 'Connected' : 'Disconnected',
+            valueColor:
+                widget.isConnected ? AppColors.success : AppColors.error,
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Section: Build Information ───────────────────────────────────────────────
+
+  Widget _buildBuildInfoCard() {
+    final platform = kIsWeb
+        ? 'Web'
+        : '${Platform.operatingSystem} ${Platform.operatingSystemVersion}';
+
+    return _SectionCard(
+      icon: Icons.build_outlined,
+      title: 'Build Information',
+      child: Column(
+        children: [
+          const _InfoRow(label: 'App Version', value: '5.1.0'),
+          _InfoRow(label: 'Platform', value: platform, multiLine: true),
+          const _InfoRow(label: 'Flutter', value: '3.x.x'),
+          const _InfoRow(label: 'Dart', value: '3.x.x'),
+        ],
+      ),
+    );
+  }
+
+  // ── Section: Diagnostics Export ──────────────────────────────────────────────
+
+  Widget _buildDiagnosticsExportCard() {
+    String sessionSummary = 'No sessions recorded';
+    if (_sessionLoaded && _lastSession != null) {
+      final s = _lastSession!;
+      sessionSummary =
+          '${s.anomalyEvents} anomaly events — peak PPV ${s.peakPpv.toStringAsFixed(2)} mm/s';
+    }
+
+    return _SectionCard(
+      icon: Icons.upload_file,
+      title: 'Diagnostics Export',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
-            'This project uses the following open source technologies:',
+            'Collect and share a plain-text snapshot of device status, '
+            'model info, and last session stats for remote support.',
+            style: AppTextStyles.subtitle,
+          ),
+          const SizedBox(height: 8),
+          _InfoRow(
+            label: 'Last session',
+            value: _sessionLoaded ? sessionSummary : '…',
+            multiLine: true,
+          ),
+          _InfoRow(
+            label: 'Connectivity',
+            value: widget.isConnected ? 'BLE connected' : 'BLE disconnected',
+            valueColor:
+                widget.isConnected ? AppColors.success : AppColors.textHint,
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.accent,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius:
+                      BorderRadius.circular(AppSizes.borderRadius),
+                ),
+              ),
+              icon: const Icon(Icons.share_outlined, size: 20),
+              label: const Text('Export Diagnostics',
+                  style: AppTextStyles.body),
+              onPressed: _shareDiagnosticReport,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Section: Third Party Libraries ───────────────────────────────────────────
+
+  Widget _buildThirdPartyCard() {
+    const libraries = [
+      (
+        Icons.bluetooth,
+        'flutter_blue_plus',
+        'BLE communication with the M5StickC Plus 2 sensor'
+      ),
+      (
+        Icons.model_training,
+        'tflite_flutter',
+        'On-device TFLite ML inference (autoencoder + classifier)'
+      ),
+      (
+        Icons.share_outlined,
+        'share_plus',
+        'Cross-platform file and text sharing'
+      ),
+      (
+        Icons.location_on_outlined,
+        'geolocator',
+        'GPS location for field journal entries'
+      ),
+      (
+        Icons.cloud_outlined,
+        'cloud_firestore',
+        'Cloud database for session sync and findings'
+      ),
+      (
+        Icons.save_alt_outlined,
+        'shared_preferences',
+        'Local persistence for device memory and session history'
+      ),
+      (
+        Icons.flutter_dash,
+        'Flutter',
+        'Cross-platform UI framework (Google)'
+      ),
+      (
+        Icons.memory,
+        'PlatformIO',
+        'Embedded firmware build system for ESP32'
+      ),
+    ];
+
+    return _SectionCard(
+      icon: Icons.code,
+      title: 'Third Party Libraries',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'This app uses the following open source packages:',
             style: AppTextStyles.subtitle,
           ),
           const SizedBox(height: 12),
-          ...components.map(
-            (c) => Padding(
+          ...libraries.map(
+            (lib) => Padding(
               padding: const EdgeInsets.only(bottom: 10),
               child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(c.$1, size: 18, color: AppColors.accent),
+                  Icon(lib.$1, size: 18, color: AppColors.accent),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(c.$2, style: AppTextStyles.h4),
-                        Text(c.$3, style: AppTextStyles.caption),
+                        Text(lib.$2, style: AppTextStyles.h4),
+                        Text(lib.$3, style: AppTextStyles.caption),
                       ],
                     ),
                   ),
@@ -225,6 +506,7 @@ Generated     : ${DateTime.now().toIso8601String()}
   }
 
   // ── Section: Safety Notice ───────────────────────────────────────────────────
+
   Widget _buildSafetyNoticeCard() {
     return Container(
       padding: const EdgeInsets.all(16),
@@ -233,18 +515,18 @@ Generated     : ${DateTime.now().toIso8601String()}
         borderRadius: BorderRadius.circular(AppSizes.borderRadiusLarge),
         border: Border.all(color: AppColors.error.withAlpha(120), width: 1.5),
       ),
-      child: Column(
+      child: const Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            children: const [
+            children: [
               Icon(Icons.health_and_safety, color: AppColors.error, size: 22),
               SizedBox(width: 10),
               Text('Safety Notice', style: AppTextStyles.h4),
             ],
           ),
-          const SizedBox(height: 12),
-          const Text(
+          SizedBox(height: 12),
+          Text(
             'This device is a supplementary warning tool only. '
             'Always follow official evacuation procedures and '
             'the instructions of the site safety officer. '
@@ -255,6 +537,8 @@ Generated     : ${DateTime.now().toIso8601String()}
       ),
     );
   }
+
+  // ── Build ─────────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -281,29 +565,17 @@ Generated     : ${DateTime.now().toIso8601String()}
             children: [
               _buildAppInfoCard(),
               const SizedBox(height: 14),
-              _buildDeviceInfoCard(),
-              const SizedBox(height: 14),
               _buildMlModelCard(),
               const SizedBox(height: 14),
-              _buildOpenSourceCard(),
+              _buildDeviceInfoCard(),
+              const SizedBox(height: 14),
+              _buildBuildInfoCard(),
+              const SizedBox(height: 14),
+              _buildDiagnosticsExportCard(),
+              const SizedBox(height: 14),
+              _buildThirdPartyCard(),
               const SizedBox(height: 14),
               _buildSafetyNoticeCard(),
-              const SizedBox(height: 14),
-              // Share diagnostic tile
-              ListTile(
-                leading: Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: AppDecorations.iconContainer(AppColors.info),
-                  child: const Icon(Icons.share_outlined, color: AppColors.info, size: 22),
-                ),
-                title: const Text('Share Diagnostic Report', style: AppTextStyles.body),
-                subtitle: const Text(
-                  'Device ID, firmware version, model version',
-                  style: AppTextStyles.caption,
-                ),
-                trailing: const Icon(Icons.chevron_right, color: AppColors.textHint),
-                onTap: _shareDiagnosticReport,
-              ),
             ],
           ),
         ),
