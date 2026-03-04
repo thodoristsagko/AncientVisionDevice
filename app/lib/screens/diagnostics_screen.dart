@@ -157,6 +157,7 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
         final precursor = PrecursorClassifierService();
         _precursorLoaded = precursor.isLoaded;
         _precursorLastError = precursor.lastError;
+
       });
     }
   }

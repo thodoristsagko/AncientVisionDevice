@@ -28,7 +28,7 @@ class _FindingDetailsPageState extends State<FindingDetailsPage> {
     _loadRiskData();
   }
 
-  /// Load critical events and filter to those near this finding (within ~500 m and ±30 s window).
+  /// Load critical events and filter to those near this finding (within ~500 m and ±5 min window).
   Future<void> _loadRiskData() async {
     try {
       final svc = CriticalEventLogService.instance;
@@ -46,10 +46,10 @@ class _FindingDetailsPageState extends State<FindingDetailsPage> {
       }
 
       // Filter events that have a GPS location and are within ~500 m of the finding,
-      // and occurred within ±30 seconds of the finding's recorded time.
+      // and occurred within ±5 minutes of the finding's recorded time.
       // We use a simple bounding-box filter (0.005 deg ≈ 500 m).
       const threshold = 0.005;
-      const timeWindowSeconds = 30;
+      const timeWindowMinutes = 5;
 
       final nearby = events.where((e) {
         final loc = e.location;
@@ -61,16 +61,16 @@ class _FindingDetailsPageState extends State<FindingDetailsPage> {
         if (dLat > threshold || dLon > threshold) return false;
 
         // Time window check: if date string has no time component, use whole-day window.
-        // Otherwise, check ±30 seconds from the parsed timestamp.
+        // Otherwise, check ±5 minutes from the parsed timestamp.
         if (widget.finding.date.length <= 10) {
           // Date only (YYYY-MM-DD), so include any event on that day
           return e.timestamp.year == findingDateTime!.year &&
               e.timestamp.month == findingDateTime.month &&
               e.timestamp.day == findingDateTime.day;
         } else {
-          // Has time component; check ±30 second window
+          // Has time component; check ±5 minute window
           final diff = e.timestamp.difference(findingDateTime!).abs();
-          return diff.inSeconds <= timeWindowSeconds;
+          return diff.inMinutes <= timeWindowMinutes;
         }
       }).toList();
 
@@ -85,11 +85,11 @@ class _FindingDetailsPageState extends State<FindingDetailsPage> {
     }
   }
 
-  /// Check if any critical events occurred very close in time (±5 seconds) to this finding.
+  /// Check if any critical events occurred very close in time (±30 seconds) to this finding.
   bool get _recordedDuringAnomaly {
     if (!_riskLoaded || widget.finding.date.isEmpty) return false;
 
-    // Only return true if there are nearby events within a tight 5-second window
+    // Only return true if there are nearby events within a tight 30-second window
     try {
       DateTime? findingDateTime;
       try {
@@ -101,8 +101,8 @@ class _FindingDetailsPageState extends State<FindingDetailsPage> {
       // If only date is available (no time), we can't determine tight correlation
       if (widget.finding.date.length <= 10) return false;
 
-      // Check for events within ±5 seconds
-      const tightWindowSeconds = 5;
+      // Check for events within ±30 seconds
+      const tightWindowSeconds = 30;
       return _nearbyEvents.any((e) {
         final diff = e.timestamp.difference(findingDateTime!).abs();
         return diff.inSeconds <= tightWindowSeconds;
@@ -139,6 +139,63 @@ class _FindingDetailsPageState extends State<FindingDetailsPage> {
 
   CriticalEvent? get _lastEvent =>
       _nearbyEvents.isEmpty ? null : _nearbyEvents.first; // list is newest-first
+
+  /// Share finding details as formatted human-readable text.
+  Future<void> _shareAsText() async {
+    try {
+      final f = widget.finding;
+      final buf = StringBuffer();
+      buf.writeln('AncientVision Finding Report');
+      buf.writeln('========================================');
+      buf.writeln('ID:          ${f.id}');
+      buf.writeln('Name:        ${f.name}');
+      buf.writeln('Type:        ${f.type}');
+      buf.writeln('Site:        ${f.site}');
+      buf.writeln('Date:        ${f.date}');
+      buf.writeln('Coordinates: ${f.latitude.toStringAsFixed(6)}, ${f.longitude.toStringAsFixed(6)}');
+      buf.writeln('Source:      ${f.source.label}');
+      if (f.description.isNotEmpty) {
+        buf.writeln();
+        buf.writeln('Description:');
+        buf.writeln(f.description);
+      }
+      buf.writeln();
+      buf.writeln('Vibration Risk Assessment');
+      buf.writeln('------------------------------');
+      buf.writeln('Risk Level:  $_riskLabel');
+      if (_peakPpv > 0) {
+        buf.writeln('Peak PPV:    ${_peakPpv.toStringAsFixed(3)} mm/s');
+      }
+      buf.writeln('Nearby Events (within ±5 min): ${_nearbyEvents.length}');
+      if (_nearbyEvents.isNotEmpty) {
+        buf.writeln();
+        buf.writeln('Related Critical Events:');
+        for (final e in _nearbyEvents.take(5)) {
+          final ts = e.timestamp.toIso8601String().replaceFirst('T', ' ').split('.').first;
+          buf.writeln('  - $ts  PPV=${e.ppv.toStringAsFixed(3)} mm/s');
+        }
+        if (_nearbyEvents.length > 5) {
+          buf.writeln('  ... and ${_nearbyEvents.length - 5} more');
+        }
+      }
+      buf.writeln();
+      buf.writeln('Exported: ${DateTime.now().toIso8601String().split('.').first}');
+
+      await Share.share(
+        buf.toString(),
+        subject: 'AncientVision Finding — ${f.id}: ${f.name}',
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Share failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
 
   /// Export finding details as JSON and share via OS share sheet.
   Future<void> _exportAsJson() async {
@@ -234,6 +291,13 @@ class _FindingDetailsPageState extends State<FindingDetailsPage> {
           onPressed: () => Navigator.pop(context),
         ),
         actions: [
+          // Share formatted text
+          IconButton(
+            icon: const Icon(Icons.share, color: Colors.white),
+            tooltip: 'Share finding',
+            onPressed: _shareAsText,
+          ),
+          // Export as JSON
           IconButton(
             icon: const Icon(Icons.ios_share, color: Colors.white),
             tooltip: 'Export as JSON',
@@ -281,22 +345,62 @@ class _FindingDetailsPageState extends State<FindingDetailsPage> {
                         ],
                       ),
                       const SizedBox(height: 8),
-                      // Type badge
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: typeColor.withAlpha(50),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(color: typeColor, width: 1),
-                        ),
-                        child: Text(
-                          f.type,
-                          style: TextStyle(
-                            color: typeColor,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
+                      // Type badge + Risk Assessment chip on the same row
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: typeColor.withAlpha(50),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(color: typeColor, width: 1),
+                            ),
+                            child: Text(
+                              f.type,
+                              style: TextStyle(
+                                color: typeColor,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
                           ),
-                        ),
+                          const SizedBox(width: 8),
+                          // Risk Assessment chip: combines finding severity with nearby vibration events
+                          if (_riskLoaded)
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: _riskColor.withAlpha(40),
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(color: _riskColor, width: 1),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.vibration, color: _riskColor, size: 13),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    '$_riskLabel RISK',
+                                    style: TextStyle(
+                                      color: _riskColor,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700,
+                                      letterSpacing: 0.4,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )
+                          else
+                            const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 1.5,
+                                color: Colors.white38,
+                              ),
+                            ),
+                        ],
                       ),
                       const SizedBox(height: 16),
                       // Description
@@ -591,9 +695,119 @@ class _FindingDetailsPageState extends State<FindingDetailsPage> {
                 ),
               ),
 
+            // Related Events section: critical vibration events within ±5 min of this finding
+            if (_riskLoaded && _nearbyEvents.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              _buildRelatedEventsCard(),
+            ],
+
             const SizedBox(height: 24),
           ],
         ),
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Related Events card — events within ±5 minutes of the finding
+  // ---------------------------------------------------------------------------
+
+  Widget _buildRelatedEventsCard() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(13),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.history, color: Color(0xFFFFC107), size: 20),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'Related Events',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Colors.white.withAlpha(25),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  '${_nearbyEvents.length} within ±5 min',
+                  style: const TextStyle(color: Colors.white54, fontSize: 11),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          ...(_nearbyEvents.take(5).toList().asMap().entries.map((entry) {
+            final i = entry.key;
+            final e = entry.value;
+            final ppvColor = e.ppv >= 2.0
+                ? const Color(0xFFE53935)
+                : e.ppv >= 0.5
+                    ? const Color(0xFFFFC107)
+                    : const Color(0xFF4CAF50);
+            final ts = '${e.timestamp.hour.toString().padLeft(2, '0')}'
+                ':${e.timestamp.minute.toString().padLeft(2, '0')}'
+                ':${e.timestamp.second.toString().padLeft(2, '0')}';
+            return Padding(
+              padding: EdgeInsets.only(bottom: i < _nearbyEvents.length - 1 ? 8 : 0),
+              child: Row(
+                children: [
+                  Container(
+                    width: 6,
+                    height: 6,
+                    margin: const EdgeInsets.only(right: 10, top: 1),
+                    decoration: BoxDecoration(
+                      color: ppvColor,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  Expanded(
+                    child: Text(
+                      ts,
+                      style: const TextStyle(color: Colors.white70, fontSize: 13),
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: ppvColor.withAlpha(30),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: ppvColor.withAlpha(100), width: 1),
+                    ),
+                    child: Text(
+                      '${e.ppv.toStringAsFixed(3)} mm/s',
+                      style: TextStyle(
+                        color: ppvColor,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          })),
+          if (_nearbyEvents.length > 5) ...[
+            const SizedBox(height: 8),
+            Text(
+              '... and ${_nearbyEvents.length - 5} more events',
+              style: const TextStyle(color: Colors.white38, fontSize: 12),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -726,7 +940,7 @@ class _FindingDetailsPageState extends State<FindingDetailsPage> {
             findingDateTime = DateTime.now();
           }
           final diff = e.timestamp.difference(findingDateTime).abs();
-          return diff.inSeconds <= 5;
+          return diff.inSeconds <= 30;
         } catch (_) {
           return false;
         }

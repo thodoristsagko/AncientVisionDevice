@@ -307,11 +307,25 @@ class _SessionHistoryScreenState extends State<SessionHistoryScreen> {
                       return _SessionTile(
                         record: record,
                         onTap: () => _showDetailSheet(context, record),
+                        onShare: () => _shareSession(context, record),
                       );
                     },
                   ),
                 ),
     );
+  }
+
+  Future<void> _shareSession(BuildContext context, SessionRecord record) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await SessionExportService.instance.shareSessionCsv(record.id);
+    } catch (e) {
+      if (mounted) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('Export failed: $e')),
+        );
+      }
+    }
   }
 
   void _showDetailSheet(BuildContext context, SessionRecord record) {
@@ -530,8 +544,13 @@ Color _ppvColor(double ppv) {
 class _SessionTile extends StatelessWidget {
   final SessionRecord record;
   final VoidCallback onTap;
+  final VoidCallback onShare;
 
-  const _SessionTile({required this.record, required this.onTap});
+  const _SessionTile({
+    required this.record,
+    required this.onTap,
+    required this.onShare,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -629,6 +648,14 @@ class _SessionTile extends StatelessWidget {
                   ],
                 ),
               ),
+              IconButton(
+                icon: const Icon(Icons.ios_share, color: Colors.white54),
+                tooltip: 'Export CSV',
+                onPressed: onShare,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+              ),
+              const SizedBox(width: 4),
               const Icon(Icons.chevron_right, color: Colors.white30),
             ],
           ),

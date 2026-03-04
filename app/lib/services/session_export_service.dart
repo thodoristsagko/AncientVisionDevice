@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'critical_event_log_service.dart';
+import 'session_history_service.dart';
 
 /// Exports session data as a CSV file and shares it via the OS share sheet.
 class SessionExportService {
@@ -85,4 +86,88 @@ class SessionExportService {
 
   /// Total critical event count.
   int get eventCount => CriticalEventLogService.instance.totalEvents;
+
+  // ---------------------------------------------------------------------------
+  // Session-scoped CSV export (P51)
+  // ---------------------------------------------------------------------------
+
+  /// Fetches all [CriticalEvent] entries that fall within the time range of
+  /// the session identified by [sessionId], builds a CSV with columns:
+  ///   timestamp, ppv_mm_s, level, lat, lon, notes
+  /// and writes it to a temp file.
+  ///
+  /// Returns the file path on success, or null if the session cannot be found
+  /// or no events exist for that session.
+  Future<String?> exportSessionCsv(String sessionId) async {
+    try {
+      // Look up the session record to get start / end times.
+      final sessions = await SessionHistoryService.instance.getSessions();
+      final sessionIndex = sessions.indexWhere((s) => s.id == sessionId);
+      if (sessionIndex == -1) {
+        debugPrint('[SessionExport] exportSessionCsv: session $sessionId not found');
+        return null;
+      }
+      final session = sessions[sessionIndex];
+
+      // Fetch critical events that fall within this session window.
+      final events = await CriticalEventLogService.instance
+          .getEventsBetween(session.start, session.end);
+
+      // Build the CSV — include a header row even if no events exist so the
+      // file is always a valid CSV that can be opened in a spreadsheet.
+      final buffer = StringBuffer();
+      buffer.writeln('timestamp,ppv_mm_s,level,lat,lon,notes');
+
+      for (final ev in events) {
+        final level = ev.ppv >= 1.0
+            ? 'CRITICAL'
+            : ev.ppv >= 0.3
+                ? 'WARNING'
+                : 'SAFE';
+        final lat = ev.location?.latitude.toStringAsFixed(7) ?? '';
+        final lon = ev.location?.longitude.toStringAsFixed(7) ?? '';
+        // notes = cluster count if > 1, empty otherwise.
+        final notes = ev.count > 1 ? 'cluster:${ev.count}' : '';
+
+        buffer.writeln([
+          ev.timestamp.toUtc().toIso8601String(),
+          ev.ppv.toStringAsFixed(4),
+          level,
+          lat,
+          lon,
+          notes,
+        ].join(','));
+      }
+
+      final dir = await getTemporaryDirectory();
+      final safeId = sessionId.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+      final file = File('${dir.path}/session_${safeId}_events.csv');
+      await file.writeAsString(buffer.toString());
+
+      debugPrint('[SessionExport] exportSessionCsv: wrote ${events.length} events to ${file.path}');
+      return file.path;
+    } catch (e) {
+      debugPrint('[SessionExport] exportSessionCsv failed: $e');
+      return null;
+    }
+  }
+
+  /// Calls [exportSessionCsv] then opens the OS share sheet.
+  ///
+  /// Shows a debug message if the export fails or the session has no events.
+  Future<void> shareSessionCsv(String sessionId) async {
+    try {
+      final path = await exportSessionCsv(sessionId);
+      if (path == null) {
+        debugPrint('[SessionExport] shareSessionCsv: nothing to share for $sessionId');
+        return;
+      }
+      await Share.shareXFiles(
+        [XFile(path, mimeType: 'text/csv')],
+        subject: 'AncientVision Session Export',
+      );
+    } catch (e) {
+      debugPrint('[SessionExport] shareSessionCsv failed: $e');
+    }
+  }
 }
