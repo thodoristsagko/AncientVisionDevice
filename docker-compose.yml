@@ -1,3 +1,14 @@
+# Resource limits summary (see individual compose files for full config):
+#
+#   Service         Compose file                   mem_limit   cpus
+#   --------------- ------------------------------ ----------- -----
+#   data-collector  docker-compose.collect.yml     512m        0.5
+#   file-watcher    docker-compose.train.yml       256m        0.25
+#   trainer         docker-compose.train.yml       2g          2.0
+#   firmware        docker-compose.yml (below)     2g          1.0
+#   flutter         docker-compose.yml (below)     4g          2.0
+#   ml              docker-compose.yml (below)     4g          2.0
+
 services:
 
   firmware:
