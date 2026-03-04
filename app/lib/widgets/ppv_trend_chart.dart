@@ -158,7 +158,7 @@ class _PpvTrendPainter extends CustomPainter {
     );
 
     // ── Y-axis labels (min / max) ──────────────────────────────────────────────
-    _drawLabel(canvas, size, maxVal.toStringAsFixed(2), Offset(2, 2));
+    _drawLabel(canvas, size, maxVal.toStringAsFixed(2), const Offset(2, 2));
     _drawLabel(
       canvas,
       size,

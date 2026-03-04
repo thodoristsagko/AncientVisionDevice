@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'package:flutter/foundation.dart';
 
 /// Result of parsing BLE characteristic data.
 sealed class BleParseResult {}

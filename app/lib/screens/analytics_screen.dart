@@ -92,7 +92,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen>
     final alertHistory = await AlertHistoryService().load();
     _alertLevelCounts = {};
     for (final entry in alertHistory) {
-      final level = entry['level'] as String? ?? 'unknown';
+      final level = entry.level.isNotEmpty ? entry.level : 'unknown';
       _alertLevelCounts[level] = (_alertLevelCounts[level] ?? 0) + 1;
     }
 

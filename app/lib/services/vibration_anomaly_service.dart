@@ -138,7 +138,7 @@ class VibrationAnomalyService {
           fingerprint += bytes[i];
         }
         _modelFingerprint = fingerprint;
-        debugPrint('VibrationAnomalyService: Model fingerprint = ${modelFingerprint}');
+        debugPrint('VibrationAnomalyService: Model fingerprint = $modelFingerprint');
       } catch (e) {
         debugPrint('VibrationAnomalyService: Fingerprint computation failed (non-fatal): $e');
       }

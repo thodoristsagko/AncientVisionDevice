@@ -181,20 +181,20 @@ class _DevicesScreenState extends State<DevicesScreen> {
   }
 
   Widget _buildEmptyState() {
-    return Center(
+    return const Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(Icons.bluetooth_disabled,
               size: 72, color: AppColors.textHint),
-          const SizedBox(height: AppSpacing.lg),
-          const Text(
+          SizedBox(height: AppSpacing.lg),
+          Text(
             'No saved devices.',
             style: AppTextStyles.h3,
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: AppSpacing.sm),
-          const Padding(
+          SizedBox(height: AppSpacing.sm),
+          Padding(
             padding: EdgeInsets.symmetric(horizontal: 40),
             child: Text(
               'Scan to find your AncientVision sensor.',
@@ -227,8 +227,8 @@ class _DevicesScreenState extends State<DevicesScreen> {
           ),
         ),
         const SizedBox(height: AppSpacing.xl),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: AppSpacing.md),
           child: Text(
             'Long-press a device to forget it.',
             style: AppTextStyles.caption,

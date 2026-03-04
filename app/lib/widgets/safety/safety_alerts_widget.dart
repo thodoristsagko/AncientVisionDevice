@@ -158,7 +158,7 @@ class SafetyAlertsCard extends StatelessWidget {
 class _AlertGroupRow extends StatelessWidget {
   final _AlertGroup group;
 
-  const _AlertGroupRow({super.key, required this.group});
+  const _AlertGroupRow({required this.group});
 
   Color _dotColor() {
     switch (group.level) {

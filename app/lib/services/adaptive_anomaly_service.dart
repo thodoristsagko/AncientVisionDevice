@@ -206,10 +206,10 @@ class AdaptiveAnomalyService {
       for (final key in _featureKeys) {
         sumVariance += _stats[key]!.variance;
       }
-      final _calibStd = sqrt(sumVariance / _featureKeys.length);
-      final _calibMean = 0.0; // z-score baseline is always 0
-      _dynamicThresholdLow = _calibMean + 2.0 * _calibStd;
-      _dynamicThresholdHigh = _calibMean + 4.0 * _calibStd;
+      final calibStd = sqrt(sumVariance / _featureKeys.length);
+      const calibMean = 0.0; // z-score baseline is always 0
+      _dynamicThresholdLow = calibMean + 2.0 * calibStd;
+      _dynamicThresholdHigh = calibMean + 4.0 * calibStd;
       // Guard: never let dynamic thresholds fall below sensible minimums
       if (_dynamicThresholdLow < 0.1) _dynamicThresholdLow = 1.195327;
       if (_dynamicThresholdHigh < 0.2) _dynamicThresholdHigh = 1.788009;

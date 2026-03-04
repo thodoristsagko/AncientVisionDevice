@@ -502,7 +502,7 @@ class PpvGraphPainter extends CustomPainter {
       fillPath,
       Paint()
         ..shader = ui.Gradient.linear(
-          Offset(0, topPad),
+          const Offset(0, topPad),
           Offset(0, topPad + netH),
           [color.withAlpha(70), color.withAlpha(8)],
         ),
