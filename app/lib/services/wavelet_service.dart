@@ -19,6 +19,41 @@ class WaveletResult {
   });
 }
 
+/// Summary produced by [WaveletService.analyze].
+///
+/// Bundles the raw decomposition together with derived metrics — band energy
+/// ratios, transient flag, frequency-band labels, and per-band energy trends
+/// relative to the previous [analyze] call.
+class WaveletAnalysisResult {
+  /// Raw DWT decomposition.
+  final WaveletResult wavelet;
+
+  /// Absolute energy per band (sum of squared coefficients).
+  /// Keys match [WaveletService.bandFrequencyLabels].
+  final Map<String, double> bandEnergies;
+
+  /// Energy of each band expressed as a fraction of the total signal energy.
+  /// Values are in [0, 1] and sum to 1 (within floating-point rounding).
+  final Map<String, double> bandEnergyRatios;
+
+  /// True if any single sample in the analysed signal exceeds 3× the RMS
+  /// of the signal (impulsive transient criterion).
+  final bool hasTransient;
+
+  /// Fractional change in band energy compared to the previous [analyze] call.
+  /// Positive values indicate increasing energy; negative values indicate
+  /// decreasing energy. Empty on the very first call (no baseline yet).
+  final Map<String, double> bandEnergyTrend;
+
+  const WaveletAnalysisResult({
+    required this.wavelet,
+    required this.bandEnergies,
+    required this.bandEnergyRatios,
+    required this.hasTransient,
+    required this.bandEnergyTrend,
+  });
+}
+
 /// A transient event detected via wavelet detail coefficient energy analysis.
 class TransientEvent {
   /// Timestamp in seconds from the start of the signal.
@@ -47,8 +82,162 @@ class TransientEvent {
 /// Provides decomposition, reconstruction, denoising, transient detection,
 /// and wavelet packet energy distribution -- all with O(N) complexity and
 /// zero external dependencies.
+///
+/// The stateful [analyze] method additionally computes band energy ratios,
+/// a simple transient flag, and per-band energy trends relative to the
+/// previous call.  Use [reset] to clear the trending baseline.
 class WaveletService {
   static final double _sqrt2 = sqrt(2.0);
+
+  // ---------------------------------------------------------------------------
+  // Instance state for trending
+  // ---------------------------------------------------------------------------
+
+  /// Band energies from the most recent [analyze] call.  Used as the baseline
+  /// for computing [WaveletAnalysisResult.bandEnergyTrend].
+  Map<String, double>? _previousBandEnergies;
+
+  /// Latest band energy ratios (fraction of total energy per band).
+  Map<String, double> get lastBandRatios => _lastBandRatios;
+  Map<String, double> _lastBandRatios = {};
+
+  /// Whether the most recent [analyze] call detected a transient.
+  bool get hasTransient => _hasTransient;
+  bool _hasTransient = false;
+
+  /// Clear the trending baseline so the next [analyze] call starts fresh.
+  void reset() {
+    _previousBandEnergies = null;
+    _lastBandRatios = {};
+    _hasTransient = false;
+  }
+
+  // ---------------------------------------------------------------------------
+  // High-level stateful analysis
+  // ---------------------------------------------------------------------------
+
+  /// Perform a full wavelet analysis of [signal] and return a [WaveletAnalysisResult].
+  ///
+  /// Internally calls [decompose] and [bandEnergy], then:
+  ///   1. Computes per-band energy ratios (fraction of total energy).
+  ///   2. Detects a transient: any sample whose absolute value exceeds 3× the
+  ///      signal RMS is considered impulsive.
+  ///   3. Computes energy trends relative to the previous call (fractional
+  ///      change; positive = increasing, negative = decreasing).
+  ///   4. Updates [lastBandRatios] and [hasTransient] instance properties.
+  WaveletAnalysisResult analyze(
+    List<double> signal, {
+    int levels = 3,
+    double sampleRate = 200.0,
+  }) {
+    final WaveletResult decomposition =
+        WaveletService.decompose(signal, levels: levels);
+
+    // Compute absolute band energies using the existing static method.
+    final Map<String, double> energies = WaveletService.bandEnergy(
+      signal,
+      levels: levels,
+      sampleRate: sampleRate,
+    );
+
+    // --- Band energy ratios ---
+    double totalEnergy = 0.0;
+    for (final e in energies.values) {
+      totalEnergy += e;
+    }
+    final Map<String, double> ratios = {};
+    for (final entry in energies.entries) {
+      ratios[entry.key] =
+          totalEnergy > 0.0 ? entry.value / totalEnergy : 0.0;
+    }
+    _lastBandRatios = Map.unmodifiable(ratios);
+
+    // --- Transient detection (sample-domain) ---
+    _hasTransient = _signalHasTransient(signal);
+
+    // --- Band energy trending ---
+    final Map<String, double> trend = {};
+    final prev = _previousBandEnergies;
+    if (prev != null) {
+      for (final entry in energies.entries) {
+        final double prevEnergy = prev[entry.key] ?? 0.0;
+        if (prevEnergy > 0.0) {
+          trend[entry.key] = (entry.value - prevEnergy) / prevEnergy;
+        } else if (entry.value > 0.0) {
+          trend[entry.key] = 1.0; // rose from zero → 100 % increase
+        } else {
+          trend[entry.key] = 0.0;
+        }
+      }
+    }
+    _previousBandEnergies = Map.unmodifiable(energies);
+
+    return WaveletAnalysisResult(
+      wavelet: decomposition,
+      bandEnergies: energies,
+      bandEnergyRatios: ratios,
+      hasTransient: _hasTransient,
+      bandEnergyTrend: trend,
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Static utilities
+  // ---------------------------------------------------------------------------
+
+  /// Returns true when any sample in [signal] exceeds 3× the signal RMS,
+  /// indicating an impulsive transient event.
+  static bool _signalHasTransient(List<double> signal) {
+    if (signal.length < 2) return false;
+    double sumSq = 0.0;
+    for (final v in signal) {
+      sumSq += v * v;
+    }
+    final double rms = sqrt(sumSq / signal.length);
+    final double threshold = 3.0 * rms;
+    for (final v in signal) {
+      if (v.abs() > threshold) return true;
+    }
+    return false;
+  }
+
+  /// Maps decomposition level indices to human-readable frequency band labels.
+  ///
+  /// Level indices follow the [WaveletResult.details] ordering:
+  ///   - Index 0 … levels-1 → detail bands D1 … D[levels] (finest→coarsest)
+  ///   - Index [levels]       → approximation band A[levels]
+  ///
+  /// [sampleRate] is in Hz; [windowSize] is the number of samples analysed
+  /// (used only to derive the theoretical finest resolution but does not
+  /// affect the frequency bounds, which depend solely on [sampleRate]).
+  ///
+  /// Example for sampleRate=200, levels=3:
+  ///   {0: 'D1: 50.0–100.0 Hz', 1: 'D2: 25.0–50.0 Hz',
+  ///    2: 'D3: 12.5–25.0 Hz', 3: 'A3: 0.0–12.5 Hz'}
+  static Map<int, String> bandFrequencyLabels(
+    int sampleRate,
+    int windowSize, {
+    int levels = 3,
+  }) {
+    final double nyquist = sampleRate / 2.0;
+    final int maxLevels =
+        windowSize > 1 ? (log(windowSize) / ln2).floor() : 1;
+    final int actualLevels = levels.clamp(1, maxLevels);
+
+    final Map<int, String> labels = {};
+    for (int l = 0; l < actualLevels; l++) {
+      final double fHigh = nyquist / pow(2, l);
+      final double fLow = nyquist / pow(2, l + 1);
+      labels[l] =
+          'D${l + 1}: ${fLow.toStringAsFixed(1)}–${fHigh.toStringAsFixed(1)} Hz';
+    }
+    // Approximation band
+    final double approxHigh = nyquist / pow(2, actualLevels);
+    labels[actualLevels] =
+        'A$actualLevels: 0.0–${approxHigh.toStringAsFixed(1)} Hz';
+
+    return labels;
+  }
 
   // ---------------------------------------------------------------------------
   // Core DWT
