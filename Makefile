@@ -9,7 +9,13 @@
         validate-data e2e status health augment online-learn tune onnx \
         live-dashboard ab-test augmentation-report \
         serve-model session-report calibration-check confidence-analysis monitor-model \
-        freq-analysis compare-devices site-summary
+        freq-analysis compare-devices site-summary \
+        export-gps export-parquet feature-importance feature-selection evaluate \
+        aggregate-stats anomaly-timeline compare-sessions cross-device-eval ensemble-predict \
+        ensemble-train gen-precursor hyperparameter-search merge-sessions model-comparison \
+        plot-session reset pipeline run-pipeline send-alert simulate-anomaly \
+        threshold-optimize train-autoencoder training-smoke visualize-features visualize-latent \
+        field-report calibrate
 
 # ---------------------------------------------------------------------------
 # Help
@@ -76,6 +82,34 @@ help:
 	@echo "  freq-analysis         Analyze seismic frequency bands in field data"
 	@echo "  compare-devices       Compare vibration patterns across multiple devices"
 	@echo "  site-summary          Generate comprehensive site safety summary report"
+	@echo ""
+	@echo "  export-gps            Export GPS track as GPX or KML (set FORMAT=kml for KML)"
+	@echo "  export-parquet        Export field CSVs to Apache Parquet format"
+	@echo "  feature-importance    Analyze ML model feature importance"
+	@echo "  feature-selection     Run automated feature selection pipeline"
+	@echo "  evaluate              Run model evaluation suite"
+	@echo "  aggregate-stats       Aggregate statistics from multiple sessions"
+	@echo "  anomaly-timeline      Generate anomaly event timeline"
+	@echo "  compare-sessions      Compare two field sessions side-by-side"
+	@echo "  cross-device-eval     Cross-device evaluation on labeled data"
+	@echo "  ensemble-predict      Run ensemble model predictions"
+	@echo "  ensemble-train        Train ensemble models"
+	@echo "  gen-precursor         Generate precursor training data"
+	@echo "  hyperparameter-search Run hyperparameter optimization"
+	@echo "  merge-sessions        Merge multiple session CSVs into one"
+	@echo "  model-comparison      Compare multiple models side-by-side"
+	@echo "  plot-session          Plot vibration data from a session"
+	@echo "  reset                 Reset pipeline state and caches"
+	@echo "  run-pipeline          Run full training pipeline once"
+	@echo "  send-alert            Send test alert (Slack/email)"
+	@echo "  simulate-anomaly      Simulate anomaly event for testing"
+	@echo "  threshold-optimize    Optimize classification thresholds"
+	@echo "  train-autoencoder     Train autoencoder model"
+	@echo "  training-smoke        Run smoke test on training pipeline"
+	@echo "  visualize-features    Visualize extracted features"
+	@echo "  visualize-latent      Visualize autoencoder latent space"
+	@echo "  field-report          Generate field data report"
+	@echo "  calibrate             Interactive device calibration"
 	@echo ""
 
 
@@ -440,3 +474,282 @@ site-summary:
 		--data-dir ./data/field \
 		$(if $(SITE_NAME),--site-name "$(SITE_NAME)",) \
 		$(if $(OUTPUT),--output "$(OUTPUT)",)
+
+# ---------------------------------------------------------------------------
+# GPS & Export targets
+# ---------------------------------------------------------------------------
+
+export-gps:
+	@echo "==> Exporting GPS track from field sessions..."
+	python scripts/export_gps_track.py \
+		--data-dir ./data/field \
+		--format $(or $(FORMAT),gpx) \
+		$(if $(OUTPUT),--output "$(OUTPUT)",)
+
+export-parquet:
+	@echo "==> Exporting field CSVs to Parquet format..."
+	@if [ -f scripts/export_parquet.py ]; then \
+		python scripts/export_parquet.py --data-dir ./data/field; \
+	else \
+		echo "WARNING: scripts/export_parquet.py not found"; \
+	fi
+
+# ---------------------------------------------------------------------------
+# Feature Analysis targets
+# ---------------------------------------------------------------------------
+
+feature-importance:
+	@echo "==> Analyzing model feature importance..."
+	@if [ -f scripts/feature_importance.py ]; then \
+		python scripts/feature_importance.py \
+			--assets-dir app/assets/ml \
+			$(if $(OUTPUT),--output "$(OUTPUT)",); \
+	else \
+		echo "WARNING: scripts/feature_importance.py not found"; \
+	fi
+
+feature-selection:
+	@echo "==> Running automated feature selection..."
+	@if [ -f scripts/feature_selection.py ]; then \
+		python scripts/feature_selection.py --data-dir ./data/field; \
+	else \
+		echo "WARNING: scripts/feature_selection.py not found"; \
+	fi
+
+evaluate:
+	@echo "==> Running model evaluation suite..."
+	@if [ -f scripts/evaluate_models.py ]; then \
+		python scripts/evaluate_models.py \
+			--assets-dir app/assets/ml \
+			--data-dir ./data/field; \
+	else \
+		echo "WARNING: scripts/evaluate_models.py not found"; \
+	fi
+
+# ---------------------------------------------------------------------------
+# Statistics & Aggregation targets
+# ---------------------------------------------------------------------------
+
+aggregate-stats:
+	@echo "==> Aggregating statistics from sessions..."
+	@if [ -f scripts/aggregate_stats.py ]; then \
+		python scripts/aggregate_stats.py --data-dir ./data/field; \
+	else \
+		echo "WARNING: scripts/aggregate_stats.py not found"; \
+	fi
+
+anomaly-timeline:
+	@echo "==> Generating anomaly event timeline..."
+	@if [ -f scripts/anomaly_timeline.py ]; then \
+		python scripts/anomaly_timeline.py --data-dir ./data/field \
+			$(if $(OUTPUT),--output "$(OUTPUT)",); \
+	else \
+		echo "WARNING: scripts/anomaly_timeline.py not found"; \
+	fi
+
+compare-sessions:
+	@echo "==> Comparing two field sessions..."
+	@if [ -z "$(SESSION1)" ] || [ -z "$(SESSION2)" ]; then \
+		echo "Usage: make compare-sessions SESSION1=path/to/s1.csv SESSION2=path/to/s2.csv"; exit 1; \
+	fi
+	@if [ -f scripts/compare_sessions.py ]; then \
+		python scripts/compare_sessions.py "$(SESSION1)" "$(SESSION2)" \
+			$(if $(OUTPUT),--output "$(OUTPUT)",); \
+	else \
+		echo "WARNING: scripts/compare_sessions.py not found"; \
+	fi
+
+cross-device-eval:
+	@echo "==> Running cross-device evaluation..."
+	@if [ -f scripts/cross_device_eval.py ]; then \
+		python scripts/cross_device_eval.py --data-dir ./data/field \
+			$(if $(OUTPUT),--output "$(OUTPUT)",); \
+	else \
+		echo "WARNING: scripts/cross_device_eval.py not found"; \
+	fi
+
+merge-sessions:
+	@echo "==> Merging multiple session CSVs..."
+	@if [ -z "$(SESSIONS)" ]; then \
+		echo "Usage: make merge-sessions SESSIONS='path1.csv path2.csv path3.csv'"; exit 1; \
+	fi
+	@if [ -f scripts/merge_sessions.py ]; then \
+		python scripts/merge_sessions.py $(SESSIONS) \
+			$(if $(OUTPUT),--output "$(OUTPUT)",); \
+	else \
+		echo "WARNING: scripts/merge_sessions.py not found"; \
+	fi
+
+# ---------------------------------------------------------------------------
+# Model Training & Ensemble targets
+# ---------------------------------------------------------------------------
+
+ensemble-predict:
+	@echo "==> Running ensemble model predictions..."
+	@if [ -f scripts/ensemble_predict.py ]; then \
+		python scripts/ensemble_predict.py \
+			--assets-dir app/assets/ml \
+			$(if $(DATA),--data "$(DATA)",) \
+			$(if $(OUTPUT),--output "$(OUTPUT)",); \
+	else \
+		echo "WARNING: scripts/ensemble_predict.py not found"; \
+	fi
+
+ensemble-train:
+	@echo "==> Training ensemble models..."
+	@if [ -f scripts/ensemble_train.py ]; then \
+		python scripts/ensemble_train.py --data-dir ./data/field \
+			$(if $(OUTPUT_DIR),--output-dir "$(OUTPUT_DIR)",); \
+	else \
+		echo "WARNING: scripts/ensemble_train.py not found"; \
+	fi
+
+gen-precursor:
+	@echo "==> Generating precursor training data..."
+	@if [ -f scripts/generate_precursor_data.py ]; then \
+		python scripts/generate_precursor_data.py --output ./data/field/precursor_training.csv; \
+	else \
+		echo "WARNING: scripts/generate_precursor_data.py not found"; \
+	fi
+
+hyperparameter-search:
+	@echo "==> Running hyperparameter optimization..."
+	@if [ -f scripts/hyperparameter_search.py ]; then \
+		python scripts/hyperparameter_search.py --data-dir ./data/field \
+			$(if $(N_TRIALS),--n-trials "$(N_TRIALS)",) \
+			$(if $(OUTPUT),--output "$(OUTPUT)",); \
+	else \
+		echo "WARNING: scripts/hyperparameter_search.py not found"; \
+	fi
+
+model-comparison:
+	@echo "==> Comparing multiple models..."
+	@if [ -f scripts/model_comparison.py ]; then \
+		python scripts/model_comparison.py --assets-dir app/assets/ml \
+			$(if $(OUTPUT),--output "$(OUTPUT)",); \
+	else \
+		echo "WARNING: scripts/model_comparison.py not found"; \
+	fi
+
+train-autoencoder:
+	@echo "==> Training autoencoder model..."
+	@if [ -f scripts/train_autoencoder.py ]; then \
+		python scripts/train_autoencoder.py --data-dir ./data/field \
+			$(if $(OUTPUT),--output "$(OUTPUT)",); \
+	else \
+		echo "WARNING: scripts/train_autoencoder.py not found"; \
+	fi
+
+threshold-optimize:
+	@echo "==> Optimizing classification thresholds..."
+	@if [ -f scripts/threshold_optimizer.py ]; then \
+		python scripts/threshold_optimizer.py --data-dir ./data/field \
+			$(if $(OUTPUT),--output "$(OUTPUT)",); \
+	else \
+		echo "WARNING: scripts/threshold_optimizer.py not found"; \
+	fi
+
+# ---------------------------------------------------------------------------
+# Visualization & Plotting targets
+# ---------------------------------------------------------------------------
+
+plot-session:
+	@echo "==> Plotting vibration data from session..."
+	@if [ -z "$(SESSION_CSV)" ]; then \
+		echo "Usage: make plot-session SESSION_CSV=path/to/session.csv"; exit 1; \
+	fi
+	@if [ -f scripts/plot_session.py ]; then \
+		python scripts/plot_session.py "$(SESSION_CSV)" \
+			$(if $(OUTPUT),--output "$(OUTPUT)",); \
+	else \
+		echo "WARNING: scripts/plot_session.py not found"; \
+	fi
+
+visualize-features:
+	@echo "==> Visualizing extracted features..."
+	@if [ -f scripts/visualize_features.py ]; then \
+		python scripts/visualize_features.py --data-dir ./data/field \
+			$(if $(OUTPUT),--output "$(OUTPUT)",); \
+	else \
+		echo "WARNING: scripts/visualize_features.py not found"; \
+	fi
+
+visualize-latent:
+	@echo "==> Visualizing autoencoder latent space..."
+	@if [ -f scripts/visualize_latent_space.py ]; then \
+		python scripts/visualize_latent_space.py \
+			--assets-dir app/assets/ml \
+			$(if $(DATA_DIR),--data-dir "$(DATA_DIR)",) \
+			$(if $(OUTPUT),--output "$(OUTPUT)",); \
+	else \
+		echo "WARNING: scripts/visualize_latent_space.py not found"; \
+	fi
+
+# ---------------------------------------------------------------------------
+# Pipeline Management targets
+# ---------------------------------------------------------------------------
+
+run-pipeline:
+	@echo "==> Running full ML training pipeline..."
+	@if [ -f scripts/run_pipeline.py ]; then \
+		python scripts/run_pipeline.py; \
+	else \
+		echo "WARNING: scripts/run_pipeline.py not found"; \
+	fi
+
+reset:
+	@echo "==> Resetting pipeline state..."
+	@if [ -f scripts/reset_pipeline.py ]; then \
+		python scripts/reset_pipeline.py; \
+	else \
+		echo "WARNING: scripts/reset_pipeline.py not found"; \
+	fi
+
+# ---------------------------------------------------------------------------
+# Utilities & Testing targets
+# ---------------------------------------------------------------------------
+
+send-alert:
+	@echo "==> Sending test alert..."
+	@if [ -f scripts/send_alert.py ]; then \
+		python scripts/send_alert.py \
+			$(if $(CHANNEL),--channel "$(CHANNEL)",) \
+			$(if $(MESSAGE),--message "$(MESSAGE)",); \
+	else \
+		echo "WARNING: scripts/send_alert.py not found"; \
+	fi
+
+simulate-anomaly:
+	@echo "==> Simulating anomaly event..."
+	@if [ -f scripts/simulate_anomaly.py ]; then \
+		python scripts/simulate_anomaly.py \
+			$(if $(ANOMALY_TYPE),--type "$(ANOMALY_TYPE)",) \
+			$(if $(DURATION),--duration "$(DURATION)",); \
+	else \
+		echo "WARNING: scripts/simulate_anomaly.py not found"; \
+	fi
+
+training-smoke:
+	@echo "==> Running training pipeline smoke test..."
+	@if [ -f scripts/training_smoke_test.py ]; then \
+		python scripts/training_smoke_test.py; \
+	else \
+		echo "WARNING: scripts/training_smoke_test.py not found"; \
+	fi
+
+field-report:
+	@echo "==> Generating field data report..."
+	@if [ -f scripts/field_report.py ]; then \
+		python scripts/field_report.py --data-dir ./data/field \
+			$(if $(OUTPUT),--output "$(OUTPUT)",); \
+	else \
+		echo "WARNING: scripts/field_report.py not found"; \
+	fi
+
+calibrate:
+	@echo "==> Starting interactive device calibration..."
+	@if [ -f scripts/calibrate.py ]; then \
+		python scripts/calibrate.py; \
+	else \
+		echo "WARNING: scripts/calibrate.py not found"; \
+	fi
